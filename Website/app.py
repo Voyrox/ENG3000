@@ -1,22 +1,57 @@
+import asyncio
+from collections import deque
 import json
 import socket
 import threading
-from flask import Flask, Response, jsonify, render_template
+import time
+from flask import Flask, jsonify, render_template
+from websockets.asyncio.server import broadcast, serve
 
 app = Flask(__name__, template_folder="template", static_folder="public", static_url_path="/static")
 
 TCP_HOST = "0.0.0.0"
 TCP_PORT = 3000
+WS_HOST = "0.0.0.0"
+WS_PORT = 8765
+NODE_STALE_SECONDS = 5
+RPS_WINDOW_SECONDS = 1
 
 state_lock = threading.Lock()
-state_condition = threading.Condition(state_lock)
 next_node_id = 1
 nodes = {}
+BROWSER_CONNECTIONS = set()
+WS_LOOP = None
+
+
+def snapshot_nodes():
+    with state_lock:
+        return [
+            {
+                "id": node["id"],
+                "address": node["address"],
+                "latest": node["latest"],
+                "online": node["online"],
+                "last_seen": node["last_seen"],
+                "rps": node["rps"],
+            }
+            for node in nodes.values()
+        ]
+
+
+async def broadcast_nodes():
+    message = json.dumps({"type": "nodes:update", "nodes": snapshot_nodes()})
+    if BROWSER_CONNECTIONS:
+        broadcast(BROWSER_CONNECTIONS.copy(), message)
+
+
+def schedule_broadcast_nodes():
+    if WS_LOOP is not None and WS_LOOP.is_running():
+        asyncio.run_coroutine_threadsafe(broadcast_nodes(), WS_LOOP)
 
 
 def register_node(address):
     global next_node_id
-    with state_condition:
+    with state_lock:
         node_id = next_node_id
         next_node_id += 1
         nodes[node_id] = {
@@ -24,18 +59,52 @@ def register_node(address):
             "address": f"{address[0]}:{address[1]}",
             "latest": None,
             "online": True,
+            "last_seen": time.monotonic(),
+            "samples": deque(),
+            "rps": 0.0,
         }
-        state_condition.notify_all()
-        return node_id
+    schedule_broadcast_nodes()
+    return node_id
 
 
 def update_node(node_id, message):
-    with state_condition:
+    with state_lock:
         node = nodes.get(node_id)
         if node is None:
             return
+        now = time.monotonic()
         node["latest"] = message
-        state_condition.notify_all()
+        node["last_seen"] = now
+        samples = node["samples"]
+        samples.append(now)
+        cutoff = now - RPS_WINDOW_SECONDS
+        while samples and samples[0] < cutoff:
+            samples.popleft()
+        node["rps"] = float(len(samples)) / float(RPS_WINDOW_SECONDS)
+    schedule_broadcast_nodes()
+
+
+def remove_node(node_id):
+    with state_lock:
+        if node_id not in nodes:
+            return
+        del nodes[node_id]
+    schedule_broadcast_nodes()
+
+
+def cleanup_stale_nodes():
+    while True:
+        time.sleep(1)
+        cutoff = time.monotonic() - NODE_STALE_SECONDS
+        stale_ids = []
+        with state_lock:
+            for node_id, node in list(nodes.items()):
+                if node.get("last_seen", 0) < cutoff:
+                    stale_ids.append(node_id)
+
+        for node_id in stale_ids:
+            print(f"Node {node_id} timed out")
+            remove_node(node_id)
 
 
 def handle_node_connection(conn, address):
@@ -53,10 +122,7 @@ def handle_node_connection(conn, address):
     except OSError as exc:
         print(f"Node {node_id} disconnected: {exc}")
     finally:
-        with state_condition:
-            if node_id in nodes:
-                nodes[node_id]["online"] = False
-                state_condition.notify_all()
+        remove_node(node_id)
         conn.close()
 
 
@@ -73,6 +139,41 @@ def tcp_server():
         thread.start()
 
 
+async def browser_handler(websocket):
+    BROWSER_CONNECTIONS.add(websocket)
+    try:
+        await websocket.send(json.dumps({"type": "nodes:update", "nodes": snapshot_nodes()}))
+        async for message in websocket:
+            try:
+                event = json.loads(message)
+            except json.JSONDecodeError:
+                continue
+
+            if event.get("type") == "menu:select":
+                option = event.get("option", "unknown")
+                print(f"Menu selection received: {option}")
+                status = json.dumps({"type": "menu:status", "message": f"Selected: {option}"})
+                broadcast(BROWSER_CONNECTIONS.copy(), status)
+    finally:
+        BROWSER_CONNECTIONS.discard(websocket)
+
+
+async def websocket_handler(websocket):
+    match websocket.request.path:
+        case "/browser":
+            await browser_handler(websocket)
+        case _:
+            await websocket.close()
+
+
+async def websocket_server():
+    global WS_LOOP
+    WS_LOOP = asyncio.get_running_loop()
+    async with serve(websocket_handler, WS_HOST, WS_PORT, ping_interval=2, ping_timeout=2):
+        print(f"WebSocket server listening on {WS_HOST}:{WS_PORT}")
+        await asyncio.Future()
+
+
 @app.route("/")
 def home():
     return render_template("index.html")
@@ -80,8 +181,7 @@ def home():
 
 @app.route("/api/nodes")
 def api_nodes():
-    with state_lock:
-        return jsonify(list(nodes.values()))
+    return jsonify(snapshot_nodes())
 
 
 @app.route("/api/nodes/<int:node_id>")
@@ -90,26 +190,18 @@ def api_node(node_id):
         node = nodes.get(node_id)
         if node is None:
             return jsonify({"error": "unknown node"}), 404
-        return jsonify(node)
-
-
-@app.route("/stream")
-def stream():
-    def event_stream():
-        last_snapshot = None
-        while True:
-            with state_condition:
-                state_condition.wait(timeout=2)
-                snapshot = json.dumps(list(nodes.values()))
-            if snapshot != last_snapshot:
-                last_snapshot = snapshot
-                yield f"data: {snapshot}\n\n"
-            else:
-                yield ": keepalive\n\n"
-
-    return Response(event_stream(), mimetype="text/event-stream")
+        return jsonify({
+            "id": node["id"],
+            "address": node["address"],
+            "latest": node["latest"],
+            "online": node["online"],
+            "last_seen": node["last_seen"],
+            "rps": node["rps"],
+        })
 
 
 if __name__ == '__main__':
+    threading.Thread(target=lambda: asyncio.run(websocket_server()), daemon=True).start()
     threading.Thread(target=tcp_server, daemon=True).start()
+    threading.Thread(target=cleanup_stale_nodes, daemon=True).start()
     app.run(debug=True, host="0.0.0.0", threaded=True, use_reloader=False)

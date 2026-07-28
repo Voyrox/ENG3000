@@ -3,16 +3,10 @@ const ctx = c.getContext("2d");
 
 const nodes = new Map();
 let viewport = { width: 0, height: 0, dpr: 1 };
-
-function getOnlineCount() {
-  let count = 0;
-  for (const node of nodes.values()) {
-    if (node.online) {
-      count += 1;
-    }
-  }
-  return count;
-}
+const wsProtocol = location.protocol === "https:" ? "wss" : "ws";
+const wsUrl = `${wsProtocol}://${location.hostname}:8765/browser`;
+let socket = null;
+let reconnectTimer = null;
 
 function resizeCanvas() {
   const dpr = window.devicePixelRatio || 1;
@@ -34,28 +28,55 @@ function draw() {
   ctx.clearRect(0, 0, c.width, c.height);
   ctx.setTransform(viewport.dpr, 0, 0, viewport.dpr, 0, 0);
 
-  const onlineCount = getOnlineCount();
-  const offlineCount = nodes.size - onlineCount;
-  const statusText = onlineCount > 0
-    ? `Nodes connected: ${onlineCount}${offlineCount > 0 ? ` | Offline: ${offlineCount}` : ""}`
+  const statusText = nodes.size > 0
+    ? `Node count: ${nodes.size} | Total RPS: ${Array.from(nodes.values()).reduce((sum, node) => sum + (node.rps || 0), 0).toFixed(1)}`
     : "Waiting for ESP32 data...";
 
-  renderMenu(ctx, c, statusText);
+  renderMenu(ctx, c, statusText, Array.from(nodes.values()));
 }
 
-const liveStream = new EventSource("/stream");
-liveStream.onmessage = (event) => {
-  const payload = JSON.parse(event.data);
-  nodes.clear();
-  payload.forEach((node) => nodes.set(node.id, node));
+function connectSocket() {
+  socket = new WebSocket(wsUrl);
 
-  console.log("Received payload:", payload);
-  draw();
-};
+  socket.addEventListener("open", () => {
+    console.log("WebSocket connected");
+  });
 
-liveStream.onerror = () => {
-  console.error("Error connecting to stream. Retrying...");
-};
+  socket.addEventListener("message", (event) => {
+    const payload = JSON.parse(event.data);
+
+    if (payload.type === "nodes:update") {
+      nodes.clear();
+      payload.nodes.forEach((node) => nodes.set(node.id, node));
+      console.log("Received payload:", payload.nodes);
+      draw();
+    } else if (payload.type === "menu:status") {
+      console.log(payload.message);
+    }
+  });
+
+  socket.addEventListener("close", () => {
+    console.error("WebSocket closed. Reconnecting...");
+    if (reconnectTimer === null) {
+      reconnectTimer = window.setTimeout(() => {
+        reconnectTimer = null;
+        connectSocket();
+      }, 1000);
+    }
+  });
+
+  socket.addEventListener("error", () => {
+    console.error("WebSocket error");
+  });
+}
+
+c.addEventListener("click", (event) => {
+  const choice = window.getMenuButtonAtPoint(c, event.offsetX, event.offsetY);
+  if (choice && socket && socket.readyState === WebSocket.OPEN) {
+    socket.send(JSON.stringify({ type: "menu:select", option: choice }));
+  }
+});
 
 window.addEventListener("resize", resizeCanvas);
 resizeCanvas();
+connectSocket();

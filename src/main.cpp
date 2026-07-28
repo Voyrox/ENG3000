@@ -7,8 +7,8 @@ constexpr char WIFI_PASSWORD[] = "1234567890";
 
 constexpr char SERVER_IP[] = "192.168.1.25";
 constexpr uint16_t SERVER_PORT = 3000;
+
 int nodeID = -1;
-unsigned long lastSendMillis = 0;
 unsigned long lastWifiAttemptMillis = 0;
 constexpr unsigned long WIFI_RETRY_INTERVAL_MS = 10000;
 bool wifiConnected = false;
@@ -22,15 +22,12 @@ Ultrasonic center(19, 21, "Center", 50.0f);
 
 void connectServer() {
     nodeID = -1;
-    while (!client.connected()) {
+    client.stop();
+    while (!client.connect(SERVER_IP, SERVER_PORT)) {
         Serial.println("Connecting to TCP server...");
-
-        if (!client.connect(SERVER_IP, SERVER_PORT)) {
-            delay(1000);
-        }
+        delay(1000);
     }
 
-    client.setNoDelay(true);
     Serial.println("TCP connected");
     while (nodeID < 0) {
         if (client.available()) {
@@ -39,10 +36,12 @@ void connectServer() {
             Serial.print("Assigned ID: ");
             Serial.println(nodeID);
         } else {
-            delay(50);
+            delay(10);
         }
     }
-    Serial.println("ESP32 Node is initialized");
+    if (nodeID >= 0) {
+        Serial.println("ESP32 Node is initialized");
+    }
 }
 
 void connectWiFi() {
@@ -97,8 +96,6 @@ void connectWiFi() {
 void sendData(const String& data) {
     if (client.connected()) {
         client.println(data);
-    } else {
-        Serial.println("Not connected to server. Cannot send data.");
     }
 }
 
@@ -134,7 +131,6 @@ void loop() {
     }
 
     if (wifiConnected && !client.connected()) {
-        client.stop();
         connectServer();
     }
 
