@@ -1,5 +1,6 @@
 #include <Arduino.h>
 #include <WiFi.h>
+#include "ultrasonicSensor.cpp"
 
 constexpr char WIFI_SSID[] = "Group_1_ENGG3000";
 constexpr char WIFI_PASSWORD[] = "1234567890";
@@ -8,6 +9,11 @@ constexpr uint16_t SERVER_PORT = 3000;
 int nodeID = -1;
 
 WiFiClient client;
+
+const int UltrasonicCount = 3;
+const Ultrasonic left(2, 4, "Left", 50.0f);
+const Ultrasonic right(5, 18, "Right", 50.0f);
+const Ultrasonic center(19, 21, "Center", 50.0f);
 
 void connectServer() {
     while (!client.connected()) {
