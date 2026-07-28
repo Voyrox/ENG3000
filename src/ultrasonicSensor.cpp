@@ -33,12 +33,12 @@ class Ultrasonic {
 
       avg = (arr[0] + arr[1] + arr[2]) / 3.0f;
 
-      Serial.print(nametag);
-      Serial.print(", Distance = ");
-      Serial.print(distance);
-      Serial.print(" cm, Average = ");
-      Serial.print(avg);
-      Serial.println(" cm");
+      //Serial.print(nametag);
+      //Serial.print(", Distance = ");
+      //Serial.print(distance);
+      //Serial.print(" cm, Average = ");
+      //Serial.print(avg);
+      //Serial.println(" cm");
       blinkPrevMillis = currMillis;
       stage = 0;
       }

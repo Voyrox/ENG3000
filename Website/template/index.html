@@ -1,11 +1,30 @@
 <html>
+
 <head>
     <title>ENG3000 Website</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <script defer src="/static/displays/menu.js"></script>
     <script defer src="/static/canvas.js"></script>
 </head>
+
 <body>
-    <h1>ENG3000 Live Nodes</h1>
-    <pre id="status">Waiting for ESP32 data...</pre>
-    <canvas id="game" width="800" height="400"></canvas>
+    <canvas id="game"></canvas>
 </body>
+<style>
+    html,
+    body {
+        margin: 0;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+    }
+
+    canvas {
+        position: absolute;
+        top: 0;
+        left: 0;
+        display: block;
+    }
+</style>
+
 </html>

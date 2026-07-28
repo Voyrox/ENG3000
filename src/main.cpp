@@ -6,7 +6,7 @@ constexpr char WIFI_SSID[] = "Group_1_ENGG3000";
 constexpr char WIFI_PASSWORD[] = "1234567890";
 
 constexpr char SERVER_IP[] = "192.168.1.25";
-constexpr uint16_t SERVER_PORT = 5000;
+constexpr uint16_t SERVER_PORT = 3000;
 int nodeID = -1;
 unsigned long lastSendMillis = 0;
 unsigned long lastWifiAttemptMillis = 0;
@@ -97,8 +97,6 @@ void connectWiFi() {
 void sendData(const String& data) {
     if (client.connected()) {
         client.println(data);
-        Serial.print("Sent: ");
-        Serial.println(data);
     } else {
         Serial.println("Not connected to server. Cannot send data.");
     }
@@ -138,11 +136,9 @@ void loop() {
     if (wifiConnected && !client.connected()) {
         client.stop();
         connectServer();
-        lastSendMillis = 0;
     }
 
-    if (wifiConnected && client.connected() && millis() - lastSendMillis >= 1000) {
-        lastSendMillis = millis();
+    if (wifiConnected && client.connected()) {
         sendSensorSnapshot();
     }
 }

@@ -16,7 +16,7 @@ nodes = {}
 
 def register_node(address):
     global next_node_id
-    with state_lock:
+    with state_condition:
         node_id = next_node_id
         next_node_id += 1
         nodes[node_id] = {
@@ -25,6 +25,7 @@ def register_node(address):
             "latest": None,
             "online": True,
         }
+        state_condition.notify_all()
         return node_id
 
 
