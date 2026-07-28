@@ -7,6 +7,7 @@ const wsProtocol = location.protocol === "https:" ? "wss" : "ws";
 const wsUrl = `${wsProtocol}://${location.hostname}:8765/browser`;
 let socket = null;
 let reconnectTimer = null;
+let screen = "menu";
 
 function resizeCanvas() {
   const dpr = window.devicePixelRatio || 1;
@@ -27,6 +28,11 @@ function draw() {
   ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.clearRect(0, 0, c.width, c.height);
   ctx.setTransform(viewport.dpr, 0, 0, viewport.dpr, 0, 0);
+
+  if (screen === "celebration") {
+    renderCalibrate(ctx, c);
+    return;
+  }
 
   const statusText = nodes.size > 0
     ? `Node count: ${nodes.size} | Total RPS: ${Array.from(nodes.values()).reduce((sum, node) => sum + (node.rps || 0), 0).toFixed(1)}`
@@ -72,6 +78,12 @@ function connectSocket() {
 
 c.addEventListener("click", (event) => {
   const choice = window.getMenuButtonAtPoint(c, event.offsetX, event.offsetY);
+  if (choice === "Play") {
+    screen = "celebration";
+    draw();
+    return;
+  }
+
   if (choice && socket && socket.readyState === WebSocket.OPEN) {
     socket.send(JSON.stringify({ type: "menu:select", option: choice }));
   }

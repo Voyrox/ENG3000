@@ -117,7 +117,7 @@ def handle_node_connection(conn, address):
                 message = line.strip()
                 if not message:
                     continue
-                print(f"Node {node_id}: {message}")
+                #print(f"Node {node_id}: {message}")
                 update_node(node_id, message)
     except OSError as exc:
         print(f"Node {node_id} disconnected: {exc}")
