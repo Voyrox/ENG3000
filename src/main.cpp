@@ -4,10 +4,14 @@
 
 constexpr char WIFI_SSID[] = "Group_1_ENGG3000";
 constexpr char WIFI_PASSWORD[] = "1234567890";
-constexpr char SERVER_IP[] = "192.168.1.100";
-constexpr uint16_t SERVER_PORT = 3000;
+
+constexpr char SERVER_IP[] = "192.168.1.25";
+constexpr uint16_t SERVER_PORT = 5000;
 int nodeID = -1;
 unsigned long lastSendMillis = 0;
+unsigned long lastWifiAttemptMillis = 0;
+constexpr unsigned long WIFI_RETRY_INTERVAL_MS = 10000;
+bool wifiConnected = false;
 
 WiFiClient client;
 
@@ -42,15 +46,49 @@ void connectServer() {
 }
 
 void connectWiFi() {
+    wifiConnected = false;
+    WiFi.mode(WIFI_OFF);
+    delay(200);
     WiFi.mode(WIFI_STA);
     WiFi.setSleep(false);
-    WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+    WiFi.persistent(false);
+    delay(200);
+    WiFi.disconnect(true, true);
+    delay(200);
 
-    while (WiFi.status() != WL_CONNECTED) {
+    int32_t targetIndex = -1;
+    int32_t networkCount = WiFi.scanNetworks();
+    if (networkCount > 0) {
+        for (int i = 0; i < networkCount; i++) {
+            if (WiFi.SSID(i) == WIFI_SSID) {
+                targetIndex = i;
+                break;
+            }
+        }
+    }
+
+    if (targetIndex >= 0) {
+        Serial.print("Connecting to SSID on channel ");
+        Serial.println(WiFi.channel(targetIndex));
+        WiFi.begin(WIFI_SSID, WIFI_PASSWORD, WiFi.channel(targetIndex), WiFi.BSSID(targetIndex), true);
+    } else {
+        Serial.println("Target SSID not found in scan, using generic connect");
+        WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+    }
+
+    unsigned long start = millis();
+    while (WiFi.status() != WL_CONNECTED && millis() - start < 15000) {
         delay(500);
         Serial.println("Connecting to Wi-Fi...");
     }
 
+    if (WiFi.status() != WL_CONNECTED) {
+        Serial.print("Wi-Fi failed, status=");
+        Serial.println((int)WiFi.status());
+        return;
+    }
+
+    wifiConnected = true;
     Serial.print("Connected. IP: ");
     Serial.println(WiFi.localIP());
     connectServer();
@@ -91,17 +129,19 @@ void setup() {
 }
 
 void loop() {
-    if (WiFi.status() != WL_CONNECTED) {
+    if (WiFi.status() != WL_CONNECTED && millis() - lastWifiAttemptMillis >= WIFI_RETRY_INTERVAL_MS) {
+        lastWifiAttemptMillis = millis();
+        Serial.println("Retrying Wi-Fi connect...");
         connectWiFi();
     }
 
-    if (!client.connected()) {
+    if (wifiConnected && !client.connected()) {
         client.stop();
         connectServer();
         lastSendMillis = 0;
     }
 
-    if (millis() - lastSendMillis >= 1000) {
+    if (wifiConnected && client.connected() && millis() - lastSendMillis >= 1000) {
         lastSendMillis = millis();
         sendSensorSnapshot();
     }

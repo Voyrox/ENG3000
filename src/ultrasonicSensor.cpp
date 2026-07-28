@@ -22,11 +22,9 @@ class Ultrasonic {
       digitalWrite(trigPin, LOW);
       stage = 1;
     } else if (stage == 1 && currMillis - blinkPrevMillis >= blinkDuration + 2){
-      // delayMicroseconds(2);
       digitalWrite(trigPin, HIGH);
       stage = 2;
     } else if(stage == 2 && currMillis - blinkPrevMillis >= blinkDuration + 12){
-      // delayMicroseconds(10);
       digitalWrite(trigPin, LOW);
       float duration = pulseIn(echoPin, HIGH);
       float distance = (0.0343f * duration) / 2.0f;
@@ -44,7 +42,6 @@ class Ultrasonic {
       blinkPrevMillis = currMillis;
       stage = 0;
       }
-      // delay(500);
     if(avg <= safeDistance) return true;
     else return false;
   }
