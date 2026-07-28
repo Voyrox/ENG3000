@@ -54,6 +54,9 @@ class Ultrasonic {
     echoPin = ePin;
     nametag = name;
     safeDistance = sDist;
+    pinMode(trigPin, OUTPUT);
+    pinMode(echoPin, INPUT);
+    digitalWrite(trigPin, LOW);
     avg = (arr[0] + arr[1] + arr[2]) / 3.0f;
   }
 };

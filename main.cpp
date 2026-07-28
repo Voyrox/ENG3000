@@ -7,15 +7,17 @@ constexpr char WIFI_PASSWORD[] = "1234567890";
 constexpr char SERVER_IP[] = "192.168.1.100";
 constexpr uint16_t SERVER_PORT = 3000;
 int nodeID = -1;
+unsigned long lastSendMillis = 0;
 
 WiFiClient client;
 
 const int UltrasonicCount = 3;
-const Ultrasonic left(2, 4, "Left", 50.0f);
-const Ultrasonic right(5, 18, "Right", 50.0f);
-const Ultrasonic center(19, 21, "Center", 50.0f);
+Ultrasonic left(2, 4, "Left", 50.0f);
+Ultrasonic right(5, 18, "Right", 50.0f);
+Ultrasonic center(19, 21, "Center", 50.0f);
 
 void connectServer() {
+    nodeID = -1;
     while (!client.connected()) {
         Serial.println("Connecting to TCP server...");
 
@@ -26,11 +28,15 @@ void connectServer() {
 
     client.setNoDelay(true);
     Serial.println("TCP connected");
-    if (client.available()) {
-        String idStr = client.readStringUntil('\n');
-        nodeID = idStr.toInt();
-        Serial.print("Assigned ID: ");
-        Serial.println(nodeID);
+    while (nodeID < 0) {
+        if (client.available()) {
+            String idStr = client.readStringUntil('\n');
+            nodeID = idStr.toInt();
+            Serial.print("Assigned ID: ");
+            Serial.println(nodeID);
+        } else {
+            delay(50);
+        }
     }
     Serial.println("ESP32 Node is initialized");
 }
@@ -60,6 +66,24 @@ void sendData(const String& data) {
     }
 }
 
+void sendSensorSnapshot() {
+    bool leftDetected = left.detectBoat();
+    bool rightDetected = right.detectBoat();
+    bool centerDetected = center.detectBoat();
+
+    String payload = "{";
+    payload += "\"nodeId\":" + String(nodeID);
+    payload += ",\"leftAvg\":" + String(left.avg, 2);
+    payload += ",\"rightAvg\":" + String(right.avg, 2);
+    payload += ",\"centerAvg\":" + String(center.avg, 2);
+    payload += ",\"leftDetected\":" + String(leftDetected ? "true" : "false");
+    payload += ",\"rightDetected\":" + String(rightDetected ? "true" : "false");
+    payload += ",\"centerDetected\":" + String(centerDetected ? "true" : "false");
+    payload += "}";
+
+    sendData(payload);
+}
+
 void setup() {
   Serial.begin(115200);
   Serial.println("ESP32 Node is starting...");
@@ -74,5 +98,11 @@ void loop() {
     if (!client.connected()) {
         client.stop();
         connectServer();
+        lastSendMillis = 0;
+    }
+
+    if (millis() - lastSendMillis >= 1000) {
+        lastSendMillis = millis();
+        sendSensorSnapshot();
     }
 }
