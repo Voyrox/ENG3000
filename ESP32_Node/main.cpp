@@ -43,6 +43,12 @@ void setup() {
 }
 
 void loop() {
-  Serial.println("ESP32 Node is running...");
-  delay(1000); // Delay for 1 second
+    if (WiFi.status() != WL_CONNECTED) {
+        connectWiFi();
+    }
+
+    if (!client.connected()) {
+        client.stop();
+        connectServer();
+    }
 }
