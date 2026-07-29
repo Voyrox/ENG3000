@@ -35,49 +35,29 @@ window.renderCalibrate = function renderCalibrate(ctx, canvas) {
   ctx.font = `bold ${Math.max(18, Math.min(32, width * 0.03))}px monospace`;
   ctx.fillText("Calibration Mode", centerX, Math.max(54, height * 0.09));
 
-  const sensorXs = [centerX - laptopW * 0.5, centerX, centerX + laptopW * 0.5];
-  const gridSize = Math.min(width * 0.84, laptopW * 1.5);
-  const cellSize = gridSize / 3;
-  const gridX = centerX - gridSize / 2;
-  const gridY = Math.max(12, sensorY - gridSize - 56 - sensorLift);
+  const sensorX = centerX;
 
-  ctx.strokeStyle = "#64748b";
-  ctx.lineWidth = 2;
-  for (let row = 0; row < 3; row += 1) {
-    for (let col = 0; col < 3; col += 1) {
-      ctx.strokeRect(gridX + col * cellSize, gridY + row * cellSize, cellSize, cellSize);
-    }
-  }
-
-  sensorXs.forEach((x, index) => {
-    ctx.fillStyle = index === 1 ? "#22c55e" : "#38bdf8";
-    ctx.beginPath();
-    ctx.roundRect(x - sensorSize / 2, sensorY, sensorSize, sensorSize, 6);
-    ctx.fill();
-
-    ctx.fillStyle = "#0f172a";
-    ctx.beginPath();
-    ctx.moveTo(x, sensorY - 10);
-    ctx.lineTo(x - 8, sensorY - 2);
-    ctx.lineTo(x + 8, sensorY - 2);
-    ctx.closePath();
-    ctx.fill();
-
-    ctx.beginPath();
-    ctx.moveTo(x - 8, sensorY - 2);
-    ctx.lineTo(x - 8, sensorY + 8);
-    ctx.lineTo(x + 8, sensorY + 8);
-    ctx.lineTo(x + 8, sensorY - 2);
-    ctx.strokeStyle = "#0f172a";
-    ctx.lineWidth = 2;
-    ctx.stroke();
-  });
+  ctx.fillStyle = "#22c55e";
+  ctx.beginPath();
+  ctx.roundRect(sensorX - sensorSize / 2, sensorY, sensorSize, sensorSize, 6);
+  ctx.fill();
 
   ctx.fillStyle = "#0f172a";
-  ctx.font = `${Math.max(12, Math.min(18, width * 0.016))}px monospace`;
-  ctx.fillText("Sensor 1", sensorXs[0], sensorY + sensorSize + 22);
-  ctx.fillText("Sensor 2", sensorXs[1], sensorY + sensorSize + 22);
-  ctx.fillText("Sensor 3", sensorXs[2], sensorY + sensorSize + 22);
+  ctx.beginPath();
+  ctx.moveTo(sensorX, sensorY - 10);
+  ctx.lineTo(sensorX - 8, sensorY - 2);
+  ctx.lineTo(sensorX + 8, sensorY - 2);
+  ctx.closePath();
+  ctx.fill();
+
+  ctx.beginPath();
+  ctx.moveTo(sensorX - 8, sensorY - 2);
+  ctx.lineTo(sensorX - 8, sensorY + 8);
+  ctx.lineTo(sensorX + 8, sensorY + 8);
+  ctx.lineTo(sensorX + 8, sensorY - 2);
+  ctx.strokeStyle = "#0f172a";
+  ctx.lineWidth = 2;
+  ctx.stroke();
 
   ctx.textAlign = "start";
 };

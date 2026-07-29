@@ -15,10 +15,8 @@ bool wifiConnected = false;
 
 WiFiClient client;
 
-const int UltrasonicCount = 3;
-Ultrasonic left(2, 4, "Left", 50.0f);
-Ultrasonic right(5, 18, "Right", 50.0f);
-Ultrasonic center(19, 21, "Center", 50.0f);
+const int UltrasonicCount = 1;
+Ultrasonic center(5, 18, "Center", 50.0f);
 
 void connectServer() {
     nodeID = -1;
@@ -100,18 +98,12 @@ void sendData(const String& data) {
 }
 
 void sendSensorSnapshot() {
-    bool leftDetected = left.detectBoat();
-    bool rightDetected = right.detectBoat();
-    bool centerDetected = center.detectBoat();
+    bool detected = center.detectBoat();
 
     String payload = "{";
     payload += "\"nodeId\":" + String(nodeID);
-    payload += ",\"leftAvg\":" + String(left.avg, 2);
-    payload += ",\"rightAvg\":" + String(right.avg, 2);
-    payload += ",\"centerAvg\":" + String(center.avg, 2);
-    payload += ",\"leftDetected\":" + String(leftDetected ? "true" : "false");
-    payload += ",\"rightDetected\":" + String(rightDetected ? "true" : "false");
-    payload += ",\"centerDetected\":" + String(centerDetected ? "true" : "false");
+    payload += ",\"avg\":" + String(center.avg, 2);
+    payload += ",\"detected\":" + String(detected ? "true" : "false");
     payload += "}";
 
     sendData(payload);

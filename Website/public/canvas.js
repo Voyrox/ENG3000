@@ -2,6 +2,8 @@ const c = document.getElementById("game");
 const ctx = c.getContext("2d");
 
 const nodes = new Map();
+const logsBuffer = new Map();
+let selectedNodeId = null;
 let viewport = { width: 0, height: 0, dpr: 1 };
 const wsProtocol = location.protocol === "https:" ? "wss" : "ws";
 const wsUrl = `${wsProtocol}://${location.hostname}:8765/browser`;
@@ -34,6 +36,18 @@ function draw() {
     return;
   }
 
+  if (screen === "select_node") {
+    renderNodeSelect(ctx, c, Array.from(nodes.values()));
+    return;
+  }
+
+  if (screen === "logs" && selectedNodeId !== null) {
+    const node = nodes.get(selectedNodeId) || { id: selectedNodeId, address: "unknown" };
+    const entries = logsBuffer.get(selectedNodeId) || [];
+    renderLogs(ctx, c, node, entries);
+    return;
+  }
+
   const statusText = nodes.size > 0
     ? `Node count: ${nodes.size} | Total RPS: ${Array.from(nodes.values()).reduce((sum, node) => sum + (node.rps || 0), 0).toFixed(1)}`
     : "Waiting for ESP32 data...";
@@ -52,9 +66,17 @@ function connectSocket() {
     const payload = JSON.parse(event.data);
 
     if (payload.type === "nodes:update") {
+      payload.nodes.forEach((node) => {
+        if (node.latest) {
+          if (!logsBuffer.has(node.id)) logsBuffer.set(node.id, []);
+          const buf = logsBuffer.get(node.id);
+          buf.push({ time: Date.now(), data: node.latest });
+          if (buf.length > 200) buf.splice(0, buf.length - 200);
+        }
+      });
       nodes.clear();
       payload.nodes.forEach((node) => nodes.set(node.id, node));
-      console.log("Received payload:", payload.nodes);
+      console.log("nodes:update", payload.nodes.map(n => ({ id: n.id, rps: n.rps, latest: n.latest })));
       draw();
     } else if (payload.type === "menu:status") {
       console.log(payload.message);
@@ -77,9 +99,44 @@ function connectSocket() {
 }
 
 c.addEventListener("click", (event) => {
+  if (screen === "select_node") {
+    const hit = window.getNodeSelectButtonAtPoint(c, Array.from(nodes.values()), event.offsetX, event.offsetY);
+    if (hit) {
+      if (hit.type === "back") {
+        screen = "menu";
+      } else if (hit.type === "node") {
+        selectedNodeId = hit.nodeId;
+        screen = "logs";
+      }
+      draw();
+    }
+    return;
+  }
+
+  if (screen === "logs") {
+    const hit = window.getLogsButtonAtPoint(c, event.offsetX, event.offsetY);
+    if (hit && hit.type === "back") {
+      screen = "menu";
+      selectedNodeId = null;
+      draw();
+    }
+    return;
+  }
+
   const choice = window.getMenuButtonAtPoint(c, event.offsetX, event.offsetY);
   if (choice === "Play") {
     screen = "celebration";
+    draw();
+    return;
+  }
+
+  if (choice === "Logs") {
+    if (nodes.size === 1) {
+      selectedNodeId = nodes.keys().next().value;
+      screen = "logs";
+    } else {
+      screen = "select_node";
+    }
     draw();
     return;
   }
