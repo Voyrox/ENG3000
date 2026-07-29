@@ -1,0 +1,60 @@
+[
+  {
+    "label": "PlatformIO: Refresh compile database",
+    "command": "pio",
+    "args": ["run", "-t", "compiledb"],
+    "cwd": "$ZED_WORKTREE_ROOT",
+    "use_new_terminal": false,
+    "allow_concurrent_runs": false,
+    "reveal": "always"
+  },
+  {
+    "label": "PlatformIO: Build",
+    "command": "pio",
+    "args": ["run"],
+    "cwd": "$ZED_WORKTREE_ROOT",
+    "use_new_terminal": false,
+    "allow_concurrent_runs": false,
+    "reveal": "always"
+  },
+  {
+    "label": "PlatformIO: Upload",
+    "command": "pio",
+    "args": ["run", "-t", "upload"],
+    "cwd": "$ZED_WORKTREE_ROOT",
+    "use_new_terminal": false,
+    "allow_concurrent_runs": false,
+    "reveal": "always"
+  },
+  {
+    "label": "PlatformIO: Build Freenove S3",
+    "type": "shell",
+    "command": "pio",
+    "args": ["run", "-c", "platformioS3.ini", "-e", "freenove_s3"],
+    "group": "build",
+    "problemMatcher": []
+  },
+  {
+    "label": "PlatformIO: Upload Freenove S3",
+    "type": "shell",
+    "command": "pio",
+    "args": ["run", "-c", "platformioS3.ini", "-e", "freenove_s3", "-t", "upload"],
+    "problemMatcher": []
+  },
+  {
+    "label": "PlatformIO: Monitor 115200",
+    "type": "shell",
+    "command": "pio",
+    "args": ["device", "monitor", "-b", "115200"],
+    "problemMatcher": []
+  },
+  {
+    "label": "PlatformIO: Serial Monitor",
+    "command": "pio",
+    "args": ["device", "monitor"],
+    "cwd": "$ZED_WORKTREE_ROOT",
+    "use_new_terminal": true,
+    "allow_concurrent_runs": false,
+    "reveal": "always"
+  }
+]

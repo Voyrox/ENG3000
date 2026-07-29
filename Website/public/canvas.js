@@ -32,7 +32,7 @@ function draw() {
   ctx.setTransform(viewport.dpr, 0, 0, viewport.dpr, 0, 0);
 
   if (screen === "celebration") {
-    renderCalibrate(ctx, c);
+    renderCalibrate(ctx, c, Array.from(nodes.values()));
     return;
   }
 
@@ -76,7 +76,6 @@ function connectSocket() {
       });
       nodes.clear();
       payload.nodes.forEach((node) => nodes.set(node.id, node));
-      console.log("nodes:update", payload.nodes.map(n => ({ id: n.id, rps: n.rps, latest: n.latest })));
       draw();
     } else if (payload.type === "menu:status") {
       console.log(payload.message);

@@ -57,6 +57,7 @@ def register_node(address):
         nodes[node_id] = {
             "id": node_id,
             "address": f"{address[0]}:{address[1]}",
+            "device_id": None,
             "latest": None,
             "online": True,
             "last_seen": time.monotonic(),
@@ -73,7 +74,20 @@ def update_node(node_id, message):
         if node is None:
             return
         now = time.monotonic()
+        try:
+            payload = json.loads(message)
+        except json.JSONDecodeError:
+            payload = {}
+
+        device_id = payload.get("mac")
+        if device_id:
+            for other_id, other in list(nodes.items()):
+                if other_id != node_id and other.get("device_id") == device_id:
+                    del nodes[other_id]
+            node["device_id"] = device_id
+
         node["latest"] = message
+        node["online"] = True
         node["last_seen"] = now
         samples = node["samples"]
         samples.append(now)
@@ -99,12 +113,16 @@ def cleanup_stale_nodes():
         stale_ids = []
         with state_lock:
             for node_id, node in list(nodes.items()):
-                if node.get("last_seen", 0) < cutoff:
+                if node.get("online") and node.get("last_seen", 0) < cutoff:
+                    node["online"] = False
+                    node["rps"] = 0.0
+                    node["samples"].clear()
                     stale_ids.append(node_id)
 
         for node_id in stale_ids:
             print(f"Node {node_id} timed out")
-            remove_node(node_id)
+        if stale_ids:
+            schedule_broadcast_nodes()
 
 
 def handle_node_connection(conn, address):

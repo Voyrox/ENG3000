@@ -10,7 +10,9 @@ constexpr uint16_t SERVER_PORT = 3000;
 
 int nodeID = -1;
 unsigned long lastWifiAttemptMillis = 0;
-constexpr unsigned long WIFI_RETRY_INTERVAL_MS = 10000;
+constexpr unsigned long WIFI_RETRY_INTERVAL_MS = 1000;
+constexpr unsigned long SERVER_CONNECT_TIMEOUT_MS = 3000;
+constexpr unsigned long NODE_ID_TIMEOUT_MS = 2000;
 bool wifiConnected = false;
 
 WiFiClient client;
@@ -18,32 +20,57 @@ WiFiClient client;
 const int UltrasonicCount = 1;
 Ultrasonic center(5, 18, "Center", 50.0f);
 
-void connectServer() {
+bool connectServer() {
     nodeID = -1;
     client.stop();
-    while (!client.connect(SERVER_IP, SERVER_PORT)) {
+
+    unsigned long start = millis();
+    while (WiFi.status() == WL_CONNECTED && !client.connect(SERVER_IP, SERVER_PORT)) {
         Serial.println("Connecting to TCP server...");
+        if (millis() - start >= SERVER_CONNECT_TIMEOUT_MS) {
+            Serial.println("TCP connect timed out");
+            client.stop();
+            return false;
+        }
         delay(1000);
     }
 
+    if (!client.connected()) {
+        return false;
+    }
+
     Serial.println("TCP connected");
-    while (nodeID < 0) {
+    client.setTimeout(1000);
+
+    start = millis();
+    while (nodeID < 0 && client.connected()) {
         if (client.available()) {
             String idStr = client.readStringUntil('\n');
             nodeID = idStr.toInt();
             Serial.print("Assigned ID: ");
             Serial.println(nodeID);
         } else {
+            if (millis() - start >= NODE_ID_TIMEOUT_MS) {
+                Serial.println("Node ID wait timed out");
+                client.stop();
+                return false;
+            }
             delay(10);
         }
     }
     if (nodeID >= 0) {
         Serial.println("ESP32 Node is initialized");
+        return true;
     }
+
+    return false;
 }
 
-void connectWiFi() {
+bool connectWiFi() {
     wifiConnected = false;
+    nodeID = -1;
+    client.stop();
+
     WiFi.mode(WIFI_OFF);
     delay(200);
     WiFi.mode(WIFI_STA);
@@ -82,19 +109,27 @@ void connectWiFi() {
     if (WiFi.status() != WL_CONNECTED) {
         Serial.print("Wi-Fi failed, status=");
         Serial.println((int)WiFi.status());
-        return;
+        return false;
     }
 
     wifiConnected = true;
     Serial.print("Connected. IP: ");
     Serial.println(WiFi.localIP());
-    connectServer();
+    return connectServer();
 }
 
-void sendData(const String& data) {
+bool sendData(const String& data) {
     if (client.connected()) {
-        client.println(data);
+        size_t written = client.println(data);
+        if (written > 0) {
+            return true;
+        }
+
+        Serial.println("TCP write failed");
+        client.stop();
     }
+
+    return false;
 }
 
 void sendSensorSnapshot() {
@@ -102,6 +137,7 @@ void sendSensorSnapshot() {
 
     String payload = "{";
     payload += "\"nodeId\":" + String(nodeID);
+    payload += ",\"mac\":\"" + WiFi.macAddress() + "\"";
     payload += ",\"avg\":" + String(center.avg, 2);
     payload += ",\"detected\":" + String(detected ? "true" : "false");
     payload += "}";
@@ -116,14 +152,35 @@ void setup() {
 }
 
 void loop() {
-    if (WiFi.status() != WL_CONNECTED && millis() - lastWifiAttemptMillis >= WIFI_RETRY_INTERVAL_MS) {
-        lastWifiAttemptMillis = millis();
-        Serial.println("Retrying Wi-Fi connect...");
-        connectWiFi();
+    bool wifiReady = WiFi.status() == WL_CONNECTED;
+
+    if (!wifiReady) {
+        if (wifiConnected || client.connected()) {
+            Serial.println("Wi-Fi lost");
+            wifiConnected = false;
+            nodeID = -1;
+            client.stop();
+        }
+
+        if (millis() - lastWifiAttemptMillis >= WIFI_RETRY_INTERVAL_MS) {
+            lastWifiAttemptMillis = millis();
+            Serial.println("Retrying Wi-Fi connect...");
+            connectWiFi();
+        }
+
+        return;
     }
 
-    if (wifiConnected && !client.connected()) {
+    wifiConnected = true;
+
+    if (!client.connected()) {
         connectServer();
+        return;
+    }
+
+    if (nodeID < 0) {
+        client.stop();
+        return;
     }
 
     if (wifiConnected && client.connected()) {

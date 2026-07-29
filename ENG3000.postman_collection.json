@@ -1,0 +1,136 @@
+{
+  "info": {
+    "_postman_id": "e0d33f4a-f58a-49ec-86ef-eng3000api",
+    "name": "ENG3000 API",
+    "description": "Postman collection for ENG3000 Flask API and browser WebSocket endpoint",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "HTTP API",
+      "item": [
+        {
+          "name": "Home Page",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/",
+              "host": ["{{baseUrl}}"],
+              "path": [""]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status is 200', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "List Nodes",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/nodes",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "nodes"]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status is 200', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "});",
+                  "pm.test('Response is an array', function () {",
+                  "  pm.expect(pm.response.json()).to.be.an('array');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Get Node By ID",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/nodes/{{nodeId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "nodes", "{{nodeId}}"]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status is 200 or 404', function () {",
+                  "  pm.expect([200, 404]).to.include(pm.response.code);",
+                  "});",
+                  "if (pm.response.code === 200) {",
+                  "  pm.test('Node has expected fields', function () {",
+                  "    const node = pm.response.json();",
+                  "    pm.expect(node).to.have.property('id');",
+                  "    pm.expect(node).to.have.property('address');",
+                  "    pm.expect(node).to.have.property('online');",
+                  "    pm.expect(node).to.have.property('rps');",
+                  "  });",
+                  "}"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "WebSocket",
+      "item": [
+        {
+          "name": "Browser Node Updates",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{wsUrl}}",
+              "protocol": "ws",
+              "host": ["localhost"],
+              "port": "8765",
+              "path": ["browser"]
+            },
+            "description": "Open this as a WebSocket request in Postman. Expected incoming messages look like: {\"type\":\"nodes:update\",\"nodes\":[...]}"
+          }
+        }
+      ]
+    }
+  ],
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "http://localhost:5000"
+    },
+    {
+      "key": "wsUrl",
+      "value": "ws://localhost:8765/browser"
+    },
+    {
+      "key": "nodeId",
+      "value": "1"
+    }
+  ]
+}
