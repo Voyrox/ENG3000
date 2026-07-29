@@ -11,26 +11,26 @@ window.renderCalibrate = function renderCalibrate(ctx, canvas, nodes = []) {
   const sensorY = Math.max(80, floorY - laptopH - 120 - height * 0.01);
 
   // Background
-  ctx.fillStyle = "#f7efe0";
+  ctx.fillStyle = "#13131c";
   ctx.fillRect(0, 0, width, height);
 
   // Laptop
   ctx.fillStyle = "#1f2937";
   ctx.fillRect(laptopX, laptopY, laptopW, laptopH * 0.72);
-  ctx.fillStyle = "#334155";
+  ctx.fillStyle = "#42425d";
   ctx.fillRect(laptopX + 18, laptopY + 16, laptopW - 36, laptopH * 0.72 - 32);
 
   // Keyboard
-  ctx.fillStyle = "#0f172a";
+  ctx.fillStyle = "#42425d";
   ctx.fillRect(laptopX + laptopW * 0.25, laptopY - laptopH * 0.18, laptopW * 0.5, laptopH * 0.16);
-  ctx.fillStyle = "#f7efe0";
+  ctx.fillStyle = "#cdd6f4";
   ctx.font = `${Math.max(12, Math.min(24, width * 0.016))}px monospace`;
   ctx.textAlign = "center";
   ctx.fillText("Laptop", centerX, laptopY + laptopH * 0.38);
 
   // Title
   const titleY = Math.max(54, height * 0.09);
-  ctx.fillStyle = "#1f2937";
+  ctx.fillStyle = "#cdd6f4";
   ctx.textAlign = "center";
   ctx.font = `bold ${Math.max(18, Math.min(32, width * 0.03))}px monospace`;
   ctx.fillText("Calibration Mode", centerX, titleY);
@@ -49,13 +49,13 @@ window.renderCalibrate = function renderCalibrate(ctx, canvas, nodes = []) {
   const gridY = titleY + 220;
   const cellSize = Math.max(60, (spacing * 2 - 16) / 3);
 
-  ctx.strokeStyle = "#64748b";
+  ctx.strokeStyle = "#585b70";
   ctx.lineWidth = 2.5;
   for (let row = 0; row < 3; row++) {
     for (let col = 0; col < 3; col++) {
       const cx = leftX + col * (cellSize + 8);
       const cy = gridY + row * (cellSize + 8);
-      ctx.fillStyle = "#e2e8f0";
+      ctx.fillStyle = "#313244";
       ctx.beginPath();
       ctx.roundRect(cx, cy, cellSize, cellSize, 6);
       ctx.fill();
@@ -75,7 +75,7 @@ window.renderCalibrate = function renderCalibrate(ctx, canvas, nodes = []) {
     ctx.roundRect(sensorX - sensorSize / 2, gridBottomY + 20, sensorSize, sensorSize, 6);
     ctx.fill();
 
-    ctx.fillStyle = "#0f172a";
+    ctx.fillStyle = "#cdd6f4";
     ctx.beginPath();
     ctx.moveTo(sensorX, gridBottomY + 10);
     ctx.lineTo(sensorX - 8, gridBottomY + 18);
@@ -83,17 +83,9 @@ window.renderCalibrate = function renderCalibrate(ctx, canvas, nodes = []) {
     ctx.closePath();
     ctx.fill();
 
-    ctx.beginPath();
-    ctx.moveTo(sensorX - 8, gridBottomY + 18);
-    ctx.lineTo(sensorX - 8, gridBottomY + 28);
-    ctx.lineTo(sensorX + 8, gridBottomY + 28);
-    ctx.lineTo(sensorX + 8, gridBottomY + 18);
-    ctx.strokeStyle = "#0f172a";
-    ctx.lineWidth = 2;
-    ctx.stroke();
 
     // Label below
-    ctx.fillStyle = "#1f2937";
+    ctx.fillStyle = "#cdd6f4";
     ctx.textAlign = "center";
     if (hasNode) {
       ctx.font = `bold ${Math.max(12, Math.min(18, width * 0.017))}px monospace`;

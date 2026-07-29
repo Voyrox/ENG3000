@@ -27,10 +27,10 @@ window.renderNodeSelect = function renderNodeSelect(ctx, canvas, nodes) {
   const height = canvas.clientHeight || canvas.height;
   const centerX = width / 2;
 
-  ctx.fillStyle = "#f6f1e7";
+  ctx.fillStyle = "#13131c";
   ctx.fillRect(0, 0, width, height);
 
-  ctx.fillStyle = "#111";
+  ctx.fillStyle = "#cdd6f4";
   ctx.textAlign = "center";
   ctx.font = `bold ${Math.max(22, Math.min(36, width * 0.04))}px monospace`;
   ctx.fillText("Select a Node", centerX, 60);
@@ -46,7 +46,7 @@ window.renderNodeSelect = function renderNodeSelect(ctx, canvas, nodes) {
   ctx.fillText(bb.label, bb.x + bb.width / 2, bb.y + 24);
 
   layout.buttons.forEach((btn) => {
-    ctx.fillStyle = "#2c3e50";
+    ctx.fillStyle = "#313244";
     ctx.fillRect(btn.x, btn.y, btn.width, btn.height);
 
     ctx.fillStyle = "#fff";
@@ -75,7 +75,7 @@ window.renderLogs = function renderLogs(ctx, canvas, node, entries) {
   const width = canvas.clientWidth || canvas.width;
   const height = canvas.clientHeight || canvas.height;
 
-  ctx.fillStyle = "#1e1e2e";
+  ctx.fillStyle = "#13131c";
   ctx.fillRect(0, 0, width, height);
 
   const layout = window.getLogsLayout(canvas);
@@ -121,7 +121,7 @@ window.renderLogs = function renderLogs(ctx, canvas, node, entries) {
     ctx.fillText(time, layout.colTimeX, y);
     ctx.fillStyle = "#cdd6f4";
     let display = entry.data;
-    if (display.length > 60) display = display.substring(0, 57) + "...";
+    if (display.length > 120) display = display.substring(0, 57) + "...";
     ctx.fillText(display, layout.colDataX, y);
   });
 

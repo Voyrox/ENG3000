@@ -32,10 +32,10 @@ window.renderMenu = function renderMenu(ctx, canvas, statusText = "Waiting for E
   const layout = window.getMenuLayout(canvas);
   const { width, height, centerX, buttonHeight, totalHeight, startY, buttons } = layout;
 
-  ctx.fillStyle = "#f6f1e7";
+  ctx.fillStyle = "#13131c";
   ctx.fillRect(0, 0, width, height);
 
-  ctx.fillStyle = "#111";
+  ctx.fillStyle = "#cdd6f4";
   ctx.textAlign = "center";
   ctx.font = `bold ${Math.max(28, Math.min(52, width * 0.055))}px monospace`;
   ctx.fillText("ENG3000 Group 1", centerX, Math.max(84, height * 0.18));
@@ -43,15 +43,15 @@ window.renderMenu = function renderMenu(ctx, canvas, statusText = "Waiting for E
   buttons.forEach((button) => {
     const { label, x, y, width: buttonWidth } = button;
 
-    ctx.fillStyle = "#2c3e50";
+    ctx.fillStyle = "#313244";
     ctx.fillRect(x, y, buttonWidth, buttonHeight);
 
-    ctx.fillStyle = "#fff";
+    ctx.fillStyle = "#cdd6f4";
     ctx.font = `bold ${Math.max(18, Math.min(26, buttonHeight * 0.45))}px monospace`;
     ctx.fillText(label, centerX, y + buttonHeight * 0.68);
   });
 
-  ctx.fillStyle = "#444";
+  ctx.fillStyle = "#a6adc8";
   ctx.font = `${Math.max(14, Math.min(18, width * 0.02))}px monospace`;
   ctx.fillText(statusText, centerX, Math.min(height - 24, startY + totalHeight + 56));
 
