@@ -3,6 +3,7 @@ const ctx = c.getContext("2d");
 
 const nodes = new Map();
 const logsBuffer = new Map();
+const calibrateSlotNodeIds = [null, null, null];
 let selectedNodeId = null;
 let viewport = { width: 0, height: 0, dpr: 1 };
 const wsProtocol = location.protocol === "https:" ? "wss" : "ws";
@@ -32,12 +33,12 @@ function draw() {
   ctx.setTransform(viewport.dpr, 0, 0, viewport.dpr, 0, 0);
 
   if (screen === "celebration") {
-    renderCalibrate(ctx, c, Array.from(nodes.values()));
+    renderCalibrate(ctx, c, getCalibrateNodes());
     return;
   }
 
   if (screen === "select_node") {
-    renderNodeSelect(ctx, c, Array.from(nodes.values()));
+    renderNodeSelect(ctx, c, getSortedNodes());
     return;
   }
 
@@ -52,7 +53,39 @@ function draw() {
     ? `Node count: ${nodes.size} | Total RPS: ${Array.from(nodes.values()).reduce((sum, node) => sum + (node.rps || 0), 0).toFixed(1)}`
     : "Waiting for ESP32 data...";
 
-  renderMenu(ctx, c, statusText, Array.from(nodes.values()));
+  renderMenu(ctx, c, statusText, getSortedNodes());
+}
+
+function getSortedNodes() {
+  return Array.from(nodes.values()).sort((a, b) => a.id - b.id);
+}
+
+function updateCalibrateSlots(nextNodes) {
+  const nextIds = new Set(nextNodes.map((node) => node.id));
+
+  calibrateSlotNodeIds.forEach((nodeId, index) => {
+    if (nodeId !== null && !nextIds.has(nodeId)) {
+      calibrateSlotNodeIds[index] = null;
+    }
+  });
+
+  nextNodes
+    .slice()
+    .sort((a, b) => a.id - b.id)
+    .forEach((node) => {
+      if (calibrateSlotNodeIds.includes(node.id)) {
+        return;
+      }
+
+      const emptyIndex = calibrateSlotNodeIds.indexOf(null);
+      if (emptyIndex !== -1) {
+        calibrateSlotNodeIds[emptyIndex] = node.id;
+      }
+    });
+}
+
+function getCalibrateNodes() {
+  return calibrateSlotNodeIds.map((nodeId) => (nodeId === null ? null : nodes.get(nodeId) || null));
 }
 
 function connectSocket() {
@@ -74,6 +107,7 @@ function connectSocket() {
           if (buf.length > 200) buf.splice(0, buf.length - 200);
         }
       });
+      updateCalibrateSlots(payload.nodes);
       nodes.clear();
       payload.nodes.forEach((node) => nodes.set(node.id, node));
       draw();
@@ -99,7 +133,7 @@ function connectSocket() {
 
 c.addEventListener("click", (event) => {
   if (screen === "select_node") {
-    const hit = window.getNodeSelectButtonAtPoint(c, Array.from(nodes.values()), event.offsetX, event.offsetY);
+    const hit = window.getNodeSelectButtonAtPoint(c, getSortedNodes(), event.offsetX, event.offsetY);
     if (hit) {
       if (hit.type === "back") {
         screen = "menu";
@@ -131,7 +165,7 @@ c.addEventListener("click", (event) => {
 
   if (choice === "Logs") {
     if (nodes.size === 1) {
-      selectedNodeId = nodes.keys().next().value;
+      selectedNodeId = getSortedNodes()[0]?.id ?? null;
       screen = "logs";
     } else {
       screen = "select_node";

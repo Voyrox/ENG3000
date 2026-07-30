@@ -15,6 +15,7 @@ WS_HOST = "0.0.0.0"
 WS_PORT = 8765
 NODE_STALE_SECONDS = 5
 RPS_WINDOW_SECONDS = 1
+HANDSHAKE_READ_LIMIT = 64
 
 state_lock = threading.Lock()
 next_node_id = 1
@@ -68,6 +69,35 @@ def register_node(address):
     return node_id
 
 
+def reuse_or_register_node(address, claimed_node_id):
+    global next_node_id
+    with state_lock:
+        now = time.monotonic()
+        if claimed_node_id is not None and claimed_node_id in nodes:
+            node = nodes[claimed_node_id]
+            node["address"] = f"{address[0]}:{address[1]}"
+            node["online"] = True
+            node["last_seen"] = now
+            node["rps"] = 0.0
+            node["samples"].clear()
+            node_id = claimed_node_id
+        else:
+            node_id = next_node_id
+            next_node_id += 1
+            nodes[node_id] = {
+                "id": node_id,
+                "address": f"{address[0]}:{address[1]}",
+                "device_id": None,
+                "latest": None,
+                "online": True,
+                "last_seen": now,
+                "samples": deque(),
+                "rps": 0.0,
+            }
+    schedule_broadcast_nodes()
+    return node_id
+
+
 def update_node(node_id, message):
     with state_lock:
         node = nodes.get(node_id)
@@ -98,12 +128,36 @@ def update_node(node_id, message):
     schedule_broadcast_nodes()
 
 
-def remove_node(node_id):
+def mark_node_offline(node_id):
     with state_lock:
-        if node_id not in nodes:
+        node = nodes.get(node_id)
+        if node is None:
             return
-        del nodes[node_id]
+        node["online"] = False
+        node["rps"] = 0.0
+        node["samples"].clear()
     schedule_broadcast_nodes()
+
+
+def read_claimed_node_id(conn):
+    buffer = bytearray()
+    while len(buffer) < HANDSHAKE_READ_LIMIT:
+        chunk = conn.recv(1)
+        if not chunk:
+            break
+        if chunk == b"\n":
+            break
+        if chunk != b"\r":
+            buffer.extend(chunk)
+
+    try:
+        claimed_node_id = int(buffer.decode("utf-8").strip())
+    except ValueError:
+        claimed_node_id = None
+
+    if claimed_node_id is not None and claimed_node_id < 0:
+        return None
+    return claimed_node_id
 
 
 def cleanup_stale_nodes():
@@ -126,9 +180,14 @@ def cleanup_stale_nodes():
 
 
 def handle_node_connection(conn, address):
-    node_id = register_node(address)
-    print(f"ESP32 connected from {address}, assigned id {node_id}")
+    node_id = None
+    conn.settimeout(5)
     try:
+        claimed_node_id = read_claimed_node_id(conn)
+        conn.settimeout(None)
+        node_id = reuse_or_register_node(address, claimed_node_id)
+        action = "restored" if claimed_node_id == node_id else "assigned"
+        print(f"ESP32 connected from {address}, {action} id {node_id}")
         conn.sendall(f"{node_id}\n".encode("utf-8"))
         with conn.makefile("r") as stream:
             for line in stream:
@@ -137,10 +196,11 @@ def handle_node_connection(conn, address):
                     continue
                 #print(f"Node {node_id}: {message}")
                 update_node(node_id, message)
-    except OSError as exc:
-        print(f"Node {node_id} disconnected: {exc}")
+    except (OSError, TimeoutError) as exc:
+        print(f"Node {node_id if node_id is not None else 'unknown'} disconnected: {exc}")
     finally:
-        remove_node(node_id)
+        if node_id is not None:
+            mark_node_offline(node_id)
         conn.close()
 
 

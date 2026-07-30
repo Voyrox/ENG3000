@@ -21,7 +21,6 @@ const int UltrasonicCount = 1;
 Ultrasonic center(5, 18, "Center", 50.0f);
 
 bool connectServer() {
-    nodeID = -1;
     client.stop();
 
     unsigned long start = millis();
@@ -41,14 +40,17 @@ bool connectServer() {
 
     Serial.println("TCP connected");
     client.setTimeout(1000);
+    client.println(String(nodeID));
+
+    int assignedNodeID = -1;
 
     start = millis();
-    while (nodeID < 0 && client.connected()) {
+    while (assignedNodeID < 0 && client.connected()) {
         if (client.available()) {
             String idStr = client.readStringUntil('\n');
-            nodeID = idStr.toInt();
-            Serial.print("Assigned ID: ");
-            Serial.println(nodeID);
+            assignedNodeID = idStr.toInt();
+            Serial.print("Server confirmed ID: ");
+            Serial.println(assignedNodeID);
         } else {
             if (millis() - start >= NODE_ID_TIMEOUT_MS) {
                 Serial.println("Node ID wait timed out");
@@ -58,7 +60,8 @@ bool connectServer() {
             delay(10);
         }
     }
-    if (nodeID >= 0) {
+    if (assignedNodeID >= 0) {
+        nodeID = assignedNodeID;
         Serial.println("ESP32 Node is initialized");
         return true;
     }
@@ -68,7 +71,6 @@ bool connectServer() {
 
 bool connectWiFi() {
     wifiConnected = false;
-    nodeID = -1;
     client.stop();
 
     WiFi.mode(WIFI_OFF);
@@ -158,7 +160,6 @@ void loop() {
         if (wifiConnected || client.connected()) {
             Serial.println("Wi-Fi lost");
             wifiConnected = false;
-            nodeID = -1;
             client.stop();
         }
 

@@ -68,9 +68,10 @@ window.renderCalibrate = function renderCalibrate(ctx, canvas, nodes = []) {
   sensors.forEach((slot, i) => {
     const sensorX = slot.x;
     const node = nodes[i];
-    const hasNode = node && node.online;
+    const isAssigned = Boolean(node);
+    const isOnline = Boolean(node && node.online);
 
-    ctx.fillStyle = hasNode ? "#22c55e" : "#ef4444";
+    ctx.fillStyle = isOnline ? "#22c55e" : "#ef4444";
     ctx.beginPath();
     ctx.roundRect(sensorX - sensorSize / 2, gridBottomY + 20, sensorSize, sensorSize, 6);
     ctx.fill();
@@ -87,11 +88,11 @@ window.renderCalibrate = function renderCalibrate(ctx, canvas, nodes = []) {
     // Label below
     ctx.fillStyle = "#cdd6f4";
     ctx.textAlign = "center";
-    if (hasNode) {
+    if (isAssigned) {
       ctx.font = `bold ${Math.max(12, Math.min(18, width * 0.017))}px monospace`;
       ctx.fillText(`ID: ${node.id}`, sensorX, gridBottomY + sensorSize + 46);
       ctx.font = `${Math.max(11, Math.min(16, width * 0.015))}px monospace`;
-      ctx.fillText(`RPS: ${(node.rps || 0).toFixed(1)}`, sensorX, gridBottomY + sensorSize + 68);
+      ctx.fillText(isOnline ? `RPS: ${(node.rps || 0).toFixed(1)}` : "Offline", sensorX, gridBottomY + sensorSize + 68);
     } else {
       ctx.font = `${Math.max(11, Math.min(15, width * 0.015))}px monospace`;
       ctx.fillText("Unassigned", sensorX, gridBottomY + sensorSize + 56);
