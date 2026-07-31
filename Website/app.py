@@ -16,6 +16,7 @@ WS_PORT = 8765
 NODE_STALE_SECONDS = 5
 RPS_WINDOW_SECONDS = 1
 HANDSHAKE_READ_LIMIT = 64
+HANDSHAKE_TIMEOUT_SECONDS = 1
 
 state_lock = threading.Lock()
 next_node_id = 1
@@ -139,10 +140,13 @@ def mark_node_offline(node_id):
     schedule_broadcast_nodes()
 
 
-def read_claimed_node_id(conn):
+def read_handshake_line(conn):
     buffer = bytearray()
     while len(buffer) < HANDSHAKE_READ_LIMIT:
-        chunk = conn.recv(1)
+        try:
+            chunk = conn.recv(1)
+        except TimeoutError:
+            break
         if not chunk:
             break
         if chunk == b"\n":
@@ -150,10 +154,21 @@ def read_claimed_node_id(conn):
         if chunk != b"\r":
             buffer.extend(chunk)
 
+    return buffer.decode("utf-8").strip()
+
+
+def parse_claimed_node_id(raw_line):
+    if not raw_line:
+        return None
+
     try:
-        claimed_node_id = int(buffer.decode("utf-8").strip())
+        claimed_node_id = int(raw_line)
     except ValueError:
-        claimed_node_id = None
+        try:
+            payload = json.loads(raw_line)
+        except json.JSONDecodeError:
+            return None
+        claimed_node_id = payload.get("nodeId")
 
     if claimed_node_id is not None and claimed_node_id < 0:
         return None
@@ -181,14 +196,22 @@ def cleanup_stale_nodes():
 
 def handle_node_connection(conn, address):
     node_id = None
-    conn.settimeout(5)
+    first_message = None
+    conn.settimeout(HANDSHAKE_TIMEOUT_SECONDS)
     try:
-        claimed_node_id = read_claimed_node_id(conn)
+        raw_handshake = read_handshake_line(conn)
+        claimed_node_id = parse_claimed_node_id(raw_handshake)
+        if raw_handshake.startswith("{"):
+            first_message = raw_handshake
+        elif raw_handshake and claimed_node_id is None:
+            first_message = raw_handshake
         conn.settimeout(None)
         node_id = reuse_or_register_node(address, claimed_node_id)
         action = "restored" if claimed_node_id == node_id else "assigned"
         print(f"ESP32 connected from {address}, {action} id {node_id}")
         conn.sendall(f"{node_id}\n".encode("utf-8"))
+        if first_message is not None:
+            update_node(node_id, first_message)
         with conn.makefile("r") as stream:
             for line in stream:
                 message = line.strip()
