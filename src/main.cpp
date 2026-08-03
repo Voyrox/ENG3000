@@ -5,7 +5,7 @@
 constexpr char WIFI_SSID[] = "Group_1_ENGG3000";
 constexpr char WIFI_PASSWORD[] = "1234567890";
 
-constexpr char SERVER_IP[] = "192.168.1.25";
+constexpr char SERVER_IP[] = "192.168.1.108";
 constexpr uint16_t SERVER_PORT = 3000;
 
 int nodeID = -1;

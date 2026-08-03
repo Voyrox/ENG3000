@@ -34,7 +34,6 @@ class Ultrasonic {
       arrIndex = (arrIndex + 1) % 3;
       avg = (arr[0] + arr[1] + arr[2]) / 3.0f;
     }
-
     return avg <= safeDistance;
   }
 

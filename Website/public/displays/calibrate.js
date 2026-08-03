@@ -14,6 +14,17 @@ window.renderCalibrate = function renderCalibrate(ctx, canvas, nodes = []) {
   ctx.fillStyle = "#13131c";
   ctx.fillRect(0, 0, width, height);
 
+  // Back/Skip buttons
+  const layout = window.getCalibrateLayout(canvas);
+  [layout.backButton, layout.skipButton].forEach((btn) => {
+    ctx.fillStyle = "#475569";
+    ctx.fillRect(btn.x, btn.y, btn.width, btn.height);
+    ctx.fillStyle = "#fff";
+    ctx.font = "bold 14px monospace";
+    ctx.textAlign = "center";
+    ctx.fillText(btn.label, btn.x + btn.width / 2, btn.y + 24);
+  });
+
   // Laptop
   ctx.fillStyle = "#1f2937";
   ctx.fillRect(laptopX, laptopY, laptopW, laptopH * 0.72);
@@ -100,4 +111,27 @@ window.renderCalibrate = function renderCalibrate(ctx, canvas, nodes = []) {
   });
 
   ctx.textAlign = "start";
+};
+
+window.getCalibrateLayout = function getCalibrateLayout(canvas) {
+  const width = canvas.clientWidth || canvas.width;
+  return {
+    backButton: { x: 16, y: 16, width: 80, height: 36, label: "\u25C0 Back" },
+    skipButton: { x: width - 96, y: 16, width: 80, height: 36, label: "Skip \u25B6" },
+  };
+};
+
+window.getCalibrateButtonAtPoint = function getCalibrateButtonAtPoint(canvas, x, y) {
+  const layout = window.getCalibrateLayout(canvas);
+
+  const bb = layout.backButton;
+  if (x >= bb.x && x <= bb.x + bb.width && y >= bb.y && y <= bb.y + bb.height) {
+    return { type: "back" };
+  }
+  const sb = layout.skipButton;
+  if (x >= sb.x && x <= sb.x + sb.width && y >= sb.y && y <= sb.y + sb.height) {
+    return { type: "skip" };
+  }
+
+  return null;
 };

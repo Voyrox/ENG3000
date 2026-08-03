@@ -11,6 +11,7 @@ const wsUrl = `${wsProtocol}://${location.hostname}:8765/browser`;
 let socket = null;
 let reconnectTimer = null;
 let screen = "menu";
+let gameLoopId = null;
 
 function resizeCanvas() {
   const dpr = window.devicePixelRatio || 1;
@@ -32,8 +33,13 @@ function draw() {
   ctx.clearRect(0, 0, c.width, c.height);
   ctx.setTransform(viewport.dpr, 0, 0, viewport.dpr, 0, 0);
 
-  if (screen === "celebration") {
+  if (screen === "calibrate") {
     renderCalibrate(ctx, c, getCalibrateNodes());
+    return;
+  }
+
+  if (screen === "game") {
+    window.renderGame(ctx, c);
     return;
   }
 
@@ -58,6 +64,14 @@ function draw() {
 
 function getSortedNodes() {
   return Array.from(nodes.values()).sort((a, b) => a.id - b.id);
+}
+
+function getCanvasPoint(event) {
+  const rect = c.getBoundingClientRect();
+  return {
+    x: event.clientX - rect.left,
+    y: event.clientY - rect.top,
+  };
 }
 
 function updateCalibrateSlots(nextNodes) {
@@ -86,6 +100,29 @@ function updateCalibrateSlots(nextNodes) {
 
 function getCalibrateNodes() {
   return calibrateSlotNodeIds.map((nodeId) => (nodeId === null ? null : nodes.get(nodeId) || null));
+}
+
+function gameLoopTick(timestamp) {
+  if (screen !== "game") {
+    gameLoopId = null;
+    return;
+  }
+  window.updateGame(timestamp);
+  draw();
+  gameLoopId = requestAnimationFrame(gameLoopTick);
+}
+
+function startGameLoop() {
+  if (gameLoopId === null) {
+    gameLoopId = requestAnimationFrame(gameLoopTick);
+  }
+}
+
+function stopGameLoop() {
+  if (gameLoopId !== null) {
+    cancelAnimationFrame(gameLoopId);
+    gameLoopId = null;
+  }
 }
 
 function connectSocket() {
@@ -131,9 +168,21 @@ function connectSocket() {
   });
 }
 
+c.addEventListener("mousemove", (event) => {
+  const pointer = getCanvasPoint(event);
+  if (screen === "game") {
+    window.setGameCursor(c, pointer.x, pointer.y);
+    if (window.handleGameHover(c, pointer.x, pointer.y)) {
+      draw();
+    }
+  }
+});
+
 c.addEventListener("click", (event) => {
+  const point = getCanvasPoint(event);
+
   if (screen === "select_node") {
-    const hit = window.getNodeSelectButtonAtPoint(c, getSortedNodes(), event.offsetX, event.offsetY);
+    const hit = window.getNodeSelectButtonAtPoint(c, getSortedNodes(), point.x, point.y);
     if (hit) {
       if (hit.type === "back") {
         screen = "menu";
@@ -146,8 +195,46 @@ c.addEventListener("click", (event) => {
     return;
   }
 
+  if (screen === "calibrate") {
+    const hit = window.getCalibrateButtonAtPoint(c, point.x, point.y);
+    if (hit) {
+      if (hit.type === "back") {
+        screen = "menu";
+      } else if (hit.type === "skip") {
+        stopGameLoop();
+        window.resetGame();
+        screen = "game";
+        startGameLoop();
+      }
+      draw();
+    }
+    return;
+  }
+
+  if (screen === "game") {
+    const levelHit = window.getGameLevelButtonAtPoint(c, point.x, point.y);
+    if (levelHit) {
+      window.setGameLevel(levelHit.level);
+      draw();
+      return;
+    }
+
+    const overButton = window.getGameOverButtonAtPoint(c, point.x, point.y);
+    if (overButton) {
+      screen = "menu";
+      stopGameLoop();
+      draw();
+      return;
+    }
+
+    if (window.handleGameClick(c, point.x, point.y)) {
+      draw();
+    }
+    return;
+  }
+
   if (screen === "logs") {
-    const hit = window.getLogsButtonAtPoint(c, event.offsetX, event.offsetY);
+    const hit = window.getLogsButtonAtPoint(c, point.x, point.y);
     if (hit && hit.type === "back") {
       screen = "menu";
       selectedNodeId = null;
@@ -156,9 +243,9 @@ c.addEventListener("click", (event) => {
     return;
   }
 
-  const choice = window.getMenuButtonAtPoint(c, event.offsetX, event.offsetY);
+  const choice = window.getMenuButtonAtPoint(c, point.x, point.y);
   if (choice === "Play") {
-    screen = "celebration";
+    screen = "calibrate";
     draw();
     return;
   }
