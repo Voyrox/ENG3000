@@ -2,10 +2,10 @@
 #include <WiFi.h>
 #include "ultrasonicSensor.cpp"
 
-constexpr char WIFI_SSID[] = "Group_1_ENGG3000";
-constexpr char WIFI_PASSWORD[] = "1234567890";
+constexpr char WIFI_SSID[] = "Josh's S24";
+constexpr char WIFI_PASSWORD[] = "bruh1234";
 
-constexpr char SERVER_IP[] = "192.168.1.108";
+constexpr char SERVER_IP[] = "192.168.137.99";
 constexpr uint16_t SERVER_PORT = 3000;
 
 int nodeID = -1;
@@ -140,7 +140,7 @@ void sendSensorSnapshot() {
     String payload = "{";
     payload += "\"nodeId\":" + String(nodeID);
     payload += ",\"mac\":\"" + WiFi.macAddress() + "\"";
-    payload += ",\"avg\":" + String(center.avg, 2);
+    payload += ",\"avg\":" + String(center.getDistance(), 2);
     payload += ",\"detected\":" + String(detected ? "true" : "false");
     payload += "}";
 
