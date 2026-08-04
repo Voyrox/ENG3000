@@ -140,7 +140,7 @@ void sendSensorSnapshot() {
     String payload = "{";
     payload += "\"nodeId\":" + String(nodeID);
     payload += ",\"mac\":\"" + WiFi.macAddress() + "\"";
-    payload += ",\"avg\":" + String(center.getDistance(), 2);
+    payload += ",\"avg\":" + String(center.avg, 2);
     payload += ",\"detected\":" + String(detected ? "true" : "false");
     payload += "}";
 
