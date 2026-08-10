@@ -14,9 +14,9 @@ window.renderCalibrate = function renderCalibrate(ctx, canvas, nodes = []) {
   ctx.fillStyle = "#13131c";
   ctx.fillRect(0, 0, width, height);
 
-  // Back/Skip buttons
+  // Back / Alert / Skip buttons
   const layout = window.getCalibrateLayout(canvas);
-  [layout.backButton, layout.skipButton].forEach((btn) => {
+  [layout.backButton, layout.alertButton, layout.skipButton].forEach((btn) => {
     ctx.fillStyle = "#475569";
     ctx.fillRect(btn.x, btn.y, btn.width, btn.height);
     ctx.fillStyle = "#fff";
@@ -116,8 +116,7 @@ window.renderCalibrate = function renderCalibrate(ctx, canvas, nodes = []) {
 window.getCalibrateLayout = function getCalibrateLayout(canvas) {
   const width = canvas.clientWidth || canvas.width;
   return {
-    backButton: { x: 16, y: 16, width: 80, height: 36, label: "\u25C0 Back" },
-    skipButton: { x: width - 96, y: 16, width: 80, height: 36, label: "Skip \u25B6" },
+    backButton: { x: 16, y: 16, width: 80, height: 36, label: "\u25C0 Back" },    alertButton: { x: Math.max(110, width / 2 - 50), y: 16, width: 100, height: 36, label: "Alert" },    skipButton: { x: width - 96, y: 16, width: 80, height: 36, label: "Skip \u25B6" },
   };
 };
 
@@ -127,6 +126,10 @@ window.getCalibrateButtonAtPoint = function getCalibrateButtonAtPoint(canvas, x,
   const bb = layout.backButton;
   if (x >= bb.x && x <= bb.x + bb.width && y >= bb.y && y <= bb.y + bb.height) {
     return { type: "back" };
+  }
+  const ab = layout.alertButton;
+  if (x >= ab.x && x <= ab.x + ab.width && y >= ab.y && y <= ab.y + ab.height) {
+    return { type: "alert" };
   }
   const sb = layout.skipButton;
   if (x >= sb.x && x <= sb.x + sb.width && y >= sb.y && y <= sb.y + sb.height) {

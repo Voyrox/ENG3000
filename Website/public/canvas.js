@@ -12,6 +12,23 @@ let socket = null;
 let reconnectTimer = null;
 let screen = "menu";
 let gameLoopId = null;
+const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+
+function playAlertNoise() {
+  if (audioContext.state === "suspended") {
+    audioContext.resume().catch(() => {});
+  }
+
+  const oscillator = audioContext.createOscillator();
+  const gain = audioContext.createGain();
+  oscillator.type = "sine";
+  oscillator.frequency.value = 520;
+  gain.gain.value = 0.22;
+  oscillator.connect(gain);
+  gain.connect(audioContext.destination);
+  oscillator.start();
+  oscillator.stop(audioContext.currentTime + 0.18);
+}
 
 function resizeCanvas() {
   const dpr = window.devicePixelRatio || 1;
@@ -52,6 +69,11 @@ function draw() {
     const node = nodes.get(selectedNodeId) || { id: selectedNodeId, address: "unknown" };
     const entries = logsBuffer.get(selectedNodeId) || [];
     renderLogs(ctx, c, node, entries);
+    return;
+  }
+
+  if (screen === "alert") {
+    window.renderAlert(ctx, c);
     return;
   }
 
@@ -200,6 +222,9 @@ c.addEventListener("click", (event) => {
     if (hit) {
       if (hit.type === "back") {
         screen = "menu";
+      } else if (hit.type === "alert") {
+        screen = "alert";
+        playAlertNoise();
       } else if (hit.type === "skip") {
         stopGameLoop();
         window.resetGame();
@@ -238,6 +263,15 @@ c.addEventListener("click", (event) => {
     if (hit && hit.type === "back") {
       screen = "menu";
       selectedNodeId = null;
+      draw();
+    }
+    return;
+  }
+
+  if (screen === "alert") {
+    const hit = window.getAlertButtonAtPoint(c, point.x, point.y);
+    if (hit && hit.type === "back") {
+      screen = "calibrate";
       draw();
     }
     return;
