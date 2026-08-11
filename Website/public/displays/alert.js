@@ -7,7 +7,6 @@ window.getAlertLayout = function getAlertLayout(canvas) {
   const buttonHeight = Math.min(64, Math.max(48, height * 0.08));
   const x = centerX - buttonWidth / 2;
   const y = height - buttonHeight - 30;
-
   return { width, height, centerX, buttonWidth, buttonHeight, x, y };
 };
 
