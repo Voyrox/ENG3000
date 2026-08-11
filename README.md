@@ -5,14 +5,15 @@ ESP32 ultrasonic sensor nodes that detect boats and report readings to a web das
 ## Architecture
 
 ```
-ESP32 ── Wi-Fi ──▶ TCP :3000 ──▶ Python Server ── WebSocket:8765 ──▶ Browser
+ESP32 ── Wi-Fi ──▶ gateway/server ── TCP :3000 ──▶ Python Server
+                                      └── WebSocket:8765 ──▶ Browser
                                     │
                                     └── REST:5000 ──▶ /api/nodes
 ```
 
 ### ESP32 → Server (TCP)
 
-Each ESP32 connects to Wi-Fi (`Group_1_ENGG3000`), opens a persistent TCP socket to `192.168.1.25:3000`, and receives a numeric node ID from the server. On every `loop()` cycle it sends a JSON line:
+Each ESP32 connects to the laptop hotspot and uses the Wi-Fi gateway address as the server address. It opens a persistent TCP socket on port `3000`, receives a numeric node ID, and sends a JSON line on every `loop()` cycle:
 
 ```json
 {"nodeId":1,"avg":12.34,"detected":false}
