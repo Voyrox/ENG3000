@@ -46,7 +46,7 @@ function resizeCanvas() {
 }
 
 function draw() {
-  print("Drawing screen:", screen, "selectedNodeId:", selectedNodeId, "nodes.size:", nodes.size);
+  console.log("Drawing screen:", screen, "selectedNodeId:", selectedNodeId, "nodes.size:", nodes.size);
   ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.clearRect(0, 0, c.width, c.height);
   ctx.setTransform(viewport.dpr, 0, 0, viewport.dpr, 0, 0);
