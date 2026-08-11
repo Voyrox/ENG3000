@@ -142,6 +142,7 @@ void sendSensorSnapshot() {
     payload += ",\"mac\":\"" + WiFi.macAddress() + "\"";
     payload += ",\"avg\":" + String(center.avg, 2);
     payload += ",\"detected\":" + String(detected ? "true" : "false");
+    payload += ",\"position\":\"\"";
     payload += "}";
 
     sendData(payload);
