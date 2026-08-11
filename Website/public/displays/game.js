@@ -8,7 +8,7 @@
 //   window.setGameCursor(canvas, x, y)          - feed in the latest input coordinate
 //   window.handleGameClick(canvas, x, y)        - register a hit attempt
 //   window.getGameOverButtonAtPoint(canvas,x,y) - hit-test Restart / Return to Start
-//   window.renderGame(ctx, canvas)              - draw the current frame
+//   window.renderGame(ctx, canvas, nodes)              - draw the current frame
 //   window.getGameState()                       - read-only peek at state (score/level/etc)
 
 
@@ -293,7 +293,9 @@
     ctx.textAlign = "start";
   }
 
-  window.renderGame = function renderGame(ctx, canvas) {
+  window.renderGame = function renderGame(ctx, canvas, nodes) {
+
+    console.log(nodes)
     const width = canvas.clientWidth || canvas.width;
     const height = canvas.clientHeight || canvas.height;
 
