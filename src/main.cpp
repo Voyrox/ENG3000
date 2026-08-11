@@ -3,19 +3,23 @@
 #include "ultrasonicSensor.cpp"
 
 constexpr char WIFI_SSID[] = "Josh's S24";
-constexpr char WIFI_PASSWORD[] = "bruh1234";
+constexpr char WIFI_PASSWORD[] = "bruh12345";
 
-constexpr char SERVER_IP[] = "192.168.137.99";
+constexpr bool AUTO_DISCOVER_SERVER = true;
+constexpr char SERVER_IP[] = "192.168.9.151";
 constexpr uint16_t SERVER_PORT = 3000;
 
 int nodeID = -1;
 unsigned long lastWifiAttemptMillis = 0;
 constexpr unsigned long WIFI_RETRY_INTERVAL_MS = 1000;
 constexpr unsigned long SERVER_CONNECT_TIMEOUT_MS = 3000;
+constexpr unsigned long SERVER_DISCOVERY_TIMEOUT_MS = 120000;
+constexpr int32_t SERVER_PROBE_TIMEOUT_MS = 300;
 constexpr unsigned long NODE_ID_TIMEOUT_MS = 2000;
 bool wifiConnected = false;
 
 WiFiClient client;
+String serverIP = AUTO_DISCOVER_SERVER ? "" : SERVER_IP;
 
 const int UltrasonicCount = 1;
 Ultrasonic center(5, 18, "Center", 50.0f);
@@ -24,7 +28,72 @@ bool connectServer() {
     client.stop();
 
     unsigned long start = millis();
-    while (WiFi.status() == WL_CONNECTED && !client.connect(SERVER_IP, SERVER_PORT)) {
+
+    if (serverIP.isEmpty()) {
+        IPAddress localIP = WiFi.localIP();
+        IPAddress subnetMask = WiFi.subnetMask();
+        uint32_t localAddress = (uint32_t(localIP[0]) << 24) |
+                                (uint32_t(localIP[1]) << 16) |
+                                (uint32_t(localIP[2]) << 8) |
+                                uint32_t(localIP[3]);
+        uint32_t mask = (uint32_t(subnetMask[0]) << 24) |
+                        (uint32_t(subnetMask[1]) << 16) |
+                        (uint32_t(subnetMask[2]) << 8) |
+                        uint32_t(subnetMask[3]);
+        uint32_t network = localAddress & mask;
+        uint32_t broadcast = network | ~mask;
+
+        Serial.print("Searching subnet ");
+        Serial.print(network >> 24);
+        Serial.print('.');
+        Serial.print((network >> 16) & 0xff);
+        Serial.print('.');
+        Serial.print((network >> 8) & 0xff);
+        Serial.print('.');
+        Serial.print(network & 0xff);
+        Serial.println();
+        Serial.println("Searching local subnet for TCP server...");
+
+        for (uint32_t distance = 1;
+             distance < broadcast - network && millis() - start < SERVER_DISCOVERY_TIMEOUT_MS;
+             distance++) {
+            for (uint8_t side = 0; side < 2; side++) {
+                uint32_t address = side == 0
+                    ? localAddress + distance
+                    : localAddress >= distance ? localAddress - distance : 0;
+                if (address <= network || address >= broadcast || address == localAddress) {
+                    continue;
+                }
+
+                IPAddress candidate(
+                    (address >> 24) & 0xff,
+                    (address >> 16) & 0xff,
+                    (address >> 8) & 0xff,
+                    address & 0xff);
+                Serial.print("Trying ");
+                Serial.print(candidate.toString());
+                Serial.println();
+                if (client.connect(candidate, SERVER_PORT, SERVER_PROBE_TIMEOUT_MS)) {
+                    serverIP = candidate.toString();
+                    Serial.print("Server found at ");
+                    Serial.println(serverIP);
+                    break;
+                }
+            }
+            if (!serverIP.isEmpty()) {
+                break;
+            }
+        }
+
+        if (serverIP.isEmpty()) {
+            Serial.println("TCP server not found on local subnet");
+            return false;
+        }
+    }
+
+    while (WiFi.status() == WL_CONNECTED && !serverIP.isEmpty() &&
+           !client.connected() &&
+           !client.connect(serverIP.c_str(), SERVER_PORT)) {
         Serial.println("Connecting to TCP server...");
         if (millis() - start >= SERVER_CONNECT_TIMEOUT_MS) {
             Serial.println("TCP connect timed out");
@@ -84,8 +153,17 @@ bool connectWiFi() {
 
     int32_t targetIndex = -1;
     int32_t networkCount = WiFi.scanNetworks();
+    Serial.print("Wi-Fi scan found ");
+    Serial.print(networkCount);
+    Serial.println(" network(s):");
     if (networkCount > 0) {
         for (int i = 0; i < networkCount; i++) {
+            Serial.print("  ");
+            Serial.print(WiFi.SSID(i));
+            Serial.print(" channel=");
+            Serial.print(WiFi.channel(i));
+            Serial.print(" RSSI=");
+            Serial.println(WiFi.RSSI(i));
             if (WiFi.SSID(i) == WIFI_SSID) {
                 targetIndex = i;
                 break;
