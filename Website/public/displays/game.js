@@ -14,8 +14,8 @@
 
 
 //Bugs
-// - level select features is kinda broken it 
-// works fine when you do not hit moles but when 
+// - level select features is kinda broken it
+// works fine when you do not hit moles but when
 // you hit moles the mole timer gets overriden
 
 
@@ -30,6 +30,27 @@
   const MIN_SPAWN_DELAY_MS = 250; // gap before a new mole appears
   const MAX_SPAWN_DELAY_MS = 700;
   const HIT_FEEDBACK_MS = 200; // how long the "hit" flash lasts
+  const SUPER_MOLE_POINTS = 3; // score awarded for hitting a super mole
+  const BOMB_PENALTY = 3; // score lost for hitting a bomb
+  const BOMB_SPAWN_CHANCE = 0.2; // share of spawns that are bombs
+  const SUPER_SPAWN_CHANCE = 0.15; // share of spawns that are super moles
+
+  const moleImages = {};
+  ["hole", "mole", "bomb", "dead_mole", "super_mole", "super_mole_hit", "dead_super_mole"].forEach((name) => {
+    const img = new Image();
+    img.src = `/static/mole/${name}.png`;
+    moleImages[name] = img;
+  });
+
+  function drawImageCentered(ctx, img, cx, cy, height) {
+    const aspect = img.width / img.height;
+    const w = height * aspect;
+    ctx.drawImage(img, cx - w / 2, cy - height / 2, w, height);
+  }
+
+  function isImageReady(img) {
+    return img && img.complete && img.naturalWidth > 0;
+  }
 
   const gameState = {
     status: "idle", // "idle" | "playing" | "gameover"
@@ -39,10 +60,11 @@
     remainingMs: GAME_DURATION_MS,
     lastTickTime: null,
     activeHole: -1, // -1 means no mole currently up
+    moleType: "mole", // "mole" | "bomb" | "super"
     moleSpawnedAt: 0,
     moleDurationMs: BASE_MOLE_MS,
     nextSpawnAt: 0,
-    hitFlash: { hole: -1, until: 0 },
+    hitFlash: { hole: -1, until: 0, type: null },
     cursor: { x: null, y: null, inBounds: true },
   };
 
@@ -65,6 +87,13 @@
       hole = Math.floor(Math.random() * 9);
     } while (hole === excludeHole);
     return hole;
+  }
+
+  function pickRandomMoleType() {
+    const roll = Math.random();
+    if (roll < BOMB_SPAWN_CHANCE) return "bomb";
+    if (roll < BOMB_SPAWN_CHANCE + SUPER_SPAWN_CHANCE) return "super";
+    return "mole";
   }
 
   function pointInRect(x, y, r) {
@@ -92,10 +121,11 @@
     gameState.remainingMs = GAME_DURATION_MS;
     gameState.lastTickTime = null;
     gameState.activeHole = -1;
+    gameState.moleType = "mole";
     gameState.moleSpawnedAt = 0;
     gameState.moleDurationMs = BASE_MOLE_MS;
     gameState.nextSpawnAt = 0;
-    gameState.hitFlash = { hole: -1, until: 0 };
+    gameState.hitFlash = { hole: -1, until: 0, type: null };
     gameState.cursor = { x: null, y: null, inBounds: true };
   };
 
@@ -143,6 +173,7 @@
     if (gameState.activeHole === -1 && now >= gameState.nextSpawnAt) {
       gameState.activeHole = pickRandomHole(-1);
       gameState.moleSpawnedAt = now;
+      gameState.moleType = pickRandomMoleType();
     }
   };
 
@@ -185,8 +216,15 @@
     if (holeIndex !== gameState.activeHole) return false;
 
     const now = performance.now();
-    gameState.score += 1;
-    gameState.hitFlash = { hole: holeIndex, until: now + HIT_FEEDBACK_MS };
+    const hitType = gameState.moleType;
+
+    if (hitType === "bomb") {
+      gameState.score = Math.max(0, gameState.score - BOMB_PENALTY);
+    } else {
+      gameState.score += hitType === "super" ? SUPER_MOLE_POINTS : 1;
+    }
+
+    gameState.hitFlash = { hole: holeIndex, until: now + HIT_FEEDBACK_MS, type: hitType };
     gameState.activeHole = -1;
     gameState.level = Math.max(gameState.selectedLevel, computeLevel(gameState.score));
     gameState.moleDurationMs = computeMoleDuration(gameState.level);
@@ -299,7 +337,7 @@
     const width = canvas.clientWidth || canvas.width;
     const height = canvas.clientHeight || canvas.height;
 
-    ctx.fillStyle = "#13131c";
+    ctx.fillStyle = "#df8923";
     ctx.fillRect(0, 0, width, height);
 
     // HUD: score (left), timer (center), level (right)
@@ -332,39 +370,62 @@
     // Grid + moles
     const layout = window.getGameGridLayout(canvas);
     const now = performance.now();
+    const holeImg = moleImages.hole;
 
     layout.holes.forEach((hole) => {
-      ctx.fillStyle = "#3b2a1a";
-      ctx.beginPath();
-      ctx.roundRect(hole.x, hole.y, hole.size, hole.size, 10);
-      ctx.fill();
-      ctx.strokeStyle = "#585b70";
-      ctx.lineWidth = 2;
-      ctx.stroke();
+      const centerX = hole.x + hole.size / 2;
+      const groundH = hole.size * 0.34;
+      const groundTopY = hole.y + hole.size - groundH;
+
+      if (isImageReady(holeImg)) {
+        const groundW = groundH * (holeImg.width / holeImg.height);
+        ctx.drawImage(holeImg, centerX - groundW / 2, groundTopY, groundW, groundH);
+      } else {
+        ctx.fillStyle = "#3b2a1a";
+        ctx.beginPath();
+        ctx.roundRect(hole.x, hole.y, hole.size, hole.size, 10);
+        ctx.fill();
+        ctx.strokeStyle = "#585b70";
+        ctx.lineWidth = 2;
+        ctx.stroke();
+      }
 
       const isFlashing = gameState.hitFlash.hole === hole.index && now < gameState.hitFlash.until;
       if (isFlashing) {
-        ctx.fillStyle = "rgba(34, 197, 94, 0.35)";
+        ctx.fillStyle = gameState.hitFlash.type === "bomb" ? "rgba(239, 68, 68, 0.4)" : "rgba(34, 197, 94, 0.35)";
         ctx.beginPath();
         ctx.roundRect(hole.x, hole.y, hole.size, hole.size, 10);
         ctx.fill();
       }
 
       if (hole.index === gameState.activeHole) {
-        const moleRadius = hole.size * 0.32;
-        const moleCX = hole.x + hole.size / 2;
-        const moleCY = hole.y + hole.size / 2;
+        const type = gameState.moleType;
+        const img = moleImages[type === "bomb" ? "bomb" : type === "super" ? "super_mole" : "mole"];
 
-        ctx.fillStyle = "#8b5e3c";
-        ctx.beginPath();
-        ctx.ellipse(moleCX, moleCY, moleRadius, moleRadius * 0.9, 0, 0, Math.PI * 2);
-        ctx.fill();
-
-        ctx.fillStyle = "#13131c";
-        ctx.beginPath();
-        ctx.arc(moleCX - moleRadius * 0.35, moleCY - moleRadius * 0.15, moleRadius * 0.12, 0, Math.PI * 2);
-        ctx.arc(moleCX + moleRadius * 0.35, moleCY - moleRadius * 0.15, moleRadius * 0.12, 0, Math.PI * 2);
-        ctx.fill();
+        if (isImageReady(img)) {
+          const height = type === "bomb" ? hole.size * 0.42 : hole.size * 0.62;
+          drawImageCentered(ctx, img, centerX, groundTopY - height * 0.35, height);
+        } else {
+          const moleRadius = hole.size * 0.32;
+          const moleCY = hole.y + hole.size / 2;
+          ctx.fillStyle = type === "bomb" ? "#1f2937" : "#8b5e3c";
+          ctx.beginPath();
+          ctx.ellipse(centerX, moleCY, moleRadius, moleRadius * 0.9, 0, 0, Math.PI * 2);
+          ctx.fill();
+          if (type !== "bomb") {
+            ctx.fillStyle = "#13131c";
+            ctx.beginPath();
+            ctx.arc(centerX - moleRadius * 0.35, moleCY - moleRadius * 0.15, moleRadius * 0.12, 0, Math.PI * 2);
+            ctx.arc(centerX + moleRadius * 0.35, moleCY - moleRadius * 0.15, moleRadius * 0.12, 0, Math.PI * 2);
+            ctx.fill();
+          }
+        }
+      } else if (isFlashing && gameState.hitFlash.type !== "bomb") {
+        const img = moleImages[gameState.hitFlash.type === "super" ? "dead_super_mole" : "dead_mole"];
+        if (isImageReady(img)) {
+          const height = hole.size * 0.62;
+          drawImageCentered(ctx, img, centerX, groundTopY - height * 0.35, height);
+        }
       }
     });
 
