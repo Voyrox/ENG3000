@@ -213,7 +213,7 @@ bool sendData(const String& data) {
 }
 
 void sendSensorSnapshot() {
-    bool detected = center.detectBoat();
+    bool detected = center.detectPerson();
 
     String payload = "{";
     payload += "\"nodeId\":" + String(nodeID);

@@ -14,7 +14,7 @@ class Ultrasonic {
   int echoPin = 0;
   String nametag = "";
 
-  bool detectBoat() {
+  bool detectPerson() {
     unsigned long now = millis();
     if (now - lastReadMillis < readCooldown) {
       return avg <= safeDistance;
