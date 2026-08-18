@@ -4,29 +4,22 @@
 // `window` that canvas.js drives:
 
 //   window.resetGame()                         - start/restart a round
+//   window.pauseGame() / window.resumeGame()    - pause/resume mid-round
 //   window.updateGame(timestampMs)              - advance game state, call every frame
 //   window.setGameCursor(canvas, x, y)          - feed in the latest input coordinate
 //   window.handleGameClick(canvas, x, y)        - register a hit attempt
+//   window.getGamePauseButtonAtPoint(canvas,x,y)- hit-test the pause icon
+//   window.getPauseMenuButtonAtPoint(canvas,x,y)- hit-test Resume / Restart / Main Menu
 //   window.getGameOverButtonAtPoint(canvas,x,y) - hit-test Restart / Return to Start
 //   window.renderGame(ctx, canvas, nodes)              - draw the current frame
 //   window.getGameState()                       - read-only peek at state (score/level/etc)
-
-
-
-//Bugs
-// - level select features is kinda broken it
-// works fine when you do not hit moles but when
-// you hit moles the mole timer gets overriden
-
-
-
 
 (function () {
   const GAME_DURATION_MS = 60000; // overall round length shown as the countdown
   const HITS_PER_LEVEL = 5; // score needed to advance a level
   const BASE_MOLE_MS = 3000; // visible duration at level 1
-  const MIN_MOLE_MS = 150; // floor so higher levels stay clickable
-  const MAX_SELECTABLE_LEVEL = 10; // highest level selectable from the HUD
+  const MIN_MOLE_MS = 400; // floor so even high levels stay realistically hittable
+  const MOLE_DURATION_DECAY = 0.85; // gentle falloff (was 1.6) so late levels don't become unplayable
   const MIN_SPAWN_DELAY_MS = 250; // gap before a new mole appears
   const MAX_SPAWN_DELAY_MS = 700;
   const HIT_FEEDBACK_MS = 200; // how long the "hit" flash lasts
@@ -34,6 +27,27 @@
   const BOMB_PENALTY = 3; // score lost for hitting a bomb
   const BOMB_SPAWN_CHANCE = 0.2; // share of spawns that are bombs
   const SUPER_SPAWN_CHANCE = 0.15; // share of spawns that are super moles
+  const DEFAULT_LIVES = 3;
+  const DURATION_OPTIONS_MS = [30000, 60000, 90000];
+  const LIVES_OPTIONS = [1, 3, 5];
+
+  // Adjustable via the Options screen; read fresh at the start of each round.
+  const settings = {
+    durationMs: GAME_DURATION_MS,
+    startingLives: DEFAULT_LIVES,
+    soundEnabled: true,
+  };
+
+  window.getGameSettings = function getGameSettings() {
+    return { ...settings };
+  };
+
+  window.setGameSettings = function setGameSettings(partial) {
+    Object.assign(settings, partial);
+  };
+
+  window.DURATION_OPTIONS_MS = DURATION_OPTIONS_MS;
+  window.LIVES_OPTIONS = LIVES_OPTIONS;
 
   const moleImages = {};
   ["hole", "mole", "bomb", "dead_mole", "super_mole", "super_mole_hit", "dead_super_mole"].forEach((name) => {
@@ -53,17 +67,20 @@
   }
 
   const gameState = {
-    status: "idle", // "idle" | "playing" | "gameover"
+    status: "idle", // "idle" | "playing" | "paused" | "gameover"
     score: 0,
     level: 1,
-    selectedLevel: 1,
+    peakLevel: 1,
+    lives: DEFAULT_LIVES,
     remainingMs: GAME_DURATION_MS,
     lastTickTime: null,
     activeHole: -1, // -1 means no mole currently up
     moleType: "mole", // "mole" | "bomb" | "super"
+    moleWounded: false, // true once a hat (super) mole has taken its first of two hits
     moleSpawnedAt: 0,
     moleDurationMs: BASE_MOLE_MS,
     nextSpawnAt: 0,
+    pausedAt: 0,
     hitFlash: { hole: -1, until: 0, type: null },
     cursor: { x: null, y: null, inBounds: true },
   };
@@ -77,8 +94,23 @@
   }
 
   function computeMoleDuration(level) {
-    const scaled = BASE_MOLE_MS / Math.pow(level, 1.6);
+    const scaled = BASE_MOLE_MS / Math.pow(level, MOLE_DURATION_DECAY);
     return Math.max(MIN_MOLE_MS, Math.floor(scaled));
+  }
+
+  // Extra lives to compensate for higher levels' shorter mole windows: +1 life every 2 levels.
+  function levelLivesBonus(level) {
+    return Math.floor((level - 1) / 2);
+  }
+
+  // Grants bonus lives as the player reaches new peak levels. Tracked against a
+  // peak (rather than the current, occasionally-dipping level) so a bomb penalty
+  // dropping the score - and with it the current level - never claws lives back.
+  function grantLevelBonus(currentLevel) {
+    if (currentLevel > gameState.peakLevel) {
+      gameState.lives += levelLivesBonus(currentLevel) - levelLivesBonus(gameState.peakLevel);
+      gameState.peakLevel = currentLevel;
+    }
   }
 
   function pickRandomHole(excludeHole) {
@@ -116,12 +148,15 @@
   window.resetGame = function resetGame() {
     gameState.status = "playing";
     gameState.score = 0;
-    gameState.level = gameState.selectedLevel;
-    gameState.moleDurationMs = computeMoleDuration(gameState.level);
-    gameState.remainingMs = GAME_DURATION_MS;
+    // Always starts at level 1; players climb further levels by scoring, not by picking a start.
+    gameState.level = 1;
+    gameState.peakLevel = 1;
+    gameState.lives = settings.startingLives;
+    gameState.remainingMs = settings.durationMs;
     gameState.lastTickTime = null;
     gameState.activeHole = -1;
     gameState.moleType = "mole";
+    gameState.moleWounded = false;
     gameState.moleSpawnedAt = 0;
     gameState.moleDurationMs = BASE_MOLE_MS;
     gameState.nextSpawnAt = 0;
@@ -133,11 +168,22 @@
     return gameState;
   };
 
-  window.setGameLevel = function setGameLevel(level) {
-    const nextLevel = Math.max(1, Math.min(MAX_SELECTABLE_LEVEL, level));
-    gameState.selectedLevel = nextLevel;
-    gameState.level = Math.max(nextLevel, computeLevel(gameState.score));
-    gameState.moleDurationMs = computeMoleDuration(gameState.level);
+  window.pauseGame = function pauseGame() {
+    if (gameState.status !== "playing") return;
+    gameState.status = "paused";
+    gameState.pausedAt = performance.now();
+  };
+
+  // Shifts the mole/spawn timers forward by however long the pause lasted, so
+  // the resumed round picks up exactly where it left off instead of the
+  // paused wall-clock time counting against the mole timer / round clock.
+  window.resumeGame = function resumeGame() {
+    if (gameState.status !== "paused") return;
+    const pausedDuration = performance.now() - gameState.pausedAt;
+    gameState.moleSpawnedAt += pausedDuration;
+    gameState.nextSpawnAt += pausedDuration;
+    gameState.lastTickTime = null;
+    gameState.status = "playing";
   };
 
   // Call every animation frame with a timestamp (e.g. from requestAnimationFrame).
@@ -162,18 +208,30 @@
 
     // Mole timed out without being hit -> remove it and schedule the next one.
     if (gameState.activeHole !== -1 && now - gameState.moleSpawnedAt >= gameState.moleDurationMs) {
+      const missedMole = gameState.moleType !== "bomb"; // letting a bomb expire is fine, missing a mole costs a life
       gameState.activeHole = -1;
+      gameState.moleWounded = false;
       gameState.nextSpawnAt = now + randomBetween(MIN_SPAWN_DELAY_MS, MAX_SPAWN_DELAY_MS);
+
+      if (missedMole) {
+        gameState.lives = Math.max(0, gameState.lives - 1);
+        if (gameState.lives <= 0) {
+          gameState.status = "gameover";
+          return;
+        }
+      }
     }
 
-    gameState.level = Math.max(gameState.selectedLevel, computeLevel(gameState.score));
+    gameState.level = computeLevel(gameState.score);
     gameState.moleDurationMs = computeMoleDuration(gameState.level);
+    grantLevelBonus(gameState.level);
 
     // Spawn a mole if none is up and it's time (only one hole active at once).
     if (gameState.activeHole === -1 && now >= gameState.nextSpawnAt) {
       gameState.activeHole = pickRandomHole(-1);
       gameState.moleSpawnedAt = now;
       gameState.moleType = pickRandomMoleType();
+      gameState.moleWounded = false;
     }
   };
 
@@ -218,17 +276,33 @@
     const now = performance.now();
     const hitType = gameState.moleType;
 
+    // Hat (super) moles take two hits to defeat. The first hit just wounds it and
+    // refreshes its timer for the finishing blow - no score/life change yet.
+    if (hitType === "super" && !gameState.moleWounded) {
+      gameState.moleWounded = true;
+      gameState.moleSpawnedAt = now;
+      gameState.hitFlash = { hole: holeIndex, until: now + HIT_FEEDBACK_MS, type: "wounded" };
+      return true;
+    }
+
     if (hitType === "bomb") {
       gameState.score = Math.max(0, gameState.score - BOMB_PENALTY);
+      gameState.lives = Math.max(0, gameState.lives - 1);
     } else {
       gameState.score += hitType === "super" ? SUPER_MOLE_POINTS : 1;
     }
 
     gameState.hitFlash = { hole: holeIndex, until: now + HIT_FEEDBACK_MS, type: hitType };
     gameState.activeHole = -1;
-    gameState.level = Math.max(gameState.selectedLevel, computeLevel(gameState.score));
+    gameState.moleWounded = false;
+    gameState.level = computeLevel(gameState.score);
     gameState.moleDurationMs = computeMoleDuration(gameState.level);
+    grantLevelBonus(gameState.level);
     gameState.nextSpawnAt = now + randomBetween(MIN_SPAWN_DELAY_MS, MAX_SPAWN_DELAY_MS);
+
+    if (gameState.lives <= 0) {
+      gameState.status = "gameover";
+    }
     return true;
   }
 
@@ -257,28 +331,6 @@
     if (!hole) return false;
     return awardPointForHole(hole.index);
   };
-
-  function getGameLevelLayout(canvas) {
-    const width = canvas.clientWidth || canvas.width;
-    const height = canvas.clientHeight || canvas.height;
-    const buttonSize = 38;
-    const gap = 8;
-    const startX = width / 2 - ((buttonSize * 5 + gap * 4) / 2)-110;
-    const y = Math.max(60, height * 0.08);
-
-    return {
-      buttons: Array.from({ length: MAX_SELECTABLE_LEVEL }, (_, index) => {
-        const level = index + 1;
-        return {
-          level,
-          x: startX + index * (buttonSize + gap),
-          y,
-          width: buttonSize,
-          height: buttonSize,
-        };
-      }),
-    };
-  }
 
   //Input: Nodes array
   //Output: Santised x, y corrdinate and too close flag for the alert, i.e. [int x, int y, bool alert]
@@ -371,12 +423,6 @@
     return []
   }
 
-  window.getGameLevelButtonAtPoint = function getGameLevelButtonAtPoint(canvas, x, y) {
-    const layout = getGameLevelLayout(canvas);
-    const hit = layout.buttons.find((button) => pointInRect(x, y, button));
-    return hit ? { type: "level", level: hit.level } : null;
-  };
-
   window.getGameOverButtonAtPoint = function getGameOverButtonAtPoint(canvas, x, y) {
     if (gameState.status !== "gameover") return null;
     const layout = getGameOverLayout(canvas);
@@ -386,35 +432,96 @@
     return null;
   };
 
+  // Small square icon, top-left, above the score panel.
+  function getGamePauseLayout() {
+    return { x: 12, y: 12, width: 44, height: 44 };
+  }
+
+  window.getGamePauseButtonAtPoint = function getGamePauseButtonAtPoint(canvas, x, y) {
+    if (gameState.status !== "playing") return null;
+    return pointInRect(x, y, getGamePauseLayout()) ? { type: "pause" } : null;
+  };
+
+  function getPauseMenuLayout(canvas) {
+    const width = canvas.clientWidth || canvas.width;
+    const height = canvas.clientHeight || canvas.height;
+    const centerX = width / 2;
+    const buttonWidth = 220;
+    const buttonHeight = 52;
+    const gap = 16;
+    const firstY = height / 2 - 80;
+
+    return {
+      resumeButton: { x: centerX - buttonWidth / 2, y: firstY, width: buttonWidth, height: buttonHeight },
+      restartButton: { x: centerX - buttonWidth / 2, y: firstY + (buttonHeight + gap), width: buttonWidth, height: buttonHeight },
+      menuButton: { x: centerX - buttonWidth / 2, y: firstY + (buttonHeight + gap) * 2, width: buttonWidth, height: buttonHeight },
+    };
+  }
+
+  window.getPauseMenuButtonAtPoint = function getPauseMenuButtonAtPoint(canvas, x, y) {
+    if (gameState.status !== "paused") return null;
+    const layout = getPauseMenuLayout(canvas);
+
+    if (pointInRect(x, y, layout.resumeButton)) return { type: "resume" };
+    if (pointInRect(x, y, layout.restartButton)) return { type: "restart" };
+    if (pointInRect(x, y, layout.menuButton)) return { type: "menu" };
+    return null;
+  };
+
   function renderGameOverOverlay(ctx, canvas) {
     const width = canvas.clientWidth || canvas.width;
     const height = canvas.clientHeight || canvas.height;
     const centerX = width / 2;
+    const layout = getGameOverLayout(canvas);
 
-    ctx.fillStyle = "rgba(0, 0, 0, 0.7)";
+    ctx.fillStyle = "rgba(0, 0, 0, 0.55)";
     ctx.fillRect(0, 0, width, height);
 
+    const cardWidth = Math.min(480, width - 40);
+    const cardTop = height / 2 - 130;
+    const cardBottom = layout.restartButton.y + layout.restartButton.height + 26;
+    ctx.save();
+    ctx.shadowColor = "rgba(0, 0, 0, 0.5)";
+    ctx.shadowBlur = 30;
+    ctx.fillStyle = "#1a1b26";
+    ctx.beginPath();
+    ctx.roundRect(centerX - cardWidth / 2, cardTop, cardWidth, cardBottom - cardTop, 18);
+    ctx.fill();
+    ctx.restore();
+    ctx.strokeStyle = "rgba(255, 255, 255, 0.08)";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.roundRect(centerX - cardWidth / 2, cardTop, cardWidth, cardBottom - cardTop, 18);
+    ctx.stroke();
+
     ctx.textAlign = "center";
-    ctx.fillStyle = "#cdd6f4";
+    ctx.fillStyle = "#f4f4f5";
     ctx.font = "bold 40px monospace";
     ctx.fillText("Game Over", centerX, height / 2 - 60);
 
-    ctx.font = "20px monospace";
-    ctx.fillText(`Score: ${gameState.score}   Level reached: ${gameState.level}`, centerX, height / 2 - 10);
+    ctx.fillStyle = "#9298aa";
+    ctx.font = "18px monospace";
+    ctx.fillText(`Score: ${gameState.score}   Level reached: ${gameState.level}`, centerX, height / 2 - 20);
+    if (gameState.lives <= 0) {
+      ctx.fillStyle = "#ef4444";
+      ctx.fillText("Out of lives", centerX, height / 2 + 8);
+    }
 
-    const layout = getGameOverLayout(canvas);
-
+    ctx.save();
+    ctx.shadowColor = "rgba(34, 197, 94, 0.4)";
+    ctx.shadowBlur = 10;
     ctx.fillStyle = "#22c55e";
     ctx.beginPath();
-    ctx.roundRect(layout.restartButton.x, layout.restartButton.y, layout.restartButton.width, layout.restartButton.height, 8);
+    ctx.roundRect(layout.restartButton.x, layout.restartButton.y, layout.restartButton.width, layout.restartButton.height, 10);
     ctx.fill();
+    ctx.restore();
     ctx.fillStyle = "#13131c";
     ctx.font = "bold 16px monospace";
     ctx.fillText("Restart", layout.restartButton.x + layout.restartButton.width / 2, layout.restartButton.y + layout.restartButton.height / 2 + 6);
 
-    ctx.fillStyle = "#475569";
+    ctx.fillStyle = "#3a3f52";
     ctx.beginPath();
-    ctx.roundRect(layout.returnButton.x, layout.returnButton.y, layout.returnButton.width, layout.returnButton.height, 8);
+    ctx.roundRect(layout.returnButton.x, layout.returnButton.y, layout.returnButton.width, layout.returnButton.height, 10);
     ctx.fill();
     ctx.fillStyle = "#fff";
     ctx.fillText("Return to Start", layout.returnButton.x + layout.returnButton.width / 2, layout.returnButton.y + layout.returnButton.height / 2 + 6);
@@ -422,46 +529,166 @@
     ctx.textAlign = "start";
   }
 
+  function renderPauseOverlay(ctx, canvas) {
+    const width = canvas.clientWidth || canvas.width;
+    const height = canvas.clientHeight || canvas.height;
+    const centerX = width / 2;
+    const layout = getPauseMenuLayout(canvas);
+
+    ctx.fillStyle = "rgba(0, 0, 0, 0.55)";
+    ctx.fillRect(0, 0, width, height);
+
+    const cardWidth = Math.min(360, width - 40);
+    const cardTop = layout.resumeButton.y - 90;
+    const cardBottom = layout.menuButton.y + layout.menuButton.height + 24;
+    ctx.save();
+    ctx.shadowColor = "rgba(0, 0, 0, 0.5)";
+    ctx.shadowBlur = 30;
+    ctx.fillStyle = "#1a1b26";
+    ctx.beginPath();
+    ctx.roundRect(centerX - cardWidth / 2, cardTop, cardWidth, cardBottom - cardTop, 18);
+    ctx.fill();
+    ctx.restore();
+    ctx.strokeStyle = "rgba(255, 255, 255, 0.08)";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.roundRect(centerX - cardWidth / 2, cardTop, cardWidth, cardBottom - cardTop, 18);
+    ctx.stroke();
+
+    ctx.textAlign = "center";
+    ctx.fillStyle = "#f4f4f5";
+    ctx.font = "bold 32px monospace";
+    ctx.fillText("Paused", centerX, layout.resumeButton.y - 40);
+
+    ctx.save();
+    ctx.shadowColor = "rgba(34, 197, 94, 0.4)";
+    ctx.shadowBlur = 10;
+    ctx.fillStyle = "#22c55e";
+    ctx.beginPath();
+    ctx.roundRect(layout.resumeButton.x, layout.resumeButton.y, layout.resumeButton.width, layout.resumeButton.height, 10);
+    ctx.fill();
+    ctx.restore();
+    ctx.fillStyle = "#13131c";
+    ctx.font = "bold 16px monospace";
+    ctx.fillText("Resume", layout.resumeButton.x + layout.resumeButton.width / 2, layout.resumeButton.y + layout.resumeButton.height / 2 + 6);
+
+    ctx.fillStyle = "#3b82f6";
+    ctx.beginPath();
+    ctx.roundRect(layout.restartButton.x, layout.restartButton.y, layout.restartButton.width, layout.restartButton.height, 10);
+    ctx.fill();
+    ctx.fillStyle = "#13131c";
+    ctx.fillText("Restart", layout.restartButton.x + layout.restartButton.width / 2, layout.restartButton.y + layout.restartButton.height / 2 + 6);
+
+    ctx.fillStyle = "#3a3f52";
+    ctx.beginPath();
+    ctx.roundRect(layout.menuButton.x, layout.menuButton.y, layout.menuButton.width, layout.menuButton.height, 10);
+    ctx.fill();
+    ctx.fillStyle = "#fff";
+    ctx.fillText("Main Menu", layout.menuButton.x + layout.menuButton.width / 2, layout.menuButton.y + layout.menuButton.height / 2 + 6);
+
+    ctx.textAlign = "start";
+  }
+
+  // Rounded, slightly-elevated card used behind HUD readouts.
+  function drawHudPanel(ctx, x, y, w, h, radius) {
+    ctx.save();
+    ctx.shadowColor = "rgba(0, 0, 0, 0.25)";
+    ctx.shadowBlur = 10;
+    ctx.shadowOffsetY = 3;
+    ctx.fillStyle = "rgba(19, 19, 28, 0.55)";
+    ctx.beginPath();
+    ctx.roundRect(x, y, w, h, radius);
+    ctx.fill();
+    ctx.restore();
+    ctx.strokeStyle = "rgba(255, 255, 255, 0.08)";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.roundRect(x, y, w, h, radius);
+    ctx.stroke();
+  }
+
   window.renderGame = function renderGame(ctx, canvas, nodes) {
     // console.log(nodes)
 
     locationArr = triangulate(nodes);
-    
+
     const width = canvas.clientWidth || canvas.width;
     const height = canvas.clientHeight || canvas.height;
 
-    ctx.fillStyle = "#df8923";
-    ctx.fillRect(0, 0, width, height);
+    // Computed first (rather than down by the mole-drawing loop) so the
+    // sky/grass horizon can be pinned to sit right above the grid, keeping
+    // every hole fully inside the grass instead of poking into the sky.
+    const layout = window.getGameGridLayout(canvas);
+    const horizonY = Math.max(70, layout.gridTop - 36);
 
-    // HUD: score (left), timer (center), level (right)
+    // Sky-to-grass backdrop, echoing the whack-a-mole art direction.
+    const sky = ctx.createLinearGradient(0, 0, 0, horizonY);
+    sky.addColorStop(0, "#8fd3f4");
+    sky.addColorStop(1, "#bfe9c9");
+    ctx.fillStyle = sky;
+    ctx.fillRect(0, 0, width, horizonY);
+
+    const grass = ctx.createLinearGradient(0, horizonY, 0, height);
+    grass.addColorStop(0, "#8bc34a");
+    grass.addColorStop(1, "#5a8f2f");
+    ctx.fillStyle = grass;
+    ctx.fillRect(0, horizonY, width, height - horizonY);
+
+    // Pause button, top-left corner (only actionable mid-round, but its
+    // position is always reserved so the score panel next to it never shifts).
+    const pauseLayout = getGamePauseLayout();
+    if (gameState.status === "playing") {
+      drawHudPanel(ctx, pauseLayout.x, pauseLayout.y, pauseLayout.width, pauseLayout.height, 10);
+      const barW = pauseLayout.width * 0.16;
+      const barH = pauseLayout.height * 0.5;
+      const barGap = pauseLayout.width * 0.12;
+      const pcx = pauseLayout.x + pauseLayout.width / 2;
+      const pcy = pauseLayout.y + pauseLayout.height / 2;
+      ctx.fillStyle = "#f4f4f5";
+      ctx.fillRect(pcx - barGap - barW, pcy - barH / 2, barW, barH);
+      ctx.fillRect(pcx + barGap, pcy - barH / 2, barW, barH);
+    }
+
+    // HUD: pause + score + lives share one row on the left, timer center, level right.
+    const scoreFontSize = Math.max(22, Math.min(30, width * 0.024));
+    const livesFontSize = Math.max(32, Math.min(46, width * 0.036));
+    const scorePanel = {
+      x: pauseLayout.x + pauseLayout.width + 10,
+      y: pauseLayout.y,
+      w: Math.max(190, Math.min(260, width * 0.2)),
+      h: scoreFontSize + livesFontSize + 40,
+    };
+    drawHudPanel(ctx, scorePanel.x, scorePanel.y, scorePanel.w, scorePanel.h, 14);
+
     ctx.textAlign = "left";
-    ctx.fillStyle = "#cdd6f4";
-    ctx.font = "bold 20px monospace";
-    ctx.fillText(`Score: ${gameState.score}`, 20, 36);
+    ctx.fillStyle = "#f4f4f5";
+    ctx.font = `bold ${scoreFontSize}px monospace`;
+    ctx.fillText(`Score: ${gameState.score}`, scorePanel.x + 16, scorePanel.y + scoreFontSize + 8);
 
+    ctx.fillStyle = "#ef4444";
+    ctx.font = `bold ${livesFontSize}px monospace`;
+    ctx.fillText("♥".repeat(Math.max(0, gameState.lives)), scorePanel.x + 16, scorePanel.y + scoreFontSize + livesFontSize + 22);
+
+    const levelPanel = { w: 130, h: 40 };
+    levelPanel.x = width - 12 - levelPanel.w;
+    levelPanel.y = 12;
+    drawHudPanel(ctx, levelPanel.x, levelPanel.y, levelPanel.w, levelPanel.h, 12);
     ctx.textAlign = "right";
-    ctx.fillText(`Level: ${gameState.level}`, width - 20, 36);
+    ctx.fillStyle = "#f4f4f5";
+    ctx.font = "bold 20px monospace";
+    ctx.fillText(`Level: ${gameState.level}`, levelPanel.x + levelPanel.w - 14, levelPanel.y + 27);
 
-    const levelLayout = getGameLevelLayout(canvas);
-    levelLayout.buttons.forEach((button) => {
-      const isSelected = button.level === gameState.selectedLevel;
-      ctx.fillStyle = isSelected ? "#22c55e" : "#475569";
-      ctx.beginPath();
-      ctx.roundRect(button.x, button.y, button.width, button.height, 8);
-      ctx.fill();
-      ctx.fillStyle = "#fff";
-      ctx.textAlign = "center";
-      ctx.font = "bold 14px monospace";
-      ctx.fillText(`${button.level}`, button.x + button.width / 2, button.y + button.height / 2 + 5);
-    });
     ctx.textAlign = "center";
     const secondsLeft = Math.ceil(gameState.remainingMs / 1000);
-    ctx.fillStyle = secondsLeft <= 10 ? "#ef4444" : "#cdd6f4";
-    ctx.font = "bold 24px monospace";
-    ctx.fillText(`${secondsLeft}s`, width / 2, 40);
+    const timerFontSize = Math.max(32, Math.min(52, width * 0.045));
+    const timerPanelW = timerFontSize * 3.4;
+    const timerPanelH = timerFontSize * 1.35;
+    drawHudPanel(ctx, width / 2 - timerPanelW / 2, 8, timerPanelW, timerPanelH, timerPanelH / 2);
+    ctx.fillStyle = secondsLeft <= 10 ? "#ef4444" : "#f4f4f5";
+    ctx.font = `bold ${timerFontSize}px monospace`;
+    ctx.fillText(`${secondsLeft}s`, width / 2, 8 + timerPanelH / 2 + timerFontSize * 0.35);
 
     // Grid + moles
-    const layout = window.getGameGridLayout(canvas);
     const now = performance.now();
     const holeImg = moleImages.hole;
 
@@ -470,22 +697,40 @@
       const groundH = hole.size * 0.34;
       const groundTopY = hole.y + hole.size - groundH;
 
+      // Soft dirt mound behind every tile so moles read as "popping up" even
+      // once the hole artwork has loaded.
+      ctx.save();
+      ctx.shadowColor = "rgba(0, 0, 0, 0.3)";
+      ctx.shadowBlur = 14;
+      ctx.shadowOffsetY = 6;
+      const moundGradient = ctx.createRadialGradient(
+        centerX, groundTopY + groundH * 0.4, hole.size * 0.05,
+        centerX, groundTopY + groundH * 0.4, hole.size * 0.6
+      );
+      moundGradient.addColorStop(0, "#7a5230");
+      moundGradient.addColorStop(1, "#4a3116");
+      ctx.fillStyle = moundGradient;
+      ctx.beginPath();
+      ctx.roundRect(hole.x, hole.y, hole.size, hole.size, 14);
+      ctx.fill();
+      ctx.restore();
+
       if (isImageReady(holeImg)) {
         const groundW = groundH * (holeImg.width / holeImg.height);
         ctx.drawImage(holeImg, centerX - groundW / 2, groundTopY, groundW, groundH);
       } else {
         ctx.fillStyle = "#3b2a1a";
         ctx.beginPath();
-        ctx.roundRect(hole.x, hole.y, hole.size, hole.size, 10);
+        ctx.ellipse(centerX, groundTopY + groundH * 0.4, hole.size * 0.3, groundH * 0.4, 0, 0, Math.PI * 2);
         ctx.fill();
-        ctx.strokeStyle = "#585b70";
-        ctx.lineWidth = 2;
-        ctx.stroke();
       }
 
       const isFlashing = gameState.hitFlash.hole === hole.index && now < gameState.hitFlash.until;
       if (isFlashing) {
-        ctx.fillStyle = gameState.hitFlash.type === "bomb" ? "rgba(239, 68, 68, 0.4)" : "rgba(34, 197, 94, 0.35)";
+        let flashColor = "rgba(34, 197, 94, 0.35)";
+        if (gameState.hitFlash.type === "bomb") flashColor = "rgba(239, 68, 68, 0.4)";
+        else if (gameState.hitFlash.type === "wounded") flashColor = "rgba(234, 179, 8, 0.45)";
+        ctx.fillStyle = flashColor;
         ctx.beginPath();
         ctx.roundRect(hole.x, hole.y, hole.size, hole.size, 10);
         ctx.fill();
@@ -493,7 +738,10 @@
 
       if (hole.index === gameState.activeHole) {
         const type = gameState.moleType;
-        const img = moleImages[type === "bomb" ? "bomb" : type === "super" ? "super_mole" : "mole"];
+        let imgKey = "mole";
+        if (type === "bomb") imgKey = "bomb";
+        else if (type === "super") imgKey = gameState.moleWounded ? "super_mole_hit" : "super_mole";
+        const img = moleImages[imgKey];
 
         if (isImageReady(img)) {
           const height = type === "bomb" ? hole.size * 0.42 : hole.size * 0.62;
@@ -513,7 +761,7 @@
             ctx.fill();
           }
         }
-      } else if (isFlashing && gameState.hitFlash.type !== "bomb") {
+      } else if (isFlashing && gameState.hitFlash.type !== "bomb" && gameState.hitFlash.type !== "wounded") {
         const img = moleImages[gameState.hitFlash.type === "super" ? "dead_super_mole" : "dead_mole"];
         if (isImageReady(img)) {
           const height = hole.size * 0.62;
@@ -522,23 +770,71 @@
       }
     });
 
+    // Floating "How to Play" legend, right-hand side.
+    const legendWidth = Math.max(220, Math.min(300, width * 0.22));
+    const legendX = width - 12 - legendWidth;
+    const legendY = Math.max(140, height * 0.22);
+    const legendEntries = [
+      { color: "#8b5e3c", title: "Mole", lines: ["Whack it for", "+1 point."] },
+      { color: "#eab308", title: "Hat Mole", lines: ["2 hits to defeat,", `worth +${SUPER_MOLE_POINTS} points.`] },
+      { color: "#ef4444", title: "Bomb", lines: [`Avoid! -${BOMB_PENALTY} points`, "and a lost life."] },
+    ];
+    const legendEntryHeight = 74;
+    const legendHeaderHeight = 40;
+    const legendHeight = legendHeaderHeight + legendEntries.length * legendEntryHeight + 14;
+    drawHudPanel(ctx, legendX, legendY, legendWidth, legendHeight, 14);
+
+    ctx.textAlign = "left";
+    ctx.fillStyle = "#f4f4f5";
+    ctx.font = "bold 16px monospace";
+    ctx.fillText("How to Play", legendX + 16, legendY + 26);
+
+    legendEntries.forEach((entry, index) => {
+      const entryY = legendY + legendHeaderHeight + index * legendEntryHeight;
+      ctx.fillStyle = entry.color;
+      ctx.beginPath();
+      ctx.roundRect(legendX + 16, entryY, 18, 18, 5);
+      ctx.fill();
+
+      ctx.fillStyle = "#f4f4f5";
+      ctx.font = "bold 15px monospace";
+      ctx.fillText(entry.title, legendX + 44, entryY + 14);
+
+      ctx.fillStyle = "#9298aa";
+      ctx.font = "12px monospace";
+      entry.lines.forEach((line, lineIndex) => {
+        ctx.fillText(line, legendX + 16, entryY + 34 + lineIndex * 15);
+      });
+    });
+
     // Cursor from click / external (flask) coordinate
     if (gameState.cursor.x !== null) {
       if (gameState.cursor.inBounds) {
+        ctx.save();
+        ctx.shadowColor = "rgba(250, 204, 21, 0.9)";
+        ctx.shadowBlur = 12;
         ctx.strokeStyle = "#facc15";
-        ctx.lineWidth = 2;
+        ctx.lineWidth = 2.5;
         ctx.beginPath();
         ctx.arc(gameState.cursor.x, gameState.cursor.y, 10, 0, Math.PI * 2);
         ctx.stroke();
+        ctx.fillStyle = "rgba(250, 204, 21, 0.25)";
+        ctx.beginPath();
+        ctx.arc(gameState.cursor.x, gameState.cursor.y, 4, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
       } else {
+        drawHudPanel(ctx, width / 2 - 100, height - 58, 200, 40, 10);
         ctx.fillStyle = "#ef4444";
         ctx.font = "bold 16px monospace";
         ctx.textAlign = "center";
-        ctx.fillText("Out of bounds", width / 2, height - 30);
+        ctx.fillText("Out of bounds", width / 2, height - 32);
       }
     }
 
-    if (gameState.status === "gameover") {
+    if (gameState.status === "paused") {
+      renderPauseOverlay(ctx, canvas);
+    } else if (gameState.status === "gameover") {
       renderGameOverOverlay(ctx, canvas);
     }
 

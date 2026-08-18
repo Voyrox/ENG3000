@@ -109,19 +109,35 @@ window.renderMenu = function renderMenu(ctx, canvas, statusText = "Waiting for E
   const statusWidth = Math.min(320, Math.max(200, width * 0.3));
   const statusHeight = Math.max(42, buttonHeight * 0.5);
   const statusX = centerX - statusWidth / 2;
-  const titleY = Math.max(68, height * 0.1);
-  const subtitleY = titleY - Math.max(22, width * 0.02);
+  const titleFontSize = Math.max(30, Math.min(54, width * 0.058));
+  const subtitleFontSize = Math.max(13, Math.min(18, width * 0.018));
+  const titleY = Math.max(90, height * 0.12);
+  // Gap sized off the title's own font (its ascender reaches roughly this far
+  // above the baseline), so the subtitle never sits under the title text.
+  const subtitleY = Math.max(subtitleFontSize + 4, titleY - titleFontSize - 10);
 
-  ctx.fillStyle = theme.background;
+  // Dark diagonal backdrop with a soft accent glow behind the title, instead
+  // of a flat fill.
+  const backdrop = ctx.createLinearGradient(0, 0, width, height);
+  backdrop.addColorStop(0, "#181a26");
+  backdrop.addColorStop(1, "#0a0b11");
+  ctx.fillStyle = backdrop;
+  ctx.fillRect(0, 0, width, height);
+
+  const glow = ctx.createRadialGradient(centerX, titleY, 0, centerX, titleY, Math.max(width, height) * 0.55);
+  glow.addColorStop(0, "rgba(137, 180, 250, 0.16)");
+  glow.addColorStop(0.6, "rgba(137, 180, 250, 0.05)");
+  glow.addColorStop(1, "rgba(137, 180, 250, 0)");
+  ctx.fillStyle = glow;
   ctx.fillRect(0, 0, width, height);
 
   ctx.textAlign = "center";
   ctx.fillStyle = theme.muted;
-  ctx.font = `${Math.max(13, Math.min(18, width * 0.018))}px sans-serif`;
+  ctx.font = `${subtitleFontSize}px sans-serif`;
   ctx.fillText("Group 1 ENGG3000", centerX, subtitleY);
 
   ctx.fillStyle = theme.text;
-  ctx.font = `bold ${Math.max(30, Math.min(54, width * 0.058))}px sans-serif`;
+  ctx.font = `bold ${titleFontSize}px sans-serif`;
   ctx.fillText("Whack-a-Mole", centerX, titleY);
 
   buttons.forEach((button) => {
