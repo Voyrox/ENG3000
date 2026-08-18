@@ -759,7 +759,7 @@
 	(footprint "Connector_PinHeader_2.54mm:PinHeader_1x04_P2.54mm_Vertical"
 		(layer "F.Cu")
 		(uuid "727d0fa2-5f26-4907-b8a9-13d793233916")
-		(at 116.93 62.03)
+		(at 115.265 53.035)
 		(descr "Through hole straight pin header, 1x04, 2.54mm pitch, single row")
 		(tags "Through hole pin header THT 1x04 2.54mm single row")
 		(property "Reference" "J1"
@@ -1034,7 +1034,7 @@
 	(footprint "Battery:BatteryHolder_Keystone_2462_2xAA"
 		(layer "F.Cu")
 		(uuid "9b5cc0a5-f97e-469a-b1b6-fecd35a1f6b8")
-		(at 118 35)
+		(at 116.335 26.005)
 		(descr "2xAA cell battery holder, Keystone P/N 2462, https://www.keyelco.com/product-pdf.cfm?p=1027")
 		(tags "AA battery cell holder")
 		(property "Reference" "BT1"
