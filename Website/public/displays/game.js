@@ -16,20 +16,21 @@
 
 (function () {
   const GAME_DURATION_MS = 60000; // overall round length shown as the countdown
-  const HITS_PER_LEVEL = 5; // score needed to advance a level
+  const HITS_PER_LEVEL = 10; // score needed to advance a level
   const BASE_MOLE_MS = 3000; // visible duration at level 1
-  const MIN_MOLE_MS = 400; // floor so even high levels stay realistically hittable
+  const MIN_MOLE_MS = 500; // floor so even high levels stay realistically hittable
   const MOLE_DURATION_DECAY = 0.85; // gentle falloff (was 1.6) so late levels don't become unplayable
-  const MIN_SPAWN_DELAY_MS = 250; // gap before a new mole appears
+  const MIN_SPAWN_DELAY_MS = 500; // gap before a new mole appears
   const MAX_SPAWN_DELAY_MS = 700;
   const HIT_FEEDBACK_MS = 200; // how long the "hit" flash lasts
   const SUPER_MOLE_POINTS = 3; // score awarded for hitting a super mole
   const BOMB_PENALTY = 3; // score lost for hitting a bomb
   const BOMB_SPAWN_CHANCE = 0.2; // share of spawns that are bombs
   const SUPER_SPAWN_CHANCE = 0.15; // share of spawns that are super moles
-  const DEFAULT_LIVES = 3;
+  const DEFAULT_LIVES = 5;
   const DURATION_OPTIONS_MS = [30000, 60000, 90000];
-  const LIVES_OPTIONS = [1, 3, 5];
+  const LIVES_OPTIONS = [1, 3, 5, 7, 9];
+
 
   // Adjustable via the Options screen; read fresh at the start of each round.
   const settings = {
