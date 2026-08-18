@@ -5,7 +5,7 @@ class Ultrasonic {
   float arr[3] = {100, 100, 100};
   int arrIndex = 0;
   float avg = 0;
-  float safeDistance = 0;
+  int safeDistance = 0;
 
   unsigned long lastReadMillis = 0;
   const unsigned long readCooldown = 20;
@@ -14,7 +14,7 @@ class Ultrasonic {
   int echoPin = 0;
   String nametag = "";
 
-  bool detectPerson() {
+  void updateReading() {
     unsigned long now = millis();
     // if (now - lastReadMillis < readCooldown) {
     //   return avg <= safeDistance;
@@ -38,14 +38,13 @@ class Ultrasonic {
       avg = -1;
     }
 
-    return avg <= safeDistance;
+    // return avg <= safeDistance;
   }
 
-  Ultrasonic(int tPin, int ePin, String name, float sDist) {
+  Ultrasonic(int tPin, int ePin, String name) {
     trigPin = tPin;
     echoPin = ePin;
     nametag = name;
-    safeDistance = sDist;
     pinMode(trigPin, OUTPUT);
     pinMode(echoPin, INPUT);
     digitalWrite(trigPin, LOW);
