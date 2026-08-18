@@ -13,11 +13,14 @@ let reconnectTimer = null;
 let screen = "menu";
 let gameLoopId = null;
 const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+let alertOscillator = null;
 
 function playAlertNoise() {
   if (audioContext.state === "suspended") {
     audioContext.resume().catch(() => {});
   }
+
+  stopAlertNoise();
 
   const oscillator = audioContext.createOscillator();
   const gain = audioContext.createGain();
@@ -27,7 +30,14 @@ function playAlertNoise() {
   oscillator.connect(gain);
   gain.connect(audioContext.destination);
   oscillator.start();
-  oscillator.stop(audioContext.currentTime + 0.18);
+  alertOscillator = oscillator;
+}
+
+function stopAlertNoise() {
+  if (alertOscillator) {
+    alertOscillator.stop();
+    alertOscillator = null;
+  }
 }
 
 function resizeCanvas() {
@@ -273,6 +283,7 @@ c.addEventListener("click", (event) => {
     const hit = window.getAlertButtonAtPoint(c, point.x, point.y);
     if (hit && hit.type === "back") {
       screen = "calibrate";
+      stopAlertNoise();
       draw();
     }
     return;
