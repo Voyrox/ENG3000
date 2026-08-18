@@ -16,9 +16,9 @@ class Ultrasonic {
 
   bool detectPerson() {
     unsigned long now = millis();
-    if (now - lastReadMillis < readCooldown) {
-      return avg <= safeDistance;
-    }
+    // if (now - lastReadMillis < readCooldown) {
+    //   return avg <= safeDistance;
+    // }
 
     lastReadMillis = now;
     digitalWrite(trigPin, LOW);
@@ -30,10 +30,14 @@ class Ultrasonic {
     unsigned long duration = pulseIn(echoPin, HIGH, 30000UL);
     if (duration > 0) {
       float distance = (0.0343f * duration) / 2.0f;
-      arr[arrIndex] = distance;
-      arrIndex = (arrIndex + 1) % 3;
-      avg = (arr[0] + arr[1] + arr[2]) / 3.0f;
+      // arr[arrIndex] = distance;
+      // arrIndex = (arrIndex + 1) % 3;
+      // avg = (arr[0] + arr[1] + arr[2]) / 3.0f;
+      avg = distance;
+    } else {
+      avg = -1;
     }
+
     return avg <= safeDistance;
   }
 

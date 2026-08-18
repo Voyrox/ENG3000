@@ -1,4 +1,4 @@
-window.renderCalibrate = function renderCalibrate(ctx, canvas, nodes = []) {
+window.renderCalibrate = function renderCalibrate(ctx, canvas, nodes = [], sensorLocations) {
   const width = canvas.clientWidth || canvas.width;
   const height = canvas.clientHeight || canvas.height;
   const centerX = width / 2;
@@ -95,7 +95,6 @@ window.renderCalibrate = function renderCalibrate(ctx, canvas, nodes = []) {
     ctx.closePath();
     ctx.fill();
 
-
     // Label below
     ctx.fillStyle = "#cdd6f4";
     ctx.textAlign = "center";
@@ -104,6 +103,10 @@ window.renderCalibrate = function renderCalibrate(ctx, canvas, nodes = []) {
       ctx.fillText(`ID: ${node.id}`, sensorX, gridBottomY + sensorSize + 46);
       ctx.font = `${Math.max(11, Math.min(16, width * 0.015))}px monospace`;
       ctx.fillText(isOnline ? `RPS: ${(node.rps || 0).toFixed(1)}` : "Offline", sensorX, gridBottomY + sensorSize + 68);
+
+      // console.log(node)
+      data = JSON.parse(node.latest)
+      ctx.fillText(isOnline ? `Distance: ${(data.avg || 0).toFixed(1)}cm` : "Offline", sensorX, gridBottomY + sensorSize + 92);
     } else {
       ctx.font = `${Math.max(11, Math.min(15, width * 0.015))}px monospace`;
       ctx.fillText("Unassigned", sensorX, gridBottomY + sensorSize + 56);

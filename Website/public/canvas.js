@@ -55,14 +55,16 @@ function resizeCanvas() {
   draw();
 }
 
+const sensorLocations = new Map();
+
 function draw() {
-  console.log("Drawing screen:", screen, "selectedNodeId:", selectedNodeId, "nodes.size:", nodes.size);
+  // console.log("Drawing screen:", screen, "selectedNodeId:", selectedNodeId, "nodes.size:", nodes.size);
   ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.clearRect(0, 0, c.width, c.height);
   ctx.setTransform(viewport.dpr, 0, 0, viewport.dpr, 0, 0);
 
   if (screen === "calibrate") {
-    renderCalibrate(ctx, c, getCalibrateNodes());
+    renderCalibrate(ctx, c, getCalibrateNodes(), sensorLocations);
     return;
   }
 

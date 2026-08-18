@@ -280,6 +280,97 @@
     };
   }
 
+  //Input: Nodes array
+  //Output: Santised x, y corrdinate and too close flag for the alert, i.e. [int x, int y, bool alert]
+  function triangulate(nodes) {
+
+    //Extract distance values from the nodes data
+    distances = [0, 0, 0]
+    console.log(nodes)
+
+    for (i = 1; i <= 3; i++) {
+      let cur = nodes.get(i)
+      if (cur != null) {
+        data = JSON.parse(cur.latest)
+        dist = data.avg
+
+        if (i == 1) {
+          distances[0] = dist
+        } else {
+          if (i == 2) {
+            distances[1] = dist
+          } else {
+            distances[2] = dist
+          }
+        }
+
+        // if (nodes[i].id == 1) {
+        //   distances[0] = dist
+        // } else {
+        //   if (nodes[i].id == 2) {
+        //     distances[1] = dist
+        //   } else {
+        //     distances[2] = dist
+        //   }
+        // }
+      }
+    }
+
+    //Apply reading smoothing here
+
+    console.log(distances)
+
+    //Triangulate as per logic
+    const maxDist = 90
+    const minDist = 10
+    const distanceApart = 75
+
+    let ref1 = distances[1] //ref1 is the centre sensor
+    let ref2 = 0 //The other sensor value
+    let minRefs = true //i.e. we have 2 references
+    let side = -1 //Side to be set negative for sensor to the left of the middle sensor, positive for right of middle sensor
+
+    centerValid = true
+    if (distances[1] < minDist || distances[1] > maxDist) {
+      centerValid = false
+    }
+
+    //currently under assumption that node1 is left and node3 is right
+    if (distances[0] >= minDist && distances[0] <= maxDist) {
+        ref2 = distances[0]
+        side = -1
+    } else if (distances[2] >= minDist && distances[2] <= maxDist) {
+        ref2 = distances[2]
+        side = 1
+    } else {
+        minRefs = false
+    }
+
+    console.log("ref1 " + ref1)
+    console.log("ref2 " + ref2)
+
+    let x = 0
+    let y = 0
+
+    if (centerValid == true) {
+      if (minRefs == true) {
+        x = (Math.pow(ref1, 2) - Math.pow(ref2, 2) + Math.pow((distanceApart * side), 2)) / (2 * (distanceApart * side))
+        y = Math.sqrt(Math.pow(ref2, 2) - Math.pow((x - (distanceApart * side)), 2))
+        // Verified correct - math wise
+      } else {
+        x = 0
+        y = ref1
+      }
+    } else {
+      x = 0
+      y = -1
+    }
+
+    console.log(x + ", " + y)
+
+    return []
+  }
+
   window.getGameLevelButtonAtPoint = function getGameLevelButtonAtPoint(canvas, x, y) {
     const layout = getGameLevelLayout(canvas);
     const hit = layout.buttons.find((button) => pointInRect(x, y, button));
@@ -332,8 +423,10 @@
   }
 
   window.renderGame = function renderGame(ctx, canvas, nodes) {
+    // console.log(nodes)
 
-    console.log(nodes)
+    locationArr = triangulate(nodes);
+    
     const width = canvas.clientWidth || canvas.width;
     const height = canvas.clientHeight || canvas.height;
 

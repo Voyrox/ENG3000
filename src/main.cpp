@@ -5,8 +5,8 @@
 constexpr char WIFI_SSID[] = "Josh's S24";
 constexpr char WIFI_PASSWORD[] = "bruh12345";
 
-constexpr bool AUTO_DISCOVER_SERVER = true;
-constexpr char SERVER_IP[] = "192.168.9.151";
+constexpr bool AUTO_DISCOVER_SERVER = false;
+constexpr char SERVER_IP[] = "192.168.9.99";
 constexpr uint16_t SERVER_PORT = 3000;
 
 int nodeID = -1;
@@ -22,7 +22,9 @@ WiFiClient client;
 String serverIP = AUTO_DISCOVER_SERVER ? "" : SERVER_IP;
 
 const int UltrasonicCount = 1;
-Ultrasonic center(5, 18, "Center", 50.0f);
+const int triggerPin = 5;
+const int echoPin = 18;
+Ultrasonic center(triggerPin, echoPin, "Center", 50.0f);
 
 bool connectServer() {
     client.stop();
@@ -237,6 +239,10 @@ void setup() {
   connectWiFi();
 }
 
+//Used for delaying how quickly the ultrasonic is read
+int now = 0;
+int waitUntil = 0;
+
 void loop() {
     bool wifiReady = WiFi.status() == WL_CONNECTED;
 
@@ -268,7 +274,11 @@ void loop() {
         return;
     }
 
+    now = millis();
     if (wifiConnected && client.connected()) {
-        sendSensorSnapshot();
+        if(now >= waitUntil){
+            sendSensorSnapshot();
+            waitUntil = millis() + 50;
+        }
     }
 }
