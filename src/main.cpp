@@ -109,7 +109,12 @@ bool connectServer() {
 
     Serial.println("TCP connected");
     client.setTimeout(1000);
-    client.println(String(nodeID));
+
+    String handshake = "{";
+    handshake += "\"nodeId\":" + String(nodeID);
+    handshake += ",\"mac\":\"" + WiFi.macAddress() + "\"";
+    handshake += "}";
+    client.println(handshake);
 
     int assignedNodeID = -1;
 

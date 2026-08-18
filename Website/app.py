@@ -70,25 +70,39 @@ def register_node(address):
     return node_id
 
 
-def reuse_or_register_node(address, claimed_node_id):
+def reuse_or_register_node(address, claimed_node_id, device_id=None):
     global next_node_id
     with state_lock:
         now = time.monotonic()
-        if claimed_node_id is not None and claimed_node_id in nodes:
+        node = None
+        reused_existing = False
+
+        if device_id:
+            for existing in nodes.values():
+                if existing.get("device_id") == device_id:
+                    node = existing
+                    break
+
+        if node is None and claimed_node_id is not None and claimed_node_id in nodes:
             node = nodes[claimed_node_id]
+
+        if node is not None:
+            reused_existing = True
             node["address"] = f"{address[0]}:{address[1]}"
             node["online"] = True
             node["last_seen"] = now
             node["rps"] = 0.0
             node["samples"].clear()
-            node_id = claimed_node_id
+            if device_id:
+                node["device_id"] = device_id
+            node_id = node["id"]
         else:
             node_id = next_node_id
             next_node_id += 1
             nodes[node_id] = {
                 "id": node_id,
                 "address": f"{address[0]}:{address[1]}",
-                "device_id": None,
+                "device_id": device_id,
                 "latest": None,
                 "online": True,
                 "last_seen": now,
@@ -96,7 +110,7 @@ def reuse_or_register_node(address, claimed_node_id):
                 "rps": 0.0,
             }
     schedule_broadcast_nodes()
-    return node_id
+    return node_id, reused_existing
 
 
 def update_node(node_id, message):
@@ -157,9 +171,12 @@ def read_handshake_line(conn):
     return buffer.decode("utf-8").strip()
 
 
-def parse_claimed_node_id(raw_line):
+def parse_handshake(raw_line):
     if not raw_line:
-        return None
+        return None, None
+
+    claimed_node_id = None
+    device_id = None
 
     try:
         claimed_node_id = int(raw_line)
@@ -167,12 +184,14 @@ def parse_claimed_node_id(raw_line):
         try:
             payload = json.loads(raw_line)
         except json.JSONDecodeError:
-            return None
+            return None, None
         claimed_node_id = payload.get("nodeId")
+        device_id = payload.get("mac")
 
     if claimed_node_id is not None and claimed_node_id < 0:
-        return None
-    return claimed_node_id
+        claimed_node_id = None
+
+    return claimed_node_id, device_id
 
 
 def cleanup_stale_nodes():
@@ -200,14 +219,14 @@ def handle_node_connection(conn, address):
     conn.settimeout(HANDSHAKE_TIMEOUT_SECONDS)
     try:
         raw_handshake = read_handshake_line(conn)
-        claimed_node_id = parse_claimed_node_id(raw_handshake)
+        claimed_node_id, device_id = parse_handshake(raw_handshake)
         if raw_handshake.startswith("{"):
             first_message = raw_handshake
         elif raw_handshake and claimed_node_id is None:
             first_message = raw_handshake
         conn.settimeout(None)
-        node_id = reuse_or_register_node(address, claimed_node_id)
-        action = "restored" if claimed_node_id == node_id else "assigned"
+        node_id, reused_existing = reuse_or_register_node(address, claimed_node_id, device_id)
+        action = "restored" if reused_existing else "assigned"
         print(f"ESP32 connected from {address}, {action} id {node_id}")
         conn.sendall(f"{node_id}\n".encode("utf-8"))
         if first_message is not None:
