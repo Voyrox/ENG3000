@@ -22,7 +22,7 @@ WiFiClient client;
 String serverIP = AUTO_DISCOVER_SERVER ? "" : SERVER_IP;
 
 const int UltrasonicCount = 1;
-Ultrasonic center(5, 18, "Center", 50.0f);
+Ultrasonic center(5, 18, "Center");
 
 bool connectServer() {
     client.stop();
@@ -218,14 +218,12 @@ bool sendData(const String& data) {
 }
 
 void sendSensorSnapshot() {
-    bool detected = center.detectPerson();
+    center.updateReading();
 
     String payload = "{";
     payload += "\"nodeId\":" + String(nodeID);
     payload += ",\"mac\":\"" + WiFi.macAddress() + "\"";
     payload += ",\"avg\":" + String(center.avg, 2);
-    payload += ",\"detected\":" + String(detected ? "true" : "false");
-    payload += ",\"position\":\"\"";
     payload += "}";
 
     sendData(payload);
