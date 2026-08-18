@@ -90,6 +90,11 @@ function draw() {
     return;
   }
 
+  if (screen === "options") {
+    window.renderOptions(ctx, c);
+    return;
+  }
+
   const statusText = nodes.size > 0
     ? `Node count: ${nodes.size} | Total RPS: ${Array.from(nodes.values()).reduce((sum, node) => sum + (node.rps || 0), 0).toFixed(1)}`
     : "Waiting for ESP32 data...";
@@ -237,7 +242,9 @@ c.addEventListener("click", (event) => {
         screen = "menu";
       } else if (hit.type === "alert") {
         screen = "alert";
-        playAlertNoise();
+        if (!window.getGameSettings || window.getGameSettings().soundEnabled) {
+          playAlertNoise();
+        }
       } else if (hit.type === "skip") {
         stopGameLoop();
         window.resetGame();
@@ -250,17 +257,41 @@ c.addEventListener("click", (event) => {
   }
 
   if (screen === "game") {
-    const levelHit = window.getGameLevelButtonAtPoint(c, point.x, point.y);
-    if (levelHit) {
-      window.setGameLevel(levelHit.level);
+    const pauseMenuHit = window.getPauseMenuButtonAtPoint(c, point.x, point.y);
+    if (pauseMenuHit) {
+      if (pauseMenuHit.type === "resume") {
+        window.resumeGame();
+      } else if (pauseMenuHit.type === "restart") {
+        window.resetGame();
+      } else if (pauseMenuHit.type === "menu") {
+        stopGameLoop();
+        screen = "menu";
+      }
+      draw();
+      return;
+    }
+
+    if (window.getGameState().status === "paused") {
+      // Round is paused and the click missed all pause-menu buttons - ignore
+      // everything else (moles, etc.) until resumed.
+      return;
+    }
+
+    const pauseButtonHit = window.getGamePauseButtonAtPoint(c, point.x, point.y);
+    if (pauseButtonHit) {
+      window.pauseGame();
       draw();
       return;
     }
 
     const overButton = window.getGameOverButtonAtPoint(c, point.x, point.y);
     if (overButton) {
-      screen = "menu";
-      stopGameLoop();
+      if (overButton.type === "restart") {
+        window.resetGame();
+      } else if (overButton.type === "return") {
+        screen = "menu";
+        stopGameLoop();
+      }
       draw();
       return;
     }
@@ -291,9 +322,33 @@ c.addEventListener("click", (event) => {
     return;
   }
 
+  if (screen === "options") {
+    const hit = window.getOptionsButtonAtPoint(c, point.x, point.y);
+    if (hit) {
+      if (hit.type === "back") {
+        screen = "menu";
+      } else if (hit.type === "duration") {
+        window.setGameSettings({ durationMs: hit.value });
+      } else if (hit.type === "lives") {
+        window.setGameSettings({ startingLives: hit.value });
+      } else if (hit.type === "sound") {
+        const current = window.getGameSettings();
+        window.setGameSettings({ soundEnabled: !current.soundEnabled });
+      }
+      draw();
+    }
+    return;
+  }
+
   const choice = window.getMenuButtonAtPoint(c, point.x, point.y);
   if (choice === "Play") {
     screen = "calibrate";
+    draw();
+    return;
+  }
+
+  if (choice === "Options") {
+    screen = "options";
     draw();
     return;
   }
