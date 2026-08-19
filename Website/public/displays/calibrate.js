@@ -104,9 +104,17 @@ window.renderCalibrate = function renderCalibrate(ctx, canvas, nodes = [], senso
       ctx.font = `${Math.max(11, Math.min(16, width * 0.015))}px monospace`;
       ctx.fillText(isOnline ? `RPS: ${(node.rps || 0).toFixed(1)}` : "Offline", sensorX, gridBottomY + sensorSize + 68);
 
-      // console.log(node)
-      data = JSON.parse(node.latest)
-      ctx.fillText(isOnline ? `Distance: ${(data.avg || 0).toFixed(1)}cm` : "Offline", sensorX, gridBottomY + sensorSize + 92);
+      let distanceText = "Offline";
+      if (isOnline) {
+        let data = null;
+        try {
+          data = JSON.parse(node.latest);
+        } catch (err) {
+          data = null;
+        }
+        distanceText = data ? `Distance: ${Number(data.avg || 0).toFixed(1)}cm` : "Distance: --";
+      }
+      ctx.fillText(distanceText, sensorX, gridBottomY + sensorSize + 92);
     } else {
       ctx.font = `${Math.max(11, Math.min(15, width * 0.015))}px monospace`;
       ctx.fillText("Unassigned", sensorX, gridBottomY + sensorSize + 56);
@@ -114,6 +122,14 @@ window.renderCalibrate = function renderCalibrate(ctx, canvas, nodes = [], senso
   });
 
   ctx.textAlign = "start";
+};
+
+// Once all three slots hold an online node the rig is ready, so the screen
+// advances to corner calibration on its own - there is no manual Continue step.
+window.CALIBRATE_AUTO_CONTINUE_NODES = 3;
+
+window.countConfiguredNodes = function countConfiguredNodes(nodes = []) {
+  return nodes.filter((node) => Boolean(node && node.online)).length;
 };
 
 window.getCalibrateLayout = function getCalibrateLayout(canvas) {

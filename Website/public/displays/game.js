@@ -4,15 +4,28 @@
 // `window` that canvas.js drives:
 
 //   window.resetGame()                         - start/restart a round
+//   window.setGameInputMode(mode)               - "mouse" | "sensor"
+//   window.getGameInputMode()
 //   window.pauseGame() / window.resumeGame()    - pause/resume mid-round
-//   window.updateGame(timestampMs)              - advance game state, call every frame
-//   window.setGameCursor(canvas, x, y)          - feed in the latest input coordinate
+//   window.updateGame(timestampMs, canvas, orderedNodes) - advance, call every frame
+//   window.setGameCursor(canvas, x, y)          - mouse-mode coordinate input
+//   window.readSensorCoordinate(orderedNodes)   - raw fix, also used by calibration
+//   window.isGameAlertActive()                  - drive the full-screen alert
+//   window.getGameAlertInfo()                   - { active, distanceCm }
 //   window.handleGameClick(canvas, x, y)        - register a hit attempt
 //   window.getGamePauseButtonAtPoint(canvas,x,y)- hit-test the pause icon
 //   window.getPauseMenuButtonAtPoint(canvas,x,y)- hit-test Resume / Restart / Main Menu
 //   window.getGameOverButtonAtPoint(canvas,x,y) - hit-test Restart / Return to Start
-//   window.renderGame(ctx, canvas, nodes)              - draw the current frame
+//   window.renderGame(ctx, canvas)              - draw the current frame
 //   window.getGameState()                       - read-only peek at state (score/level/etc)
+//
+// Two input modes share all of the game logic. Only the cursor source differs:
+//   "mouse"  - canvas.js feeds raw canvas pixels straight from mousemove.
+//              Reached via Skip on the calibration screen.
+//   "sensor" - readSensorCoordinate() picks the sensor that sees the player,
+//              rawToGrid() (callibrate_corners.js) turns that into 0-2 grid
+//              coordinates with (0,0) at BOTTOM-LEFT, and gridToCanvasPoint()
+//              places the cursor. Entered once all three nodes are configured.
 
 (function () {
   const GAME_DURATION_MS = 60000; // overall round length shown as the countdown
@@ -30,6 +43,12 @@
   const DEFAULT_LIVES = 5;
   const DURATION_OPTIONS_MS = [30000, 60000, 90000];
   const LIVES_OPTIONS = [1, 3, 5, 7, 9];
+
+  // --- Sensor input ----------------------------------------------------------
+  // No triangulation: the three sensors sit on one line pointing straight
+  // forward, so each owns one column of the board and its distance reading
+  // picks the row. See callibrate_corners.js for the grid mapping.
+  const MAX_COORD_CM = 160; // a reading beyond 1.6 m is bogus -> "come back in bounds"
 
 
   // Adjustable via the Options screen; read fresh at the start of each round.
@@ -67,8 +86,19 @@
     return img && img.complete && img.naturalWidth > 0;
   }
 
+  const emptySensorState = () => ({
+    status: "no-signal", // "ok" | "too-close" | "no-signal" | "out-of-bounds"
+    column: null, // which sensor saw the player: 0 left, 1 centre, 2 right
+    distanceCm: null, // that sensor's raw reading
+    gx: null,
+    gy: null, // parsed 0-2 grid coordinate
+    configured: 0, // how many sensors reported a usable number
+  });
+
   const gameState = {
     status: "idle", // "idle" | "playing" | "paused" | "gameover"
+    inputMode: "mouse", // "mouse" | "sensor"
+    sensor: emptySensorState(),
     score: 0,
     level: 1,
     peakLevel: 1,
@@ -163,10 +193,40 @@
     gameState.nextSpawnAt = 0;
     gameState.hitFlash = { hole: -1, until: 0, type: null };
     gameState.cursor = { x: null, y: null, inBounds: true };
+    gameState.sensor = emptySensorState();
   };
 
   window.getGameState = function getGameState() {
     return gameState;
+  };
+
+  window.setGameInputMode = function setGameInputMode(mode) {
+    gameState.inputMode = mode === "sensor" ? "sensor" : "mouse";
+    // Drop any stale cursor so the two modes never inherit each other's position.
+    gameState.cursor = { x: null, y: null, inBounds: true };
+    gameState.sensor = emptySensorState();
+  };
+
+  window.getGameInputMode = function getGameInputMode() {
+    return gameState.inputMode;
+  };
+
+  // The full-screen alert is driven purely by the raw distance, and only in
+  // sensor mode mid-round - the mouse has no notion of standing too close, and
+  // a paused or finished round should not be hijacked.
+  window.isGameAlertActive = function isGameAlertActive() {
+    return (
+      gameState.inputMode === "sensor" &&
+      gameState.status === "playing" &&
+      gameState.sensor.status === "too-close"
+    );
+  };
+
+  window.getGameAlertInfo = function getGameAlertInfo() {
+    return {
+      active: window.isGameAlertActive(),
+      distanceCm: gameState.sensor.status === "too-close" ? gameState.sensor.distanceCm : null,
+    };
   };
 
   window.pauseGame = function pauseGame() {
@@ -188,7 +248,13 @@
   };
 
   // Call every animation frame with a timestamp (e.g. from requestAnimationFrame).
-  window.updateGame = function updateGame(now) {
+  // `canvas` and `orderedNodes` are only needed in sensor mode; orderedNodes is
+  // [left, centre, right] in calibration slot order.
+  window.updateGame = function updateGame(now, canvas, orderedNodes) {
+    if (gameState.inputMode === "sensor" && canvas) {
+      updateSensorCursor(canvas, orderedNodes);
+    }
+
     if (gameState.status !== "playing") return;
 
     if (gameState.lastTickTime === null) {
@@ -198,6 +264,16 @@
 
     const elapsed = now - gameState.lastTickTime;
     gameState.lastTickTime = now;
+
+    // Hold the round while the player is too close, out of bounds, or invisible
+    // to the sensors. Advancing lastTickTime above keeps the clock from jumping
+    // when play resumes; shifting the mole timers keeps the current mole alive.
+    if (isSensorBlocked()) {
+      gameState.moleSpawnedAt += elapsed;
+      gameState.nextSpawnAt += elapsed;
+      return;
+    }
+
     gameState.remainingMs -= elapsed;
 
     if (gameState.remainingMs <= 0) {
@@ -236,9 +312,10 @@
     }
   };
 
-  // Feed in the latest input coordinate (mouse, touch, or the external
-  // flask-server-supplied coordinate). Tracks in/out-of-bounds for display.
+  // Mouse-mode coordinate input. Ignored in sensor mode so a stray mouse
+  // movement cannot fight the sensors for control of the cursor.
   window.setGameCursor = function setGameCursor(canvas, x, y) {
+    if (gameState.inputMode !== "mouse") return;
     const width = canvas.clientWidth || canvas.width;
     const height = canvas.clientHeight || canvas.height;
     gameState.cursor.x = x;
@@ -333,95 +410,119 @@
     return awardPointForHole(hole.index);
   };
 
-  //Input: Nodes array
-  //Output: Santised x, y corrdinate and too close flag for the alert, i.e. [int x, int y, bool alert]
-  function triangulate(nodes) {
+  // --- Sensor input ----------------------------------------------------------
 
-    //Extract distance values from the nodes data
-    distances = [0, 0, 0]
-    console.log(nodes)
+  // Pulls the distance out of a node's latest payload. Returns null when the
+  // node is missing, offline, unparseable, or reported no echo (-1).
+  function readDistance(node) {
+    if (!node || !node.online || !node.latest) return null;
 
-    for (i = 1; i <= 3; i++) {
-      let cur = nodes.get(i)
-      if (cur != null) {
-        data = JSON.parse(cur.latest)
-        dist = data.avg
+    let payload;
+    try {
+      payload = JSON.parse(node.latest);
+    } catch (err) {
+      return null;
+    }
 
-        if (i == 1) {
-          distances[0] = dist
-        } else {
-          if (i == 2) {
-            distances[1] = dist
-          } else {
-            distances[2] = dist
-          }
-        }
+    const value = Number(payload.avg);
+    if (!Number.isFinite(value) || value < 0) return null;
+    return value;
+  }
 
-        // if (nodes[i].id == 1) {
-        //   distances[0] = dist
-        // } else {
-        //   if (nodes[i].id == 2) {
-        //     distances[1] = dist
-        //   } else {
-        //     distances[2] = dist
-        //   }
-        // }
+  // Input:  [left, centre, right] node records, nulls allowed (calibration slot order)
+  // Output: {
+  //   status:     "ok" | "too-close" | "no-signal" | "out-of-bounds",
+  //   column:     which sensor saw the player - 0 left, 1 centre, 2 right,
+  //   distanceCm: that sensor's raw reading,
+  //   configured: how many sensors reported a usable number
+  // }
+  //
+  // With all three sensors pointing straight forward, the player stands in
+  // front of one column at a time. More than one sensor may pick them up at an
+  // angle, so the nearest reading wins - that is the column they are most
+  // directly in front of.
+  function readSensorCoordinate(orderedNodes) {
+    const list = Array.isArray(orderedNodes) ? orderedNodes : [];
+    const distances = [readDistance(list[0]), readDistance(list[1]), readDistance(list[2])];
+    const configured = distances.filter((d) => d !== null).length;
+
+    const blank = { column: null, distanceCm: null, configured };
+
+    let column = null;
+    let best = null;
+    distances.forEach((distance, index) => {
+      if (distance === null) return;
+      if (best === null || distance < best) {
+        best = distance;
+        column = index;
       }
+    });
+
+    // Nothing detected anywhere: the player is out of range or not there.
+    if (best === null) return { ...blank, status: "no-signal" };
+
+    // Standing inside the danger zone takes priority over everything else.
+    if (window.isTooClose(best)) {
+      return { ...blank, column, distanceCm: best, status: "too-close" };
     }
 
-    //Apply reading smoothing here
-
-    console.log(distances)
-
-    //Triangulate as per logic
-    const maxDist = 90
-    const minDist = 10
-    const distanceApart = 75
-
-    let ref1 = distances[1] //ref1 is the centre sensor
-    let ref2 = 0 //The other sensor value
-    let minRefs = true //i.e. we have 2 references
-    let side = -1 //Side to be set negative for sensor to the left of the middle sensor, positive for right of middle sensor
-
-    centerValid = true
-    if (distances[1] < minDist || distances[1] > maxDist) {
-      centerValid = false
+    // A number, but not a believable one (past 1.6 m, or sensor garbage).
+    if (best > MAX_COORD_CM) {
+      return { ...blank, column, distanceCm: best, status: "out-of-bounds" };
     }
 
-    //currently under assumption that node1 is left and node3 is right
-    if (distances[0] >= minDist && distances[0] <= maxDist) {
-        ref2 = distances[0]
-        side = -1
-    } else if (distances[2] >= minDist && distances[2] <= maxDist) {
-        ref2 = distances[2]
-        side = 1
-    } else {
-        minRefs = false
+    return { column, distanceCm: best, configured, status: "ok" };
+  }
+
+  window.readSensorCoordinate = readSensorCoordinate;
+
+  // Grid coordinate (0-2, origin bottom-left) -> canvas pixels at the centre of
+  // the matching hole.
+  window.gridToCanvasPoint = function gridToCanvasPoint(canvas, gx, gy) {
+    const layout = window.getGameGridLayout(canvas);
+    const span = layout.gridSize - layout.cellSize;
+    return {
+      x: layout.gridLeft + (gx / 2) * span + layout.cellSize / 2,
+      // Grid y grows upward (0 = nearest the screen), canvas y grows downward.
+      y: layout.gridTop + ((2 - gy) / 2) * span + layout.cellSize / 2,
+    };
+  };
+
+  // Reads the sensors, maps the fix into grid space, and drives the cursor from
+  // it. Hovering the active mole scores, exactly as the mouse does.
+  function updateSensorCursor(canvas, orderedNodes) {
+    const fix = readSensorCoordinate(orderedNodes);
+
+    const clearCursor = (status) => {
+      gameState.sensor = { ...fix, status, gx: null, gy: null };
+      gameState.cursor = { x: null, y: null, inBounds: false };
+    };
+
+    if (fix.status !== "ok") {
+      clearCursor(fix.status);
+      return;
     }
 
-    console.log("ref1 " + ref1)
-    console.log("ref2 " + ref2)
-
-    let x = 0
-    let y = 0
-
-    if (centerValid == true) {
-      if (minRefs == true) {
-        x = (Math.pow(ref1, 2) - Math.pow(ref2, 2) + Math.pow((distanceApart * side), 2)) / (2 * (distanceApart * side))
-        y = Math.sqrt(Math.pow(ref2, 2) - Math.pow((x - (distanceApart * side)), 2))
-        // Verified correct - math wise
-      } else {
-        x = 0
-        y = ref1
-      }
-    } else {
-      x = 0
-      y = -1
+    const grid = window.rawToGrid(fix.column, fix.distanceCm);
+    // A fix outside the calibrated near/far bounds is a bad reading, not a
+    // player standing off the edge of a 3x3 board.
+    if (!grid || !grid.inside) {
+      clearCursor("out-of-bounds");
+      return;
     }
 
-    console.log(x + ", " + y)
+    gameState.sensor = { ...fix, gx: grid.gx, gy: grid.gy, calibrated: grid.calibrated };
 
-    return []
+    const point = window.gridToCanvasPoint(canvas, grid.gx, grid.gy);
+    gameState.cursor = { x: point.x, y: point.y, inBounds: true };
+    window.handleGameHover(canvas, point.x, point.y);
+  }
+
+  // True while sensor input cannot produce a playable coordinate. The round
+  // clock is held during these states so the player is not penalised for a
+  // dropout they cannot control.
+  function isSensorBlocked() {
+    return gameState.inputMode === "sensor" && gameState.sensor.status !== "ok";
   }
 
   window.getGameOverButtonAtPoint = function getGameOverButtonAtPoint(canvas, x, y) {
@@ -608,11 +709,88 @@
     ctx.stroke();
   }
 
-  window.renderGame = function renderGame(ctx, canvas, nodes) {
-    // console.log(nodes)
+  // Banner shown instead of the cursor when the sensors cannot place the
+  // player. The full-screen red alert is reserved for the too-close case and is
+  // handled by canvas.js switching screens, so it never appears here.
+  function renderSensorStatusOverlay(ctx, canvas) {
+    const width = canvas.clientWidth || canvas.width;
+    const height = canvas.clientHeight || canvas.height;
+    const status = gameState.sensor.status;
 
-    locationArr = triangulate(nodes);
+    let message = null;
+    let detail = "";
+    if (status === "no-signal") {
+      message = "Come closer";
+      detail = "No coordinate detected - step into the play area";
+    } else if (status === "out-of-bounds") {
+      message = "Come back in bounds";
+      detail = "Reading outside the play area - move back onto the board";
+    }
+    if (!message) return;
 
+    ctx.fillStyle = "rgba(0, 0, 0, 0.55)";
+    ctx.fillRect(0, 0, width, height);
+
+    ctx.textAlign = "center";
+    ctx.fillStyle = "#f59e0b";
+    ctx.font = `bold ${Math.max(30, Math.min(58, width * 0.055))}px monospace`;
+    ctx.fillText(message, width / 2, height / 2 - 10);
+
+    ctx.fillStyle = "#f4f4f5";
+    ctx.font = `${Math.max(14, Math.min(20, width * 0.017))}px monospace`;
+    ctx.fillText(detail, width / 2, height / 2 + 32);
+
+    ctx.fillStyle = "#9298aa";
+    ctx.font = `${Math.max(12, Math.min(16, width * 0.013))}px monospace`;
+    ctx.fillText("Timer paused", width / 2, height / 2 + 62);
+
+    ctx.textAlign = "start";
+  }
+
+  // Bottom-left readout: which input is driving the cursor, and in sensor mode
+  // the raw reading and the parsed grid cell, so the rig can be checked at a glance.
+  function renderInputReadout(ctx, canvas) {
+    const height = canvas.clientHeight || canvas.height;
+    const sensor = gameState.sensor;
+    const columnNames = ["Left", "Centre", "Right"];
+
+    ctx.textAlign = "left";
+    ctx.font = "bold 14px monospace";
+
+    if (gameState.inputMode === "mouse") {
+      drawHudPanel(ctx, 12, height - 52, 190, 40, 10);
+      ctx.fillStyle = "#9298aa";
+      ctx.fillText("Input: MOUSE", 26, height - 27);
+      ctx.textAlign = "start";
+      return;
+    }
+
+    drawHudPanel(ctx, 12, height - 78, 330, 66, 10);
+    ctx.fillStyle = sensor.status === "ok" ? "#22c55e" : "#ef4444";
+    ctx.fillText(`Input: SENSOR (${sensor.configured}/3 online)`, 26, height - 54);
+
+    ctx.fillStyle = "#f4f4f5";
+    ctx.font = "13px monospace";
+    if (sensor.status === "ok" && sensor.gx !== null) {
+      ctx.fillText(
+        `${columnNames[sensor.column]} @ ${sensor.distanceCm.toFixed(1)}cm  ->  grid (${sensor.gx}, ${sensor.gy})`,
+        26,
+        height - 34
+      );
+    } else {
+      ctx.fillText(`reading: ${sensor.status}`, 26, height - 34);
+    }
+
+    if (sensor.calibrated === false) {
+      ctx.fillStyle = "#f59e0b";
+      ctx.font = "11px monospace";
+      ctx.fillText("corners not calibrated - using default bounds", 26, height - 18);
+    }
+
+    ctx.textAlign = "start";
+  }
+
+  window.renderGame = function renderGame(ctx, canvas) {
     const width = canvas.clientWidth || canvas.width;
     const height = canvas.clientHeight || canvas.height;
 
@@ -808,7 +986,7 @@
       });
     });
 
-    // Cursor from click / external (flask) coordinate
+    // Cursor - mouse pixels, or the sensor fix mapped through grid space.
     if (gameState.cursor.x !== null) {
       if (gameState.cursor.inBounds) {
         ctx.save();
@@ -824,13 +1002,20 @@
         ctx.arc(gameState.cursor.x, gameState.cursor.y, 4, 0, Math.PI * 2);
         ctx.fill();
         ctx.restore();
-      } else {
+      } else if (gameState.inputMode === "mouse") {
+        // Sensor mode gets the full-screen status overlay below instead.
         drawHudPanel(ctx, width / 2 - 100, height - 58, 200, 40, 10);
         ctx.fillStyle = "#ef4444";
         ctx.font = "bold 16px monospace";
         ctx.textAlign = "center";
         ctx.fillText("Out of bounds", width / 2, height - 32);
       }
+    }
+
+    renderInputReadout(ctx, canvas);
+
+    if (gameState.inputMode === "sensor" && gameState.status === "playing") {
+      renderSensorStatusOverlay(ctx, canvas);
     }
 
     if (gameState.status === "paused") {

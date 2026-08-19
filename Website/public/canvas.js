@@ -12,8 +12,15 @@ let socket = null;
 let reconnectTimer = null;
 let screen = "menu";
 let gameLoopId = null;
+// Which screen the alert returns to. A game-driven alert clears itself, so it
+// has no Back button; the calibrate-driven one does.
+let alertReturnScreen = "calibrate";
 const audioContext = new (window.AudioContext || window.webkitAudioContext)();
 let alertOscillator = null;
+
+function soundEnabled() {
+  return !window.getGameSettings || window.getGameSettings().soundEnabled;
+}
 
 function playAlertNoise() {
   if (audioContext.state === "suspended") {
@@ -68,8 +75,13 @@ function draw() {
     return;
   }
 
+  if (screen === "calibrate_corners") {
+    window.renderCalibrateCorners(ctx, c, window.readSensorCoordinate(getCalibrateNodes()));
+    return;
+  }
+
   if (screen === "game") {
-    window.renderGame(ctx, c, nodes);
+    window.renderGame(ctx, c);
     return;
   }
 
@@ -86,7 +98,12 @@ function draw() {
   }
 
   if (screen === "alert") {
-    window.renderAlert(ctx, c);
+    const fromGame = alertReturnScreen === "game";
+    window.renderAlert(ctx, c, {
+      active: true,
+      distanceCm: fromGame ? window.getGameAlertInfo().distanceCm : null,
+      showBack: !fromGame,
+    });
     return;
   }
 
@@ -142,12 +159,37 @@ function getCalibrateNodes() {
   return calibrateSlotNodeIds.map((nodeId) => (nodeId === null ? null : nodes.get(nodeId) || null));
 }
 
+// All three sensors online means the rig is ready, so move straight on to
+// corner calibration without waiting for a button press.
+function maybeAutoContinueCalibration() {
+  if (screen !== "calibrate") return;
+  if (window.countConfiguredNodes(getCalibrateNodes()) < window.CALIBRATE_AUTO_CONTINUE_NODES) return;
+  screen = "calibrate_corners";
+}
+
+// The loop keeps running across the game <-> alert boundary so the sensors are
+// still read while the alert is up - that is what lets it clear itself once the
+// player steps back past the threshold.
 function gameLoopTick(timestamp) {
-  if (screen !== "game") {
+  const runningScreen = screen === "game" || (screen === "alert" && alertReturnScreen === "game");
+  if (!runningScreen) {
     gameLoopId = null;
     return;
   }
-  window.updateGame(timestamp);
+
+  window.updateGame(timestamp, c, getCalibrateNodes());
+
+  if (window.isGameAlertActive()) {
+    if (screen !== "alert") {
+      alertReturnScreen = "game";
+      screen = "alert";
+      if (soundEnabled()) playAlertNoise();
+    }
+  } else if (screen === "alert" && alertReturnScreen === "game") {
+    screen = "game";
+    stopAlertNoise();
+  }
+
   draw();
   gameLoopId = requestAnimationFrame(gameLoopTick);
 }
@@ -163,6 +205,18 @@ function stopGameLoop() {
     cancelAnimationFrame(gameLoopId);
     gameLoopId = null;
   }
+}
+
+// Single entry point into a round, from either Skip (mouse) or the corner
+// calibration screen (sensor).
+function startGameWithMode(mode) {
+  stopGameLoop();
+  stopAlertNoise();
+  window.setGameInputMode(mode);
+  window.resetGame();
+  alertReturnScreen = "game";
+  screen = "game";
+  startGameLoop();
 }
 
 function connectSocket() {
@@ -187,6 +241,7 @@ function connectSocket() {
       updateCalibrateSlots(payload.nodes);
       nodes.clear();
       payload.nodes.forEach((node) => nodes.set(node.id, node));
+      maybeAutoContinueCalibration();
       draw();
     } else if (payload.type === "menu:status") {
       console.log(payload.message);
@@ -209,12 +264,14 @@ function connectSocket() {
 }
 
 c.addEventListener("mousemove", (event) => {
+  // In sensor mode the cursor belongs to the sensor reading, so the mouse must
+  // not move it or score with it.
+  if (screen !== "game" || window.getGameInputMode() !== "mouse") return;
+
   const pointer = getCanvasPoint(event);
-  if (screen === "game") {
-    window.setGameCursor(c, pointer.x, pointer.y);
-    if (window.handleGameHover(c, pointer.x, pointer.y)) {
-      draw();
-    }
+  window.setGameCursor(c, pointer.x, pointer.y);
+  if (window.handleGameHover(c, pointer.x, pointer.y)) {
+    draw();
   }
 });
 
@@ -241,15 +298,30 @@ c.addEventListener("click", (event) => {
       if (hit.type === "back") {
         screen = "menu";
       } else if (hit.type === "alert") {
+        alertReturnScreen = "calibrate";
         screen = "alert";
-        if (!window.getGameSettings || window.getGameSettings().soundEnabled) {
-          playAlertNoise();
-        }
+        if (soundEnabled()) playAlertNoise();
       } else if (hit.type === "skip") {
-        stopGameLoop();
-        window.resetGame();
-        screen = "game";
-        startGameLoop();
+        startGameWithMode("mouse");
+      }
+      draw();
+    }
+    return;
+  }
+
+  if (screen === "calibrate_corners") {
+    const hit = window.getCalibrateCornersButtonAtPoint(c, point.x, point.y);
+    if (hit) {
+      if (hit.type === "back") {
+        screen = "calibrate";
+      } else if (hit.type === "capture") {
+        window.captureCorner(window.readSensorCoordinate(getCalibrateNodes()));
+      } else if (hit.type === "reset") {
+        window.resetCornerCalibration();
+      } else if (hit.type === "skip") {
+        startGameWithMode("mouse");
+      } else if (hit.type === "start") {
+        startGameWithMode("sensor");
       }
       draw();
     }
@@ -296,7 +368,8 @@ c.addEventListener("click", (event) => {
       return;
     }
 
-    if (window.handleGameClick(c, point.x, point.y)) {
+    // Clicking to whack is a mouse-mode affordance only.
+    if (window.getGameInputMode() === "mouse" && window.handleGameClick(c, point.x, point.y)) {
       draw();
     }
     return;
@@ -313,9 +386,11 @@ c.addEventListener("click", (event) => {
   }
 
   if (screen === "alert") {
-    const hit = window.getAlertButtonAtPoint(c, point.x, point.y);
+    // A game-driven alert has no Back button; it clears when the player steps back.
+    const showBack = alertReturnScreen !== "game";
+    const hit = window.getAlertButtonAtPoint(c, point.x, point.y, showBack);
     if (hit && hit.type === "back") {
-      screen = "calibrate";
+      screen = alertReturnScreen;
       stopAlertNoise();
       draw();
     }

@@ -1,3 +1,19 @@
+// alert.js - Full-screen "too close to the screen" alert.
+//
+// This screen covers one condition only: the raw distance reading has dropped
+// below ALERT_DISTANCE_CM. It owns that threshold so the game and the
+// calibration screens all agree on what "too close" means.
+//
+// renderAlert() takes a boolean `active`; when false it draws nothing and
+// returns false, so the caller can fall through to the normal frame.
+
+window.ALERT_DISTANCE_CM = 10;
+
+// True when `cm` is a real reading inside the danger zone. A negative value
+// means "no echo" from the sensor, not "zero distance".
+window.isTooClose = function isTooClose(cm) {
+  return Number.isFinite(cm) && cm >= 0 && cm < window.ALERT_DISTANCE_CM;
+};
 
 window.getAlertLayout = function getAlertLayout(canvas) {
   const width = canvas.clientWidth || canvas.width;
@@ -10,7 +26,15 @@ window.getAlertLayout = function getAlertLayout(canvas) {
   return { width, height, centerX, buttonWidth, buttonHeight, x, y };
 };
 
-window.renderAlert = function renderAlert(ctx, canvas) {
+// options:
+//   active      - boolean; when false nothing is drawn and false is returned
+//   distanceCm  - latest raw reading, shown to the player when available
+//   showBack    - draw the manual Back button (the calibrate entry point).
+//                 Sensor-driven alerts clear themselves, so they hide it.
+window.renderAlert = function renderAlert(ctx, canvas, options = {}) {
+  const { active = true, distanceCm = null, showBack = true } = options;
+  if (!active) return false;
+
   const layout = window.getAlertLayout(canvas);
   const { width, height, centerX, buttonWidth, buttonHeight, x, y } = layout;
 
@@ -22,17 +46,35 @@ window.renderAlert = function renderAlert(ctx, canvas) {
   ctx.font = `bold ${Math.max(32, Math.min(64, width * 0.06))}px monospace`;
   ctx.fillText("Too close to screen", centerX, Math.max(120, height * 0.35));
 
-  ctx.fillStyle = "#ffffff";
-  ctx.fillRect(x, y, buttonWidth, buttonHeight);
+  ctx.font = `${Math.max(16, Math.min(26, width * 0.022))}px monospace`;
+  ctx.fillText(
+    Number.isFinite(distanceCm)
+      ? `${distanceCm.toFixed(1)} cm - step back past ${window.ALERT_DISTANCE_CM} cm`
+      : `Step back past ${window.ALERT_DISTANCE_CM} cm`,
+    centerX,
+    Math.max(170, height * 0.35 + 54)
+  );
 
-  ctx.fillStyle = "#b21b1b";
-  ctx.font = `bold ${Math.max(18, Math.min(24, buttonHeight * 0.5))}px monospace`;
-  ctx.fillText("Back", centerX, y + buttonHeight * 0.68);
+  if (showBack) {
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(x, y, buttonWidth, buttonHeight);
+
+    ctx.fillStyle = "#b21b1b";
+    ctx.font = `bold ${Math.max(18, Math.min(24, buttonHeight * 0.5))}px monospace`;
+    ctx.fillText("Back", centerX, y + buttonHeight * 0.68);
+  } else {
+    ctx.fillStyle = "rgba(255, 255, 255, 0.75)";
+    ctx.font = `${Math.max(14, Math.min(20, width * 0.016))}px monospace`;
+    ctx.fillText("The game resumes automatically", centerX, y + buttonHeight * 0.68);
+  }
 
   ctx.textAlign = "start";
+  return true;
 };
 
-window.getAlertButtonAtPoint = function getAlertButtonAtPoint(canvas, x, y) {
+// Only hit-testable while the manual Back button is on screen.
+window.getAlertButtonAtPoint = function getAlertButtonAtPoint(canvas, x, y, showBack = true) {
+  if (!showBack) return null;
   const layout = window.getAlertLayout(canvas);
   const withinX = x >= layout.x && x <= layout.x + layout.buttonWidth;
   const withinY = y >= layout.y && y <= layout.y + layout.buttonHeight;
