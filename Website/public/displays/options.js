@@ -41,6 +41,13 @@ window.getOptionsLayout = function getOptionsLayout(canvas) {
     height: buttonHeight,
   };
 
+  const testModeButton = {
+    x: centerX - buttonWidth,
+    y: firstRowY + rowGap * 3,
+    width: buttonWidth * 2,
+    height: buttonHeight,
+  };
+
   return {
     width,
     height,
@@ -51,13 +58,16 @@ window.getOptionsLayout = function getOptionsLayout(canvas) {
     durationButtons,
     livesButtons,
     soundButton,
+    testModeButton,
   };
 };
 
 window.renderOptions = function renderOptions(ctx, canvas) {
   const layout = window.getOptionsLayout(canvas);
-  const { width, height, centerX, backButton, durationButtons, livesButtons, soundButton } = layout;
-  const settings = window.getGameSettings ? window.getGameSettings() : { durationMs: 60000, startingLives: 3, soundEnabled: true };
+  const { width, height, centerX, backButton, durationButtons, livesButtons, soundButton, testModeButton } = layout;
+  const settings = window.getGameSettings
+    ? window.getGameSettings()
+    : { durationMs: 60000, startingLives: 3, soundEnabled: true, testMode: false };
 
   ctx.fillStyle = "#13131c";
   ctx.fillRect(0, 0, width, height);
@@ -114,6 +124,20 @@ window.renderOptions = function renderOptions(ctx, canvas) {
   ctx.textAlign = "center";
   ctx.fillText(settings.soundEnabled ? "On" : "Off", soundButton.x + soundButton.width / 2, soundButton.y + soundButton.height / 2 + 6);
 
+  drawSectionLabel("Test Mode - no bombs or timer, infinite lives, 10s moles", layout.firstRowY + layout.rowGap * 3);
+  ctx.fillStyle = settings.testMode ? "#f59e0b" : "#475569";
+  ctx.beginPath();
+  ctx.roundRect(testModeButton.x, testModeButton.y, testModeButton.width, testModeButton.height, 8);
+  ctx.fill();
+  ctx.fillStyle = settings.testMode ? "#13131c" : "#fff";
+  ctx.font = "bold 16px monospace";
+  ctx.textAlign = "center";
+  ctx.fillText(
+    settings.testMode ? "On" : "Off",
+    testModeButton.x + testModeButton.width / 2,
+    testModeButton.y + testModeButton.height / 2 + 6
+  );
+
   ctx.textAlign = "start";
 };
 
@@ -133,6 +157,7 @@ window.getOptionsButtonAtPoint = function getOptionsButtonAtPoint(canvas, x, y) 
   if (livesHit) return { type: "lives", value: livesHit.value };
 
   if (within(layout.soundButton)) return { type: "sound" };
+  if (within(layout.testModeButton)) return { type: "testMode" };
 
   return null;
 };

@@ -71,7 +71,7 @@ function draw() {
   ctx.setTransform(viewport.dpr, 0, 0, viewport.dpr, 0, 0);
 
   if (screen === "calibrate") {
-    renderCalibrate(ctx, c, getCalibrateNodes(), sensorLocations);
+    renderCalibrate(ctx, c, getSortedNodes());
     return;
   }
 
@@ -123,6 +123,129 @@ function getSortedNodes() {
   return Array.from(nodes.values()).sort((a, b) => a.id - b.id);
 }
 
+// --- Console diagnostics ---------------------------------------------------
+// With three sensors the node stream arrives at up to 60 messages a second, so
+// the periodic dump is throttled. Events that are rare and interesting - a node
+// dropping out, the sensor state changing - are logged the moment they happen.
+
+const nodeLogging = {
+  enabled: true,
+  intervalMs: 500,
+  lastAt: -Infinity,
+  lastRoster: "",
+  lastStatus: null,
+  lastAssignment: "",
+};
+
+const SLOT_NAMES = ["LEFT", "CENTRE", "RIGHT"];
+
+// nodeLog()       - toggle
+// nodeLog(false)  - off
+// nodeLog(250)    - on, dumping at most every 250ms
+window.nodeLog = function nodeLog(option) {
+  if (typeof option === "number") {
+    nodeLogging.intervalMs = Math.max(0, option);
+    nodeLogging.enabled = true;
+  } else if (typeof option === "boolean") {
+    nodeLogging.enabled = option;
+  } else {
+    nodeLogging.enabled = !nodeLogging.enabled;
+  }
+  console.info(
+    `[nodes] logging ${nodeLogging.enabled ? "ON" : "OFF"} (every ${nodeLogging.intervalMs}ms)`
+  );
+  return nodeLogging.enabled;
+};
+
+// One row per connected sensor, including which slot it was assigned to.
+function nodeRows() {
+  const assignment = window.getSensorAssignment();
+
+  return getSortedNodes().map((node) => {
+    const slotIndex = assignment.indexOf(node.id);
+    const distance = window.readNodeDistance(node);
+    return {
+      node: node.id,
+      slot: slotIndex === -1 ? "--" : SLOT_NAMES[slotIndex],
+      cm: distance === null ? null : Number(distance.toFixed(1)),
+      online: node.online,
+      rps: Number((node.rps || 0).toFixed(1)),
+      address: node.address,
+    };
+  });
+}
+
+window.nodeTable = function nodeTable() {
+  const rows = nodeRows();
+  console.table(rows);
+  return rows;
+};
+
+function logNodes() {
+  if (!nodeLogging.enabled) return;
+
+  const now = performance.now();
+  const sorted = getSortedNodes();
+
+  // Roster changes bypass the throttle - losing a sensor matters immediately.
+  const roster = sorted.map((node) => `${node.id}:${node.online ? 1 : 0}`).join(",");
+  const rosterChanged = roster !== nodeLogging.lastRoster;
+  nodeLogging.lastRoster = roster;
+
+  // So does a slot assignment landing.
+  const assignment = window.getSensorAssignment().join(",");
+  const assignmentChanged = assignment !== nodeLogging.lastAssignment;
+  nodeLogging.lastAssignment = assignment;
+
+  if (assignmentChanged) {
+    const named = window.getSensorAssignment()
+      .map((id, i) => `${SLOT_NAMES[i]}=${id === null ? "--" : "node " + id}`)
+      .join("  ");
+    console.info(`[assign] ${named}`);
+  }
+
+  if (!rosterChanged && !assignmentChanged && now - nodeLogging.lastAt < nodeLogging.intervalMs) {
+    return;
+  }
+  nodeLogging.lastAt = now;
+
+  if (rosterChanged) console.info(`[nodes] roster changed -> ${sorted.length} connected`);
+  console.table(nodeRows());
+}
+
+// Sensor state transitions, logged from the game loop as they occur.
+function logSensorStatus() {
+  if (!nodeLogging.enabled) return;
+  if (window.getGameInputMode() !== "sensor") return;
+
+  const debug = window.getSensorDebug();
+  const status = `${debug.status}${debug.held ? ":held" : ""}`;
+  if (status === nodeLogging.lastStatus) return;
+  nodeLogging.lastStatus = status;
+
+  const where = debug.grid ? `grid(${debug.grid.gx},${debug.grid.gy})` : "no coordinate";
+  const distance = debug.distanceCm === null ? "--" : `${debug.distanceCm.toFixed(1)}cm`;
+
+  // Out-of-bounds is the state people most often need explained, so show the
+  // window the reading actually failed against.
+  let why = "";
+  if (debug.status === "out-of-bounds" && debug.bounds) {
+    const { nearCm, farCm } = debug.bounds;
+    why = `  (play area ${nearCm.toFixed(0)}-${farCm.toFixed(0)}cm, hard limit ${debug.limits.maxCm}cm)`;
+  }
+
+  console.info(
+    `[sensor] ${status.toUpperCase()}  ${where}  ${distance}` +
+      `  bad=${debug.badReadings}/${debug.holdBudget}${why}`
+  );
+}
+
+console.info(
+  "%c[ENG3000]%c node logging is ON.  nodeLog(false) stops it \u00b7 nodeLog(250) sets the interval \u00b7 nodeTable() dumps once \u00b7 getSensorDebug() snapshots the pipeline \u00b7 testMode() disables bombs, death and the timer",
+  "color:#22c55e;font-weight:bold",
+  "color:inherit"
+);
+
 function getCanvasPoint(event) {
   const rect = c.getBoundingClientRect();
   return {
@@ -131,22 +254,32 @@ function getCanvasPoint(event) {
   };
 }
 
+// Slot ordering comes from the hand-wave assignment on the calibration screen.
+// Ascending node ID is only a fallback for the Skip path, where the operator
+// has chosen not to identify the sensors - it is arbitrary and probably wrong,
+// but it keeps mouse mode and the debug views working.
 function updateCalibrateSlots(nextNodes) {
+  const assigned = window.getSensorAssignment();
+
+  if (window.isSensorAssignmentComplete()) {
+    assigned.forEach((nodeId, index) => {
+      calibrateSlotNodeIds[index] = nodeId;
+    });
+    return;
+  }
+
   const nextIds = new Set(nextNodes.map((node) => node.id));
 
-  calibrateSlotNodeIds.forEach((nodeId, index) => {
-    if (nodeId !== null && !nextIds.has(nodeId)) {
-      calibrateSlotNodeIds[index] = null;
-    }
+  // Seed from whatever the assignment has resolved so far.
+  assigned.forEach((nodeId, index) => {
+    calibrateSlotNodeIds[index] = nodeId !== null && nextIds.has(nodeId) ? nodeId : null;
   });
 
   nextNodes
     .slice()
     .sort((a, b) => a.id - b.id)
     .forEach((node) => {
-      if (calibrateSlotNodeIds.includes(node.id)) {
-        return;
-      }
+      if (calibrateSlotNodeIds.includes(node.id)) return;
 
       const emptyIndex = calibrateSlotNodeIds.indexOf(null);
       if (emptyIndex !== -1) {
@@ -159,11 +292,26 @@ function getCalibrateNodes() {
   return calibrateSlotNodeIds.map((nodeId) => (nodeId === null ? null : nodes.get(nodeId) || null));
 }
 
+// Auto-advance fires at most once per visit to the calibration screen. Without
+// this latch a nodes:update arriving milliseconds after the user presses Back
+// on the corners page would bounce them straight forward again - with three
+// nodes online the update stream runs at up to 60 messages per second.
+let calibrateAutoContinueArmed = true;
+
 // All three sensors online means the rig is ready, so move straight on to
 // corner calibration without waiting for a button press.
 function maybeAutoContinueCalibration() {
   if (screen !== "calibrate") return;
-  if (window.countConfiguredNodes(getCalibrateNodes()) < window.CALIBRATE_AUTO_CONTINUE_NODES) return;
+
+  // Gate on identification, not just connectivity: three online sensors are
+  // useless until we know which is which.
+  if (!window.isSensorAssignmentComplete()) {
+    calibrateAutoContinueArmed = true;
+    return;
+  }
+
+  if (!calibrateAutoContinueArmed) return;
+  calibrateAutoContinueArmed = false;
   screen = "calibrate_corners";
 }
 
@@ -178,6 +326,7 @@ function gameLoopTick(timestamp) {
   }
 
   window.updateGame(timestamp, c, getCalibrateNodes());
+  logSensorStatus();
 
   if (window.isGameAlertActive()) {
     if (screen !== "alert") {
@@ -238,10 +387,19 @@ function connectSocket() {
           if (buf.length > 200) buf.splice(0, buf.length - 200);
         }
       });
-      updateCalibrateSlots(payload.nodes);
       nodes.clear();
       payload.nodes.forEach((node) => nodes.set(node.id, node));
+
+      // Tells the sensor pipeline a genuinely new reading has landed, so its
+      // bad-reading budget counts readings rather than render frames.
+      window.markSensorFrame();
+
+      if (screen === "calibrate") {
+        window.updateSensorAssignment(getSortedNodes());
+      }
+      updateCalibrateSlots(payload.nodes);
       maybeAutoContinueCalibration();
+      logNodes();
       draw();
     } else if (payload.type === "menu:status") {
       console.log(payload.message);
@@ -297,10 +455,8 @@ c.addEventListener("click", (event) => {
     if (hit) {
       if (hit.type === "back") {
         screen = "menu";
-      } else if (hit.type === "alert") {
-        alertReturnScreen = "calibrate";
-        screen = "alert";
-        if (soundEnabled()) playAlertNoise();
+      } else if (hit.type === "reset") {
+        window.resetSensorAssignment();
       } else if (hit.type === "skip") {
         startGameWithMode("mouse");
       }
@@ -313,6 +469,8 @@ c.addEventListener("click", (event) => {
     const hit = window.getCalibrateCornersButtonAtPoint(c, point.x, point.y);
     if (hit) {
       if (hit.type === "back") {
+        // Deliberate Back: hold the calibration screen instead of re-advancing.
+        calibrateAutoContinueArmed = false;
         screen = "calibrate";
       } else if (hit.type === "capture") {
         window.captureCorner(window.readSensorCoordinate(getCalibrateNodes()));
@@ -409,6 +567,9 @@ c.addEventListener("click", (event) => {
       } else if (hit.type === "sound") {
         const current = window.getGameSettings();
         window.setGameSettings({ soundEnabled: !current.soundEnabled });
+      } else if (hit.type === "testMode") {
+        const current = window.getGameSettings();
+        window.setGameSettings({ testMode: !current.testMode });
       }
       draw();
     }
@@ -417,6 +578,8 @@ c.addEventListener("click", (event) => {
 
   const choice = window.getMenuButtonAtPoint(c, point.x, point.y);
   if (choice === "Play") {
+    calibrateAutoContinueArmed = true;
+    window.resetSensorAssignment();
     screen = "calibrate";
     draw();
     return;

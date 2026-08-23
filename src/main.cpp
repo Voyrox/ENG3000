@@ -6,7 +6,7 @@ constexpr char WIFI_SSID[] = "Josh's S24";
 constexpr char WIFI_PASSWORD[] = "bruh12345";
 
 constexpr bool AUTO_DISCOVER_SERVER = false;
-constexpr char SERVER_IP[] = "192.168.9.99";
+constexpr char SERVER_IP[] = "192.168.1.108";
 constexpr uint16_t SERVER_PORT = 3000;
 
 int nodeID = -1;
@@ -22,8 +22,8 @@ WiFiClient client;
 String serverIP = AUTO_DISCOVER_SERVER ? "" : SERVER_IP;
 
 const int UltrasonicCount = 1;
-const int triggerPin = 5;
-const int echoPin = 18;
+const int triggerPin = 33;
+const int echoPin = 32;
 Ultrasonic center(triggerPin, echoPin, "Center");
 
 bool connectServer() {

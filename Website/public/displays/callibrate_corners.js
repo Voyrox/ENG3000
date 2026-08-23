@@ -40,11 +40,21 @@
 
   // Used when sensor mode starts without a completed calibration, so the game
   // still responds instead of going dead.
+  // These span most of the credible sensing range (up to the 1.5 m limit set in
+  // game.js) so an uncalibrated rig is playable rather than permanently out of
+  // bounds.
   const DEFAULT_NEAR_CM = 20;
-  const DEFAULT_FAR_CM = 90;
+  const DEFAULT_FAR_CM = 140;
 
   // Slack beyond the calibrated near/far bounds still counted as on the board.
-  const BAND_TOLERANCE_CM = 10;
+  // Generous on purpose: standing a step past the far corner should report the
+  // back row, not drop the coordinate entirely.
+  const BAND_TOLERANCE_CM = 30;
+
+  // How far past a row boundary the reading must travel before the row is
+  // allowed to change. Stops the cursor oscillating when a player stands on a
+  // boundary and the reading jitters either side of it.
+  const BAND_HYSTERESIS_CM = 6;
 
   // A calibration whose near and far edges are this close together is a
   // mis-capture (e.g. all four corners taken from the same spot).
@@ -74,9 +84,12 @@
   // Derives the usable calibration: the near/far distance bounds and whether
   // the sensor order is reversed. Falls back to defaults when incomplete or
   // when the captured corners do not describe a sane play area.
+  // Corner calibration now supplies depth only. Which sensor is left, centre or
+  // right is established by the hand-wave assignment on the calibration screen,
+  // so correcting for reversed wiring here as well would undo that fix.
   function getBounds() {
     if (!isComplete()) {
-      return { nearCm: DEFAULT_NEAR_CM, farCm: DEFAULT_FAR_CM, flipped: false, calibrated: false };
+      return { nearCm: DEFAULT_NEAR_CM, farCm: DEFAULT_FAR_CM, calibrated: false };
     }
 
     const { BL, BR, TR, TL } = state.corners;
@@ -84,39 +97,50 @@
     const farCm = (TL.distanceCm + TR.distanceCm) / 2;
 
     if (!(farCm - nearCm >= MIN_PLAY_DEPTH_CM)) {
-      return { nearCm: DEFAULT_NEAR_CM, farCm: DEFAULT_FAR_CM, flipped: false, calibrated: false, bad: true };
+      return { nearCm: DEFAULT_NEAR_CM, farCm: DEFAULT_FAR_CM, calibrated: false, bad: true };
     }
 
-    // If the bottom-left corner was picked up by a higher-numbered sensor than
-    // the bottom-right one, the sensors are mounted/wired right-to-left.
-    const flipped = BL.column > BR.column;
-
-    return { nearCm, farCm, flipped, calibrated: true };
+    return { nearCm, farCm, calibrated: true };
   }
 
   window.getCalibrationBounds = getBounds;
 
+  // Picks the row, refusing to leave the previous one until the reading has
+  // travelled BAND_HYSTERESIS_CM clear of the boundary between them.
+  function bandFor(distanceCm, nearCm, rowDepth, previousGy) {
+    const candidate = clamp(Math.floor((distanceCm - nearCm) / rowDepth), 0, 2);
+    if (previousGy === null || candidate === previousGy) return candidate;
+
+    // The boundary being crossed is the upper edge of the lower of the two rows.
+    const boundary = nearCm + rowDepth * Math.max(candidate, previousGy);
+    if (Math.abs(distanceCm - boundary) < BAND_HYSTERESIS_CM) return previousGy;
+    return candidate;
+  }
+
   // Raw fix -> play-area grid coordinate.
   //   column     - which sensor saw the player (0 left, 1 centre, 2 right)
   //   distanceCm - that sensor's distance reading
+  //   previous   - the last grid result, used for row hysteresis (optional)
   // Returns integer gx/gy in 0..2, or null if the input is unusable.
-  window.rawToGrid = function rawToGrid(column, distanceCm) {
+  window.rawToGrid = function rawToGrid(column, distanceCm, previous) {
     if (!Number.isInteger(column) || column < 0 || column > 2) return null;
     if (!Number.isFinite(distanceCm)) return null;
 
-    const { nearCm, farCm, flipped, calibrated } = getBounds();
+    const { nearCm, farCm, calibrated } = getBounds();
 
-    const gx = flipped ? 2 - column : column;
+    // The slot index IS the column - calibrate.js already resolved which
+    // physical sensor fills each slot.
+    const gx = column;
 
     // Split the near..far depth into three equal rows.
-    const span = farCm - nearCm;
-    const t = (distanceCm - nearCm) / span;
-    const gy = clamp(Math.floor(t * 3), 0, 2);
+    const rowDepth = (farCm - nearCm) / 3;
+    const previousGy = previous && previous.gx === gx ? previous.gy : null;
+    const gy = bandFor(distanceCm, nearCm, rowDepth, previousGy);
 
     const inside =
       distanceCm >= nearCm - BAND_TOLERANCE_CM && distanceCm <= farCm + BAND_TOLERANCE_CM;
 
-    return { gx, gy, inside, calibrated, nearCm, farCm };
+    return { gx, gy, inside, calibrated, nearCm, farCm, rowDepth };
   };
 
   window.isCornerCalibrationComplete = isComplete;
@@ -340,8 +364,7 @@
       ctx.fillStyle = "#9298aa";
       const rowDepth = (bounds.farCm - bounds.nearCm) / 3;
       ctx.fillText(
-        `rows: ${bounds.nearCm.toFixed(0)}cm to ${bounds.farCm.toFixed(0)}cm (${rowDepth.toFixed(0)}cm each)` +
-          (bounds.flipped ? "  |  sensor order reversed" : ""),
+        `rows: ${bounds.nearCm.toFixed(0)}cm to ${bounds.farCm.toFixed(0)}cm (${rowDepth.toFixed(0)}cm each)`,
         centerX,
         readoutY + 24
       );

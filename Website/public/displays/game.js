@@ -29,10 +29,11 @@
 
 (function () {
   const GAME_DURATION_MS = 60000; // overall round length shown as the countdown
-  const HITS_PER_LEVEL = 10; // score needed to advance a level
-  const BASE_MOLE_MS = 3000; // visible duration at level 1
-  const MIN_MOLE_MS = 500; // floor so even high levels stay realistically hittable
-  const MOLE_DURATION_DECAY = 0.85; // gentle falloff (was 1.6) so late levels don't become unplayable
+  const HITS_PER_LEVEL = 5; // score needed to advance a level
+  const MAX_LEVEL = 10; // difficulty stops ramping here, so "last level" is a real thing
+  const BASE_MOLE_MS = 12000; // visible duration at level 1
+  const FINAL_MOLE_MS = 4000; // visible duration at MAX_LEVEL
+  const TEST_MODE_MOLE_MS = 10000; // fixed, generous window while testing the rig
   const MIN_SPAWN_DELAY_MS = 500; // gap before a new mole appears
   const MAX_SPAWN_DELAY_MS = 700;
   const HIT_FEEDBACK_MS = 200; // how long the "hit" flash lasts
@@ -48,7 +49,24 @@
   // No triangulation: the three sensors sit on one line pointing straight
   // forward, so each owns one column of the board and its distance reading
   // picks the row. See callibrate_corners.js for the grid mapping.
-  const MAX_COORD_CM = 160; // a reading beyond 1.6 m is bogus -> "come back in bounds"
+  const MAX_COORD_CM = 150; // a reading beyond 1.5 m is bogus -> "come back in bounds"
+
+  // Reading conditioning. The firmware ships RAW distances - the 3-sample
+  // average in ultrasonicSensor.cpp is commented out - so spikes and dropped
+  // echoes arrive here unsmoothed. Without the filtering below, one bad frame
+  // out of the 20/sec each node sends was enough to pause the round.
+  const SENSOR_HISTORY = 5;       // samples per sensor in the median window
+  const SENSOR_HOLD_MS = 350;     // coast a sensor through a dropped echo
+  // How many consecutive unusable READINGS to ride out before admitting defeat
+  // and showing the come-closer / out-of-bounds screen. Counted in sensor
+  // readings rather than render frames: the game draws at ~60fps while each
+  // node reports at 20Hz, so a frame budget would expire three times too fast.
+  const MAX_HELD_READINGS = 10;
+  // Backstop for when data stops arriving altogether, so a disconnected rig
+  // cannot leave a stale cursor on screen forever.
+  const HOLD_TIMEOUT_MS = 2500;
+  const COLUMN_MARGIN_CM = 8;     // a rival sensor must beat this to steal the column
+  const TOO_CLOSE_FRAMES = 2;     // consecutive raw frames needed to raise the alert
 
 
   // Adjustable via the Options screen; read fresh at the start of each round.
@@ -56,6 +74,9 @@
     durationMs: GAME_DURATION_MS,
     startingLives: DEFAULT_LIVES,
     soundEnabled: true,
+    // Test mode: no bombs spawn and lives are never lost, so a run can be used
+    // to exercise the sensor pipeline without the round ending underneath you.
+    testMode: false,
   };
 
   window.getGameSettings = function getGameSettings() {
@@ -64,6 +85,17 @@
 
   window.setGameSettings = function setGameSettings(partial) {
     Object.assign(settings, partial);
+  };
+
+  // Console shortcut: testMode() toggles, testMode(true/false) sets.
+  window.testMode = function testMode(enabled) {
+    settings.testMode = typeof enabled === "boolean" ? enabled : !settings.testMode;
+    console.info(
+      `[test] test mode ${
+        settings.testMode ? "ON - no bombs, infinite lives, no timer, 10s moles" : "OFF"
+      }`
+    );
+    return settings.testMode;
   };
 
   window.DURATION_OPTIONS_MS = DURATION_OPTIONS_MS;
@@ -120,14 +152,36 @@
     return min + Math.random() * (max - min);
   }
 
+  // Capped, so the displayed level always matches the difficulty actually
+  // in effect rather than climbing past the point where anything changes.
   function computeLevel(score) {
-    return 1 + Math.floor(score / HITS_PER_LEVEL);
+    return Math.min(MAX_LEVEL, 1 + Math.floor(score / HITS_PER_LEVEL));
+  }
+
+  // Straight linear ramp between the two named endpoints. A power curve would
+  // dump most of the difficulty into the first few levels; sensor input needs
+  // the player to physically walk to a cell, so an even step is fairer.
+  function rampedMoleDuration(level) {
+    const clamped = Math.max(1, Math.min(MAX_LEVEL, level));
+    const progress = (clamped - 1) / (MAX_LEVEL - 1);
+    return Math.round(BASE_MOLE_MS + (FINAL_MOLE_MS - BASE_MOLE_MS) * progress);
   }
 
   function computeMoleDuration(level) {
-    const scaled = BASE_MOLE_MS / Math.pow(level, MOLE_DURATION_DECAY);
-    return Math.max(MIN_MOLE_MS, Math.floor(scaled));
+    // Test mode pins every mole to one generous window, so the difficulty ramp
+    // cannot shift underneath you while the sensor rig is being exercised.
+    if (settings.testMode) return TEST_MODE_MOLE_MS;
+    return rampedMoleDuration(level);
   }
+
+  // Always reports the real difficulty curve, regardless of the current mode.
+  window.getMoleDurationTable = function getMoleDurationTable() {
+    return Array.from({ length: MAX_LEVEL }, (_, i) => ({
+      level: i + 1,
+      seconds: rampedMoleDuration(i + 1) / 1000,
+      hitsToReach: i * HITS_PER_LEVEL,
+    }));
+  };
 
   // Extra lives to compensate for higher levels' shorter mole windows: +1 life every 2 levels.
   function levelLivesBonus(level) {
@@ -154,9 +208,21 @@
 
   function pickRandomMoleType() {
     const roll = Math.random();
-    if (roll < BOMB_SPAWN_CHANCE) return "bomb";
+    // Test mode drops bombs from the pool entirely; their share is folded into
+    // ordinary moles so super moles keep their usual frequency.
+    if (!settings.testMode && roll < BOMB_SPAWN_CHANCE) return "bomb";
     if (roll < BOMB_SPAWN_CHANCE + SUPER_SPAWN_CHANCE) return "super";
     return "mole";
+  }
+
+  // Single place that decides whether a life can actually be taken.
+  function loseLife() {
+    if (settings.testMode) return;
+    gameState.lives = Math.max(0, gameState.lives - 1);
+  }
+
+  function isOutOfLives() {
+    return !settings.testMode && gameState.lives <= 0;
   }
 
   function pointInRect(x, y, r) {
@@ -189,11 +255,12 @@
     gameState.moleType = "mole";
     gameState.moleWounded = false;
     gameState.moleSpawnedAt = 0;
-    gameState.moleDurationMs = BASE_MOLE_MS;
+    gameState.moleDurationMs = computeMoleDuration(gameState.level);
     gameState.nextSpawnAt = 0;
     gameState.hitFlash = { hole: -1, until: 0, type: null };
     gameState.cursor = { x: null, y: null, inBounds: true };
     gameState.sensor = emptySensorState();
+    resetSensorFilters();
   };
 
   window.getGameState = function getGameState() {
@@ -205,6 +272,7 @@
     // Drop any stale cursor so the two modes never inherit each other's position.
     gameState.cursor = { x: null, y: null, inBounds: true };
     gameState.sensor = emptySensorState();
+    resetSensorFilters();
   };
 
   window.getGameInputMode = function getGameInputMode() {
@@ -274,13 +342,16 @@
       return;
     }
 
-    gameState.remainingMs -= elapsed;
+    // Test mode freezes the round clock, so a run lasts until you stop it.
+    if (!settings.testMode) {
+      gameState.remainingMs -= elapsed;
 
-    if (gameState.remainingMs <= 0) {
-      gameState.remainingMs = 0;
-      gameState.status = "gameover";
-      gameState.activeHole = -1;
-      return;
+      if (gameState.remainingMs <= 0) {
+        gameState.remainingMs = 0;
+        gameState.status = "gameover";
+        gameState.activeHole = -1;
+        return;
+      }
     }
 
     // Mole timed out without being hit -> remove it and schedule the next one.
@@ -291,8 +362,8 @@
       gameState.nextSpawnAt = now + randomBetween(MIN_SPAWN_DELAY_MS, MAX_SPAWN_DELAY_MS);
 
       if (missedMole) {
-        gameState.lives = Math.max(0, gameState.lives - 1);
-        if (gameState.lives <= 0) {
+        loseLife();
+        if (isOutOfLives()) {
           gameState.status = "gameover";
           return;
         }
@@ -365,7 +436,7 @@
 
     if (hitType === "bomb") {
       gameState.score = Math.max(0, gameState.score - BOMB_PENALTY);
-      gameState.lives = Math.max(0, gameState.lives - 1);
+      loseLife();
     } else {
       gameState.score += hitType === "super" ? SUPER_MOLE_POINTS : 1;
     }
@@ -378,7 +449,7 @@
     grantLevelBonus(gameState.level);
     gameState.nextSpawnAt = now + randomBetween(MIN_SPAWN_DELAY_MS, MAX_SPAWN_DELAY_MS);
 
-    if (gameState.lives <= 0) {
+    if (isOutOfLives()) {
       gameState.status = "gameover";
     }
     return true;
@@ -429,28 +500,113 @@
     return value;
   }
 
-  // Input:  [left, centre, right] node records, nulls allowed (calibration slot order)
+  // --- Per-sensor conditioning ----------------------------------------------
+
+  function makeFilter() {
+    return { samples: [], value: null, lastGoodAt: -Infinity };
+  }
+
+  const sensorFilters = [makeFilter(), makeFilter(), makeFilter()];
+
+  // canvas.js bumps this on every nodes:update, so the pipeline can tell a
+  // genuinely new reading from the same one being polled again by the render
+  // loop. Comparing raw values would not work: a sustained dropout reports
+  // [null, null, null] on every frame, which looks identical to no new data.
+  let sensorFrameSeq = 0;
+  let lastSeenFrameSeq = -1;
+  let badReadingStreak = 0;
+
+  window.markSensorFrame = function markSensorFrame() {
+    sensorFrameSeq += 1;
+  };
+
+  function median(values) {
+    const sorted = values.slice().sort((a, b) => a - b);
+    return sorted[Math.floor(sorted.length / 2)];
+  }
+
+  // A median rejects single-sample spikes far better than a mean, and the hold
+  // window coasts through a dropped echo instead of reporting the player gone.
+  function conditionSensor(filter, raw, now) {
+    if (raw !== null) {
+      filter.samples.push(raw);
+      if (filter.samples.length > SENSOR_HISTORY) filter.samples.shift();
+      filter.value = median(filter.samples);
+      filter.lastGoodAt = now;
+      return filter.value;
+    }
+
+    if (now - filter.lastGoodAt <= SENSOR_HOLD_MS) return filter.value;
+
+    filter.samples.length = 0;
+    filter.value = null;
+    return null;
+  }
+
+  function resetSensorFilters() {
+    sensorFilters.forEach((filter) => {
+      filter.samples.length = 0;
+      filter.value = null;
+      filter.lastGoodAt = -Infinity;
+    });
+    closeStreak = 0;
+    lastColumn = null;
+    lastSeenFrameSeq = sensorFrameSeq;
+    badReadingStreak = 0;
+    sensorHold.grid = null;
+    sensorHold.lastOkAt = -Infinity;
+  }
+
+  window.resetSensorFilters = resetSensorFilters;
+
+  // --- Coordinate derivation -------------------------------------------------
+
+  let lastColumn = null;
+  let closeStreak = 0;
+
+  // Input:  [left, centre, right] node records, nulls allowed (calibration order)
   // Output: {
   //   status:     "ok" | "too-close" | "no-signal" | "out-of-bounds",
   //   column:     which sensor saw the player - 0 left, 1 centre, 2 right,
-  //   distanceCm: that sensor's raw reading,
-  //   configured: how many sensors reported a usable number
+  //   distanceCm: that sensor's conditioned reading,
+  //   raw:        [l, c, r] straight off the wire, for debugging,
+  //   filtered:   [l, c, r] after median + hold,
+  //   configured: how many sensors currently have a usable value
   // }
-  //
-  // With all three sensors pointing straight forward, the player stands in
-  // front of one column at a time. More than one sensor may pick them up at an
-  // angle, so the nearest reading wins - that is the column they are most
-  // directly in front of.
   function readSensorCoordinate(orderedNodes) {
     const list = Array.isArray(orderedNodes) ? orderedNodes : [];
-    const distances = [readDistance(list[0]), readDistance(list[1]), readDistance(list[2])];
-    const configured = distances.filter((d) => d !== null).length;
+    const now = performance.now();
 
-    const blank = { column: null, distanceCm: null, configured };
+    const raw = [readDistance(list[0]), readDistance(list[1]), readDistance(list[2])];
+    const filtered = raw.map((value, index) => conditionSensor(sensorFilters[index], value, now));
+    const configured = filtered.filter((d) => d !== null).length;
 
+    // Fresh data, or the same reading being polled again by the render loop?
+    const isNewReading = sensorFrameSeq !== lastSeenFrameSeq;
+    lastSeenFrameSeq = sensorFrameSeq;
+
+    const base = { raw, filtered, configured, isNewReading, column: null, distanceCm: null };
+
+    // Safety runs on the RAW readings, never the filtered ones: a median window
+    // full of safe distances would smooth away the very spike the alert exists
+    // to catch. Two consecutive frames (100 ms at 20 Hz) are required so that
+    // crosstalk between the three sensors cannot raise a false alarm.
+    const rawMin = raw.reduce(
+      (min, value) => (value === null ? min : min === null || value < min ? value : min),
+      null
+    );
+    if (rawMin !== null && window.isTooClose(rawMin)) {
+      closeStreak += 1;
+    } else {
+      closeStreak = 0;
+    }
+    const tooClose = closeStreak >= TOO_CLOSE_FRAMES;
+
+    // The player stands in front of one column at a time, so the nearest
+    // reading identifies which. Anything further away is a wall or a side lobe.
     let column = null;
     let best = null;
-    distances.forEach((distance, index) => {
+    filtered.forEach((distance, index) => {
       if (distance === null) return;
       if (best === null || distance < best) {
         best = distance;
@@ -458,23 +614,38 @@
       }
     });
 
-    // Nothing detected anywhere: the player is out of range or not there.
-    if (best === null) return { ...blank, status: "no-signal" };
-
-    // Standing inside the danger zone takes priority over everything else.
-    if (window.isTooClose(best)) {
-      return { ...blank, column, distanceCm: best, status: "too-close" };
+    // Safety outranks every other state, including loss of signal.
+    if (tooClose) {
+      return { ...base, column, distanceCm: rawMin, status: "too-close" };
     }
 
-    // A number, but not a believable one (past 1.6 m, or sensor garbage).
+    if (best === null) {
+      lastColumn = null;
+      return { ...base, status: "no-signal" };
+    }
+
+    // Column hysteresis: a rival sensor must be clearly nearer before it steals
+    // the column, otherwise noise flicks the cursor between adjacent columns.
+    if (lastColumn !== null && column !== lastColumn && filtered[lastColumn] !== null) {
+      if (best > filtered[lastColumn] - COLUMN_MARGIN_CM) {
+        column = lastColumn;
+        best = filtered[lastColumn];
+      }
+    }
+
     if (best > MAX_COORD_CM) {
-      return { ...blank, column, distanceCm: best, status: "out-of-bounds" };
+      return { ...base, column, distanceCm: best, status: "out-of-bounds" };
     }
 
-    return { column, distanceCm: best, configured, status: "ok" };
+    lastColumn = column;
+    return { ...base, column, distanceCm: best, status: "ok" };
   }
 
   window.readSensorCoordinate = readSensorCoordinate;
+
+  // Shared with calibrate.js, which needs per-node distances to work out which
+  // physical sensor the operator is holding a hand in front of.
+  window.readNodeDistance = readDistance;
 
   // Grid coordinate (0-2, origin bottom-left) -> canvas pixels at the centre of
   // the matching hole.
@@ -488,35 +659,93 @@
     };
   };
 
+  // Last known-good cell, used to coast through brief signal loss.
+  const sensorHold = { grid: null, lastOkAt: -Infinity };
+
   // Reads the sensors, maps the fix into grid space, and drives the cursor from
   // it. Hovering the active mole scores, exactly as the mouse does.
   function updateSensorCursor(canvas, orderedNodes) {
+    const now = performance.now();
     const fix = readSensorCoordinate(orderedNodes);
 
-    const clearCursor = (status) => {
-      gameState.sensor = { ...fix, status, gx: null, gy: null };
+    let grid = null;
+    if (fix.status === "ok") {
+      const mapped = window.rawToGrid(fix.column, fix.distanceCm, sensorHold.grid);
+      if (mapped && mapped.inside) grid = mapped;
+    }
+
+    if (grid) {
+      badReadingStreak = 0;
+      sensorHold.grid = grid;
+      sensorHold.lastOkAt = now;
+      const point = window.gridToCanvasPoint(canvas, grid.gx, grid.gy);
+      gameState.sensor = {
+        ...fix, gx: grid.gx, gy: grid.gy,
+        calibrated: grid.calibrated, held: false, heldFor: 0,
+      };
+      gameState.cursor = { x: point.x, y: point.y, inBounds: true };
+      window.handleGameHover(canvas, point.x, point.y);
+      return;
+    }
+
+    // Too close is a safety state: report it instantly, with no grace at all.
+    if (fix.status === "too-close") {
+      badReadingStreak = 0;
+      sensorHold.grid = null;
+      gameState.sensor = { ...fix, gx: null, gy: null, held: false, heldFor: 0 };
       gameState.cursor = { x: null, y: null, inBounds: false };
+      return;
+    }
+
+    // Only genuinely new data counts against the budget - the render loop polls
+    // far faster than the sensors report.
+    if (fix.isNewReading) badReadingStreak += 1;
+
+    // Ride out a short burst of bad readings on the last known-good cell. A
+    // handful of rejects in a row is normal for unfiltered ultrasonics and must
+    // not throw the player out of the game.
+    const withinBudget = badReadingStreak <= MAX_HELD_READINGS;
+    const withinTimeout = now - sensorHold.lastOkAt <= HOLD_TIMEOUT_MS;
+
+    if (sensorHold.grid && withinBudget && withinTimeout) {
+      const held = sensorHold.grid;
+      const point = window.gridToCanvasPoint(canvas, held.gx, held.gy);
+      gameState.sensor = {
+        ...fix, status: "ok", gx: held.gx, gy: held.gy,
+        calibrated: held.calibrated, held: true, heldFor: badReadingStreak,
+      };
+      gameState.cursor = { x: point.x, y: point.y, inBounds: true };
+      window.handleGameHover(canvas, point.x, point.y);
+      return;
+    }
+
+    sensorHold.grid = null;
+    gameState.sensor = {
+      ...fix,
+      status: fix.status === "ok" ? "out-of-bounds" : fix.status,
+      gx: null, gy: null, held: false, heldFor: badReadingStreak,
     };
-
-    if (fix.status !== "ok") {
-      clearCursor(fix.status);
-      return;
-    }
-
-    const grid = window.rawToGrid(fix.column, fix.distanceCm);
-    // A fix outside the calibrated near/far bounds is a bad reading, not a
-    // player standing off the edge of a 3x3 board.
-    if (!grid || !grid.inside) {
-      clearCursor("out-of-bounds");
-      return;
-    }
-
-    gameState.sensor = { ...fix, gx: grid.gx, gy: grid.gy, calibrated: grid.calibrated };
-
-    const point = window.gridToCanvasPoint(canvas, grid.gx, grid.gy);
-    gameState.cursor = { x: point.x, y: point.y, inBounds: true };
-    window.handleGameHover(canvas, point.x, point.y);
+    gameState.cursor = { x: null, y: null, inBounds: false };
   }
+
+  // Everything the sensor pipeline currently knows. Callable from the browser
+  // console as getSensorDebug() while a round is running.
+  window.getSensorDebug = function getSensorDebug() {
+    const sensor = gameState.sensor;
+    return {
+      status: sensor.status,
+      held: Boolean(sensor.held),
+      raw: sensor.raw || [null, null, null],
+      filtered: sensor.filtered || [null, null, null],
+      column: sensor.column,
+      distanceCm: sensor.distanceCm,
+      grid: sensor.gx === null ? null : { gx: sensor.gx, gy: sensor.gy },
+      badReadings: badReadingStreak,
+      holdBudget: MAX_HELD_READINGS,
+      bounds: window.getCalibrationBounds ? window.getCalibrationBounds() : null,
+      limits: { alertCm: window.ALERT_DISTANCE_CM, maxCm: MAX_COORD_CM },
+    };
+  };
 
   // True while sensor input cannot produce a playable coordinate. The round
   // clock is held during these states so the player is not penalised for a
@@ -604,7 +833,7 @@
     ctx.fillStyle = "#9298aa";
     ctx.font = "18px monospace";
     ctx.fillText(`Score: ${gameState.score}   Level reached: ${gameState.level}`, centerX, height / 2 - 20);
-    if (gameState.lives <= 0) {
+    if (isOutOfLives()) {
       ctx.fillStyle = "#ef4444";
       ctx.fillText("Out of lives", centerX, height / 2 + 8);
     }
@@ -747,46 +976,118 @@
     ctx.textAlign = "start";
   }
 
-  // Bottom-left readout: which input is driving the cursor, and in sensor mode
-  // the raw reading and the parsed grid cell, so the rig can be checked at a glance.
-  function renderInputReadout(ctx, canvas) {
+  // Always-on sensor readout. Shows every sensor's raw and conditioned value at
+  // once so the rig can be diagnosed mid-round without opening the console.
+  // The same data is available as getSensorDebug() from the browser console.
+  const SENSOR_ROW_LABELS = ["L", "C", "R"];
+
+  function formatCm(value) {
+    return value === null || value === undefined ? "--" : value.toFixed(1);
+  }
+
+  function renderSensorPanel(ctx, canvas) {
     const height = canvas.clientHeight || canvas.height;
     const sensor = gameState.sensor;
-    const columnNames = ["Left", "Centre", "Right"];
+
+    const panelW = 322;
+    const panelH = 132;
+    const x = 12;
+    const y = height - panelH - 12;
+    const rowH = 20;
+
+    drawHudPanel(ctx, x, y, panelW, panelH, 12);
 
     ctx.textAlign = "left";
-    ctx.font = "bold 14px monospace";
+    ctx.font = "bold 10.5px monospace";
+    ctx.fillStyle = "#9298aa";
+    ctx.fillText("SENSOR", x + 16, y + 20);
+    ctx.fillText("RAW cm", x + 92, y + 20);
+    ctx.fillText("FILT cm", x + 172, y + 20);
+    ctx.fillText("USED", x + 254, y + 20);
 
-    if (gameState.inputMode === "mouse") {
-      drawHudPanel(ctx, 12, height - 52, 190, 40, 10);
-      ctx.fillStyle = "#9298aa";
-      ctx.fillText("Input: MOUSE", 26, height - 27);
-      ctx.textAlign = "start";
-      return;
+    ctx.strokeStyle = "rgba(255, 255, 255, 0.14)";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(x + 14, y + 27);
+    ctx.lineTo(x + panelW - 14, y + 27);
+    ctx.stroke();
+
+    const raw = sensor.raw || [null, null, null];
+    const filtered = sensor.filtered || [null, null, null];
+
+    for (let i = 0; i < 3; i++) {
+      const rowY = y + 27 + rowH * (i + 1);
+      const live = filtered[i] !== null && filtered[i] !== undefined;
+      const echoing = raw[i] !== null && raw[i] !== undefined;
+
+      // Green = echoing now, amber = coasting on a held value, red = nothing.
+      let dot = "#ef4444";
+      if (echoing) dot = "#22c55e";
+      else if (live) dot = "#f59e0b";
+      ctx.fillStyle = dot;
+      ctx.beginPath();
+      ctx.arc(x + 21, rowY - 4, 4, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.font = "bold 12px monospace";
+      ctx.fillStyle = "#f4f4f5";
+      ctx.fillText(SENSOR_ROW_LABELS[i], x + 33, rowY);
+
+      ctx.font = "12px monospace";
+      ctx.fillStyle = echoing ? "#cdd6f4" : "#63736f";
+      ctx.fillText(formatCm(raw[i]), x + 92, rowY);
+
+      ctx.fillStyle = live ? "#cdd6f4" : "#63736f";
+      ctx.fillText(formatCm(filtered[i]), x + 172, rowY);
+
+      if (sensor.column === i) {
+        ctx.fillStyle = "#facc15";
+        ctx.font = "bold 12px monospace";
+        ctx.fillText("<--", x + 254, rowY);
+      }
     }
 
-    drawHudPanel(ctx, 12, height - 78, 330, 66, 10);
-    ctx.fillStyle = sensor.status === "ok" ? "#22c55e" : "#ef4444";
-    ctx.fillText(`Input: SENSOR (${sensor.configured}/3 online)`, 26, height - 54);
+    // Resolved fix
+    const fixY = y + panelH - 12;
+    ctx.font = "bold 12px monospace";
+    const status = sensor.status;
 
-    ctx.fillStyle = "#f4f4f5";
-    ctx.font = "13px monospace";
-    if (sensor.status === "ok" && sensor.gx !== null) {
+    if (status === "ok" && sensor.gx !== null) {
+      ctx.fillStyle = sensor.held ? "#f59e0b" : "#22c55e";
+      const label = `grid (${sensor.gx}, ${sensor.gy})  @ ${formatCm(sensor.distanceCm)}cm`;
       ctx.fillText(
-        `${columnNames[sensor.column]} @ ${sensor.distanceCm.toFixed(1)}cm  ->  grid (${sensor.gx}, ${sensor.gy})`,
-        26,
-        height - 34
+        sensor.held ? `${label}  HELD ${sensor.heldFor}/${MAX_HELD_READINGS}` : label,
+        x + 16,
+        fixY
       );
     } else {
-      ctx.fillText(`reading: ${sensor.status}`, 26, height - 34);
+      ctx.fillStyle = "#ef4444";
+      ctx.fillText(String(status).toUpperCase().replace(/-/g, " "), x + 16, fixY);
     }
 
     if (sensor.calibrated === false) {
       ctx.fillStyle = "#f59e0b";
-      ctx.font = "11px monospace";
-      ctx.fillText("corners not calibrated - using default bounds", 26, height - 18);
+      ctx.font = "10px monospace";
+      ctx.textAlign = "right";
+      ctx.fillText("uncalibrated", x + panelW - 16, fixY);
     }
 
+    ctx.textAlign = "start";
+  }
+
+  function renderInputReadout(ctx, canvas) {
+    const height = canvas.clientHeight || canvas.height;
+
+    if (gameState.inputMode === "sensor") {
+      renderSensorPanel(ctx, canvas);
+      return;
+    }
+
+    drawHudPanel(ctx, 12, height - 52, 176, 40, 10);
+    ctx.textAlign = "left";
+    ctx.font = "bold 14px monospace";
+    ctx.fillStyle = "#9298aa";
+    ctx.fillText("Input: MOUSE", 26, height - 27);
     ctx.textAlign = "start";
   }
 
@@ -846,7 +1147,28 @@
 
     ctx.fillStyle = "#ef4444";
     ctx.font = `bold ${livesFontSize}px monospace`;
-    ctx.fillText("♥".repeat(Math.max(0, gameState.lives)), scorePanel.x + 16, scorePanel.y + scoreFontSize + livesFontSize + 22);
+    ctx.fillText(
+      settings.testMode ? "♥∞" : "♥".repeat(Math.max(0, gameState.lives)),
+      scorePanel.x + 16,
+      scorePanel.y + scoreFontSize + livesFontSize + 22
+    );
+
+    // Unmissable badge - a score from a test run must never be mistaken for a real one.
+    if (settings.testMode) {
+      const badgeW = 168;
+      const badgeH = 26;
+      const badgeX = width / 2 - badgeW / 2;
+      const badgeY = 78;
+      ctx.fillStyle = "#f59e0b";
+      ctx.beginPath();
+      ctx.roundRect(badgeX, badgeY, badgeW, badgeH, 6);
+      ctx.fill();
+      ctx.fillStyle = "#13131c";
+      ctx.font = "bold 12px monospace";
+      ctx.textAlign = "center";
+      ctx.fillText("TEST MODE", width / 2, badgeY + 17);
+      ctx.textAlign = "left";
+    }
 
     const levelPanel = { w: 130, h: 40 };
     levelPanel.x = width - 12 - levelPanel.w;
@@ -863,9 +1185,17 @@
     const timerPanelW = timerFontSize * 3.4;
     const timerPanelH = timerFontSize * 1.35;
     drawHudPanel(ctx, width / 2 - timerPanelW / 2, 8, timerPanelW, timerPanelH, timerPanelH / 2);
-    ctx.fillStyle = secondsLeft <= 10 ? "#ef4444" : "#f4f4f5";
+    if (settings.testMode) {
+      ctx.fillStyle = "#f59e0b";
+    } else {
+      ctx.fillStyle = secondsLeft <= 10 ? "#ef4444" : "#f4f4f5";
+    }
     ctx.font = `bold ${timerFontSize}px monospace`;
-    ctx.fillText(`${secondsLeft}s`, width / 2, 8 + timerPanelH / 2 + timerFontSize * 0.35);
+    ctx.fillText(
+      settings.testMode ? "∞" : `${secondsLeft}s`,
+      width / 2,
+      8 + timerPanelH / 2 + timerFontSize * 0.35
+    );
 
     // Grid + moles
     const now = performance.now();
