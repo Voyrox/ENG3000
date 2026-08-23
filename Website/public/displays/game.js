@@ -49,7 +49,17 @@
   // No triangulation: the three sensors sit on one line pointing straight
   // forward, so each owns one column of the board and its distance reading
   // picks the row. See callibrate_corners.js for the grid mapping.
-  const MAX_COORD_CM = 150; // a reading beyond 1.5 m is bogus -> "come back in bounds"
+  const MAX_COORD_CM = 150; // hard ceiling before any calibration exists
+
+  // Once the play area is calibrated, the far edge decides what counts as out
+  // of bounds rather than this blanket 1.5 m limit.
+  function maxCoordCm() {
+    const bounds = window.getCalibrationBounds ? window.getCalibrationBounds() : null;
+    if (bounds && bounds.calibrated && Number.isFinite(bounds.maxCm)) {
+      return Math.min(MAX_COORD_CM, bounds.maxCm);
+    }
+    return MAX_COORD_CM;
+  }
 
   // Reading conditioning. The firmware ships RAW distances - the 3-sample
   // average in ultrasonicSensor.cpp is commented out - so spikes and dropped
@@ -57,16 +67,67 @@
   // out of the 20/sec each node sends was enough to pause the round.
   const SENSOR_HISTORY = 5;       // samples per sensor in the median window
   const SENSOR_HOLD_MS = 350;     // coast a sensor through a dropped echo
-  // How many consecutive unusable READINGS to ride out before admitting defeat
-  // and showing the come-closer / out-of-bounds screen. Counted in sensor
-  // readings rather than render frames: the game draws at ~60fps while each
-  // node reports at 20Hz, so a frame budget would expire three times too fast.
-  const MAX_HELD_READINGS = 10;
-  // Backstop for when data stops arriving altogether, so a disconnected rig
-  // cannot leave a stale cursor on screen forever.
-  const HOLD_TIMEOUT_MS = 2500;
+
+  // Slew limiting. A person cannot cross the room between two readings, so a
+  // jump from 20cm to 194cm is a reflection or crosstalk, not movement. Such a
+  // reading is discarded before it ever reaches the median window.
+  const MAX_SPEED_CM_PER_S = 300;    // 3 m/s - faster than anyone lunges
+  const SLEW_MIN_JUMP_CM = 25;       // always tolerate at least this much change
+  // ...and never more than this, however long since the last accepted reading.
+  // Without a ceiling the allowance grows with elapsed time, so a sensor that
+  // keeps reporting nonsense eventually accepts it - which defeats the filter.
+  const SLEW_MAX_JUMP_CM = 40;
+  // Never lock out forever: if the rejected readings agree with each other for
+  // this long, the world really did change and we re-lock onto it.
+  const SLEW_RELOCK_READINGS = 8;
+  const SLEW_RELOCK_SPREAD_CM = 20;
+  // How long the slew reference outlives the median window. The window clears
+  // after SENSOR_HOLD_MS, but the last believed position must persist longer -
+  // otherwise sustained noise clears the reference and is then accepted as
+  // truth, which is precisely the jump we set out to reject.
+  const SLEW_ANCHOR_TTL_MS = 3000;
+  // --- Live-tunable smoothing -----------------------------------------------
+  // The server broadcasts on every node message, so with three sensors at 20Hz
+  // roughly 60 readings arrive each second. All four numbers below are counted
+  // in readings (not render frames), so 100 readings is about 1.7 seconds.
+  //
+  // Adjust at runtime from the console with tuneSensor({ ... }) - no reload.
+  const tuning = {
+    // Votes held in the cell window. Bigger = steadier cursor, slower to follow
+    // a real move. At ~60 readings/sec, 25 is roughly 0.4s of history.
+    cellWindow: 25,
+    // Votes a rival cell needs to take over. Must stay above half of
+    // cellWindow, otherwise two cells can trade the lead and the cursor flips.
+    cellVotes: 13,
+    // Consecutive unusable readings ridden out on the last good cell before the
+    // come-closer / out-of-bounds screen appears.
+    holdReadings: 100,
+    // Backstop for when data stops arriving altogether, so a disconnected rig
+    // cannot leave a stale cursor on screen forever. Must comfortably exceed
+    // holdReadings at the current data rate, or it fires first and the reading
+    // budget never gets a chance to matter.
+    holdTimeoutMs: 5000,
+  };
+
+  window.tuneSensor = function tuneSensor(partial) {
+    if (partial && typeof partial === "object") Object.assign(tuning, partial);
+    if (tuning.cellVotes > tuning.cellWindow) tuning.cellVotes = tuning.cellWindow;
+    console.info("[tune] " + JSON.stringify(tuning));
+    if (tuning.cellVotes <= tuning.cellWindow / 2) {
+      console.warn("[tune] cellVotes is at or below half of cellWindow - the cursor may flip between cells");
+    }
+    return { ...tuning };
+  };
   const COLUMN_MARGIN_CM = 8;     // a rival sensor must beat this to steal the column
   const TOO_CLOSE_FRAMES = 2;     // consecutive raw frames needed to raise the alert
+
+  // Cell stabilisation. Filtering the distance is not enough on its own: a
+  // single bad reading that survives the median still lands the cursor in the
+  // wrong cell for a frame, which reads as jumping. Because the output is
+  // discrete, the robust answer is to take the MODE of recent cells - the cell
+  // seen most often - rather than the latest one. A one-off jump never wins the
+  // vote, so it is discarded outright.
+
 
 
   // Adjustable via the Options screen; read fresh at the start of each round.
@@ -503,7 +564,15 @@
   // --- Per-sensor conditioning ----------------------------------------------
 
   function makeFilter() {
-    return { samples: [], value: null, lastGoodAt: -Infinity };
+    return {
+      samples: [],
+      value: null,
+      lastGoodAt: -Infinity,
+      anchor: null,     // last believed position, outlives the median window
+      anchorAt: -Infinity,
+      rejects: [],      // recent implausible readings, kept for re-locking
+      rejectCount: 0,   // total discarded, surfaced for diagnosis
+    };
   }
 
   const sensorFilters = [makeFilter(), makeFilter(), makeFilter()];
@@ -525,14 +594,59 @@
     return sorted[Math.floor(sorted.length / 2)];
   }
 
+  // Decides whether a reading is physically reachable from where this sensor
+  // last saw the player. Returns false for a jump no human could make.
+  function isPlausible(filter, raw, now) {
+    const reference = filter.anchor;
+    if (reference === null || now - filter.anchorAt > SLEW_ANCHOR_TTL_MS) {
+      filter.rejects.length = 0;
+      return true; // no live belief to contradict
+    }
+
+    const dt = Math.max(1, now - filter.anchorAt);
+    const allowed = Math.min(
+      SLEW_MAX_JUMP_CM,
+      Math.max(SLEW_MIN_JUMP_CM, (MAX_SPEED_CM_PER_S * dt) / 1000)
+    );
+
+    if (Math.abs(raw - reference) <= allowed) {
+      filter.rejects.length = 0;
+      return true;
+    }
+
+    // Implausible against our current belief. Hold onto it: if the next several
+    // readings all agree with THIS value rather than the old one, our previous
+    // belief was the wrong one and we should move.
+    filter.rejects.push(raw);
+    if (filter.rejects.length > SLEW_RELOCK_READINGS) filter.rejects.shift();
+
+    if (filter.rejects.length >= SLEW_RELOCK_READINGS) {
+      const spread = Math.max(...filter.rejects) - Math.min(...filter.rejects);
+      if (spread <= SLEW_RELOCK_SPREAD_CM) {
+        filter.samples.length = 0;
+        filter.rejects.length = 0;
+        return true;
+      }
+    }
+
+    filter.rejectCount += 1;
+    return false;
+  }
+
   // A median rejects single-sample spikes far better than a mean, and the hold
   // window coasts through a dropped echo instead of reporting the player gone.
   function conditionSensor(filter, raw, now) {
+    // An impossible jump is treated exactly like a dropped echo: it never
+    // enters the median window, so it cannot drag the value toward itself.
+    if (raw !== null && !isPlausible(filter, raw, now)) raw = null;
+
     if (raw !== null) {
       filter.samples.push(raw);
       if (filter.samples.length > SENSOR_HISTORY) filter.samples.shift();
       filter.value = median(filter.samples);
       filter.lastGoodAt = now;
+      filter.anchor = filter.value;
+      filter.anchorAt = now;
       return filter.value;
     }
 
@@ -548,11 +662,16 @@
       filter.samples.length = 0;
       filter.value = null;
       filter.lastGoodAt = -Infinity;
+      filter.anchor = null;
+      filter.anchorAt = -Infinity;
+      filter.rejects.length = 0;
+      filter.rejectCount = 0;
     });
     closeStreak = 0;
     lastColumn = null;
     lastSeenFrameSeq = sensorFrameSeq;
     badReadingStreak = 0;
+    resetCellFilter();
     sensorHold.grid = null;
     sensorHold.lastOkAt = -Infinity;
   }
@@ -604,13 +723,30 @@
 
     // The player stands in front of one column at a time, so the nearest
     // reading identifies which. Anything further away is a wall or a side lobe.
-    let column = null;
-    let best = null;
+    //
+    // A sensor reporting a distance inside its own play area always beats one
+    // reporting a distance outside it, however near that is: a sensor staring
+    // past the board is not seeing the player, and letting it win the column on
+    // proximity alone is how the cursor ends up in the wrong place.
+    const candidates = [];
     filtered.forEach((distance, index) => {
       if (distance === null) return;
-      if (best === null || distance < best) {
-        best = distance;
-        column = index;
+      candidates.push({
+        index,
+        distance,
+        inBounds: window.isWithinPlayArea ? window.isWithinPlayArea(index, distance) : true,
+      });
+    });
+
+    const inBounds = candidates.filter((candidate) => candidate.inBounds);
+    const pool = inBounds.length > 0 ? inBounds : candidates;
+
+    let column = null;
+    let best = null;
+    pool.forEach((candidate) => {
+      if (best === null || candidate.distance < best) {
+        best = candidate.distance;
+        column = candidate.index;
       }
     });
 
@@ -627,13 +763,22 @@
     // Column hysteresis: a rival sensor must be clearly nearer before it steals
     // the column, otherwise noise flicks the cursor between adjacent columns.
     if (lastColumn !== null && column !== lastColumn && filtered[lastColumn] !== null) {
-      if (best > filtered[lastColumn] - COLUMN_MARGIN_CM) {
+      const incumbentInBounds = window.isWithinPlayArea
+        ? window.isWithinPlayArea(lastColumn, filtered[lastColumn])
+        : true;
+      const challengerInBounds = pool === inBounds;
+
+      // Only let the incumbent hold on if it is still a legitimate candidate.
+      // An out-of-bounds incumbent must never block an in-bounds challenger.
+      const incumbentStillValid = incumbentInBounds || !challengerInBounds;
+
+      if (incumbentStillValid && best > filtered[lastColumn] - COLUMN_MARGIN_CM) {
         column = lastColumn;
         best = filtered[lastColumn];
       }
     }
 
-    if (best > MAX_COORD_CM) {
+    if (best > maxCoordCm()) {
       return { ...base, column, distanceCm: best, status: "out-of-bounds" };
     }
 
@@ -642,6 +787,9 @@
   }
 
   window.readSensorCoordinate = readSensorCoordinate;
+
+  // Shared with callibrate_corners.js so both screens reject the same readings.
+  window.SENSOR_LIMITS = { maxCm: MAX_COORD_CM };
 
   // Shared with calibrate.js, which needs per-node distances to work out which
   // physical sensor the operator is holding a hand in front of.
@@ -662,6 +810,52 @@
   // Last known-good cell, used to coast through brief signal loss.
   const sensorHold = { grid: null, lastOkAt: -Infinity };
 
+  // --- Cell stabilisation ----------------------------------------------------
+
+  const cellHistory = [];
+  let stableCell = null;
+
+  function resetCellFilter() {
+    cellHistory.length = 0;
+    stableCell = null;
+  }
+
+  // Returns the cell the cursor should actually sit in: the most frequent cell
+  // across the recent window, which only changes once a rival has clearly won.
+  function stabiliseCell(gx, gy, isNewReading) {
+    // Render frames must not stuff the ballot box - only fresh readings vote.
+    if (!isNewReading) return stableCell || { gx, gy };
+
+    cellHistory.push(gx * 3 + gy);
+    while (cellHistory.length > tuning.cellWindow) cellHistory.shift();
+
+    const counts = new Map();
+    let winner = cellHistory[0];
+    let winnerVotes = 0;
+    cellHistory.forEach((code) => {
+      const votes = (counts.get(code) || 0) + 1;
+      counts.set(code, votes);
+      if (votes > winnerVotes) {
+        winnerVotes = votes;
+        winner = code;
+      }
+    });
+
+    const candidate = { gx: Math.floor(winner / 3), gy: winner % 3 };
+
+    // First lock-on adopts immediately so the cursor appears without delay.
+    if (stableCell === null) {
+      stableCell = candidate;
+      return stableCell;
+    }
+
+    const unchanged = candidate.gx === stableCell.gx && candidate.gy === stableCell.gy;
+    if (!unchanged && winnerVotes >= tuning.cellVotes) {
+      stableCell = candidate;
+    }
+    return stableCell;
+  }
+
   // Reads the sensors, maps the fix into grid space, and drives the cursor from
   // it. Hovering the active mole scores, exactly as the mouse does.
   function updateSensorCursor(canvas, orderedNodes) {
@@ -676,11 +870,17 @@
 
     if (grid) {
       badReadingStreak = 0;
-      sensorHold.grid = grid;
+      // The cell the reading suggests is only a vote; the cursor follows the
+      // consensus of the recent window.
+      const cell = stabiliseCell(grid.gx, grid.gy, fix.isNewReading);
+      const stable = { ...grid, gx: cell.gx, gy: cell.gy };
+
+      sensorHold.grid = stable;
       sensorHold.lastOkAt = now;
-      const point = window.gridToCanvasPoint(canvas, grid.gx, grid.gy);
+      const point = window.gridToCanvasPoint(canvas, stable.gx, stable.gy);
       gameState.sensor = {
-        ...fix, gx: grid.gx, gy: grid.gy,
+        ...fix, gx: stable.gx, gy: stable.gy,
+        rawGx: grid.gx, rawGy: grid.gy,
         calibrated: grid.calibrated, held: false, heldFor: 0,
       };
       gameState.cursor = { x: point.x, y: point.y, inBounds: true };
@@ -704,8 +904,8 @@
     // Ride out a short burst of bad readings on the last known-good cell. A
     // handful of rejects in a row is normal for unfiltered ultrasonics and must
     // not throw the player out of the game.
-    const withinBudget = badReadingStreak <= MAX_HELD_READINGS;
-    const withinTimeout = now - sensorHold.lastOkAt <= HOLD_TIMEOUT_MS;
+    const withinBudget = badReadingStreak <= tuning.holdReadings;
+    const withinTimeout = now - sensorHold.lastOkAt <= tuning.holdTimeoutMs;
 
     if (sensorHold.grid && withinBudget && withinTimeout) {
       const held = sensorHold.grid;
@@ -741,9 +941,20 @@
       distanceCm: sensor.distanceCm,
       grid: sensor.gx === null ? null : { gx: sensor.gx, gy: sensor.gy },
       badReadings: badReadingStreak,
-      holdBudget: MAX_HELD_READINGS,
+      rejected: sensorFilters.map((filter) => filter.rejectCount),
+      holdBudget: tuning.holdReadings,
+      tuning: { ...tuning },
+      rawCell: sensor.rawGx === undefined || sensor.rawGx === null
+        ? null
+        : { gx: sensor.rawGx, gy: sensor.rawGy },
+      cellVotes: cellHistory.length,
+      cellWindow: tuning.cellWindow,
       bounds: window.getCalibrationBounds ? window.getCalibrationBounds() : null,
-      limits: { alertCm: window.ALERT_DISTANCE_CM, maxCm: MAX_COORD_CM },
+      limits: {
+        alertCm: window.getAlertThresholdCm ? window.getAlertThresholdCm() : window.ALERT_DISTANCE_CM,
+        maxCm: maxCoordCm(),
+        hardMaxCm: MAX_COORD_CM,
+      },
     };
   };
 
@@ -856,7 +1067,6 @@
     ctx.fill();
     ctx.fillStyle = "#fff";
     ctx.fillText("Return to Start", layout.returnButton.x + layout.returnButton.width / 2, layout.returnButton.y + layout.returnButton.height / 2 + 6);
-
     ctx.textAlign = "start";
   }
 
@@ -1054,9 +1264,14 @@
 
     if (status === "ok" && sensor.gx !== null) {
       ctx.fillStyle = sensor.held ? "#f59e0b" : "#22c55e";
-      const label = `grid (${sensor.gx}, ${sensor.gy})  @ ${formatCm(sensor.distanceCm)}cm`;
+      const disagrees =
+        sensor.rawGx !== undefined && sensor.rawGx !== null &&
+        (sensor.rawGx !== sensor.gx || sensor.rawGy !== sensor.gy);
+      const label =
+        `grid (${sensor.gx}, ${sensor.gy})  @ ${formatCm(sensor.distanceCm)}cm` +
+        (disagrees ? `  [raw ${sensor.rawGx},${sensor.rawGy} outvoted]` : "");
       ctx.fillText(
-        sensor.held ? `${label}  HELD ${sensor.heldFor}/${MAX_HELD_READINGS}` : label,
+        sensor.held ? `${label}  HELD ${sensor.heldFor}/${tuning.holdReadings}` : label,
         x + 16,
         fixY
       );

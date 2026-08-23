@@ -7,12 +7,25 @@
 // renderAlert() takes a boolean `active`; when false it draws nothing and
 // returns false, so the caller can fall through to the normal frame.
 
+// Absolute safety floor. Calibration can only make the alert MORE cautious
+// than this, never less - a badly captured near edge must not disable it.
 window.ALERT_DISTANCE_CM = 10;
+
+// The distance the alert actually fires at. Once the play area is calibrated
+// this becomes the near edge of the board: step in front of that and you are
+// off the board toward the screen.
+window.getAlertThresholdCm = function getAlertThresholdCm() {
+  const bounds = window.getCalibrationBounds ? window.getCalibrationBounds() : null;
+  if (bounds && bounds.calibrated && Number.isFinite(bounds.alertCm)) {
+    return Math.max(window.ALERT_DISTANCE_CM, bounds.alertCm);
+  }
+  return window.ALERT_DISTANCE_CM;
+};
 
 // True when `cm` is a real reading inside the danger zone. A negative value
 // means "no echo" from the sensor, not "zero distance".
 window.isTooClose = function isTooClose(cm) {
-  return Number.isFinite(cm) && cm >= 0 && cm < window.ALERT_DISTANCE_CM;
+  return Number.isFinite(cm) && cm >= 0 && cm < window.getAlertThresholdCm();
 };
 
 window.getAlertLayout = function getAlertLayout(canvas) {
@@ -47,10 +60,11 @@ window.renderAlert = function renderAlert(ctx, canvas, options = {}) {
   ctx.fillText("Too close to screen", centerX, Math.max(120, height * 0.35));
 
   ctx.font = `${Math.max(16, Math.min(26, width * 0.022))}px monospace`;
+  const threshold = window.getAlertThresholdCm();
   ctx.fillText(
     Number.isFinite(distanceCm)
-      ? `${distanceCm.toFixed(1)} cm - step back past ${window.ALERT_DISTANCE_CM} cm`
-      : `Step back past ${window.ALERT_DISTANCE_CM} cm`,
+      ? `${distanceCm.toFixed(1)} cm - step back past ${threshold.toFixed(0)} cm`
+      : `Step back past ${threshold.toFixed(0)} cm`,
     centerX,
     Math.max(170, height * 0.35 + 54)
   );

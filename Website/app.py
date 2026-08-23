@@ -1,13 +1,22 @@
 import asyncio
 from collections import deque
 import json
+import os
+import re
 import socket
 import threading
 import time
-from flask import Flask, jsonify, render_template
+from datetime import datetime
+from flask import Flask, jsonify, render_template, request
 from websockets.asyncio.server import broadcast, serve
 
 app = Flask(__name__, template_folder="template", static_folder="public", static_url_path="/static")
+
+# Session logs land in <repo>/logs. The browser cannot write there itself -
+# a download would go to the user's Downloads folder - so the page POSTs each
+# finished round here and the server writes it into the repository.
+LOGS_DIR = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "logs"))
+GAME_FILE_PATTERN = re.compile(r"^game-(\d+)-")
 
 TCP_HOST = "0.0.0.0"
 TCP_PORT = 3000
@@ -292,6 +301,69 @@ async def websocket_server():
     async with serve(websocket_handler, WS_HOST, WS_PORT, ping_interval=2, ping_timeout=2):
         print(f"WebSocket server listening on {WS_HOST}:{WS_PORT}")
         await asyncio.Future()
+
+
+def next_game_number():
+    """One past the highest game number already on disk.
+
+    Derived from the filenames rather than a counter in memory, so numbering
+    survives a server restart and never silently reuses a number.
+    """
+    os.makedirs(LOGS_DIR, exist_ok=True)
+    highest = 0
+    for name in os.listdir(LOGS_DIR):
+        match = GAME_FILE_PATTERN.match(name)
+        if match:
+            highest = max(highest, int(match.group(1)))
+    return highest + 1
+
+
+@app.route("/api/logs", methods=["POST"])
+def save_log():
+    """Writes one finished round to <repo>/logs as both JSON and CSV."""
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return jsonify({"error": "expected a JSON object"}), 400
+
+    data = payload.get("data")
+    csv_text = payload.get("csv")
+    if not isinstance(data, dict):
+        return jsonify({"error": "missing 'data'"}), 400
+
+    os.makedirs(LOGS_DIR, exist_ok=True)
+
+    game_number = next_game_number()
+    stamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    stem = f"game-{game_number:03d}-{stamp}"
+
+    # Record the number inside the file too, so a renamed file is still traceable.
+    data.setdefault("round", {})
+    data["round"]["gameNumber"] = game_number
+    data["round"]["savedAt"] = datetime.now().isoformat(timespec="seconds")
+
+    written = []
+    json_path = os.path.join(LOGS_DIR, stem + ".json")
+    with open(json_path, "w", encoding="utf-8") as handle:
+        json.dump(data, handle, indent=2)
+    written.append(os.path.basename(json_path))
+
+    if isinstance(csv_text, str) and csv_text:
+        csv_path = os.path.join(LOGS_DIR, stem + ".csv")
+        with open(csv_path, "w", encoding="utf-8", newline="") as handle:
+            handle.write(csv_text)
+        written.append(os.path.basename(csv_path))
+
+    rows = len(data.get("rows") or [])
+    print(f"Saved game {game_number}: {rows} rows -> {', '.join(written)}")
+    return jsonify({"game": game_number, "files": written, "rows": rows, "dir": LOGS_DIR})
+
+
+@app.route("/api/logs", methods=["GET"])
+def list_logs():
+    """What has been recorded so far, newest first."""
+    os.makedirs(LOGS_DIR, exist_ok=True)
+    names = sorted((n for n in os.listdir(LOGS_DIR) if n.endswith((".json", ".csv"))), reverse=True)
+    return jsonify({"dir": LOGS_DIR, "next": next_game_number(), "files": names})
 
 
 @app.route("/")
