@@ -9,6 +9,30 @@ import time
 from datetime import datetime
 from flask import Flask, jsonify, render_template, request
 from websockets.asyncio.server import broadcast, serve
+import numpy as np
+
+def fft_filter_ultrasonic(readings, sample_rate_hz, cutoff_hz):
+    signal = np.asarray(readings, dtype=float)
+    n = len(signal)
+
+    # Remove DC offset before filtering
+    mean = np.mean(signal)
+    centered = signal - mean
+
+    # FFT for real-valued signal
+    fft_signal = np.fft.rfft(centered)
+
+    # Frequency bins in Hz
+    frequencies = np.fft.rfftfreq(n, d=1.0 / sample_rate_hz)
+
+    # Remove frequency components above cutoff
+    fft_signal[frequencies > cutoff_hz] = 0
+
+    # Convert back to time domain
+    clean_signal = np.fft.irfft(fft_signal, n=n)
+
+    # Restore original mean
+    return clean_signal + mean
 
 app = Flask(__name__, template_folder="template", static_folder="public", static_url_path="/static")
 
@@ -26,6 +50,11 @@ NODE_STALE_SECONDS = 5
 RPS_WINDOW_SECONDS = 1
 HANDSHAKE_READ_LIMIT = 64
 HANDSHAKE_TIMEOUT_SECONDS = 1
+MEDIAN_WINDOW = 5
+FFT_WINDOW = 64
+FFT_MIN_SAMPLES = 16
+DISTANCE_SAMPLE_RATE_HZ = 20.0
+DISTANCE_CUTOFF_HZ = 2.0
 
 state_lock = threading.Lock()
 next_node_id = 1
@@ -41,6 +70,7 @@ def snapshot_nodes():
                 "id": node["id"],
                 "address": node["address"],
                 "latest": node["latest"],
+                "filtered_distance": node["filtered_distance"],
                 "online": node["online"],
                 "last_seen": node["last_seen"],
                 "rps": node["rps"],
@@ -73,6 +103,9 @@ def register_node(address):
             "online": True,
             "last_seen": time.monotonic(),
             "samples": deque(),
+            "median_samples": deque(maxlen=MEDIAN_WINDOW),
+            "distance_samples": deque(maxlen=FFT_WINDOW),
+            "filtered_distance": None,
             "rps": 0.0,
         }
     schedule_broadcast_nodes()
@@ -102,6 +135,9 @@ def reuse_or_register_node(address, claimed_node_id, device_id=None):
             node["last_seen"] = now
             node["rps"] = 0.0
             node["samples"].clear()
+            node["median_samples"].clear()
+            node["distance_samples"].clear()
+            node["filtered_distance"] = None
             if device_id:
                 node["device_id"] = device_id
             node_id = node["id"]
@@ -116,6 +152,9 @@ def reuse_or_register_node(address, claimed_node_id, device_id=None):
                 "online": True,
                 "last_seen": now,
                 "samples": deque(),
+                "median_samples": deque(maxlen=MEDIAN_WINDOW),
+                "distance_samples": deque(maxlen=FFT_WINDOW),
+                "filtered_distance": None,
                 "rps": 0.0,
             }
     schedule_broadcast_nodes()
@@ -149,6 +188,30 @@ def update_node(node_id, message):
         while samples and samples[0] < cutoff:
             samples.popleft()
         node["rps"] = float(len(samples)) / float(RPS_WINDOW_SECONDS)
+
+        distance = payload.get("distance")
+        if distance is None:
+            distance = payload.get("avg")
+        if distance is not None:
+            try:
+                distance = float(distance)
+            except (TypeError, ValueError):
+                distance = None
+        if distance is not None:
+            medians = node["median_samples"]
+            medians.append(distance)
+            smoothed = float(np.median(medians))
+            history = node["distance_samples"]
+            history.append(smoothed)
+            if len(history) >= FFT_MIN_SAMPLES:
+                filtered = fft_filter_ultrasonic(
+                    history,
+                    DISTANCE_SAMPLE_RATE_HZ,
+                    DISTANCE_CUTOFF_HZ,
+                )
+                node["filtered_distance"] = float(filtered[-1])
+            else:
+                node["filtered_distance"] = smoothed
     schedule_broadcast_nodes()
 
 
@@ -386,6 +449,7 @@ def api_node(node_id):
             "id": node["id"],
             "address": node["address"],
             "latest": node["latest"],
+            "filtered_distance": node["filtered_distance"],
             "online": node["online"],
             "last_seen": node["last_seen"],
             "rps": node["rps"],
