@@ -2589,17 +2589,17 @@
 	)
 	(global_label "4SPACK-"
 		(shape output)
-		(at 58.42 46.99 0)
+		(at 58.42 52.07 180)
 		(fields_autoplaced yes)
 		(effects
 			(font
 				(size 1.27 1.27)
 			)
-			(justify left)
+			(justify right)
 		)
 		(uuid "249599f6-1520-413e-870b-be1b5aa385f9")
 		(property "Intersheetrefs" "${INTERSHEET_REFS}"
-			(at 70.2952 46.99 0)
+			(at 46.5448 52.07 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -2607,7 +2607,7 @@
 				(font
 					(size 1.27 1.27)
 				)
-				(justify left)
+				(justify right)
 			)
 		)
 	)
@@ -3045,17 +3045,17 @@
 	)
 	(global_label "4SPACK+"
 		(shape output)
-		(at 58.42 44.45 0)
+		(at 58.42 49.53 180)
 		(fields_autoplaced yes)
 		(effects
 			(font
 				(size 1.27 1.27)
 			)
-			(justify left)
+			(justify right)
 		)
 		(uuid "e9b91030-9552-4622-89ce-fe9c74686ce3")
 		(property "Intersheetrefs" "${INTERSHEET_REFS}"
-			(at 70.2952 44.45 0)
+			(at 46.5448 49.53 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -3063,7 +3063,7 @@
 				(font
 					(size 1.27 1.27)
 				)
-				(justify left)
+				(justify right)
 			)
 		)
 	)
@@ -4416,94 +4416,6 @@
 			(project "PCB"
 				(path "/ab40fc32-b885-4754-9572-45a5defa6a02"
 					(reference "Green1")
-					(unit 1)
-				)
-			)
-		)
-	)
-	(symbol
-		(lib_id "Connector_Generic:Conn_01x04")
-		(at 53.34 46.99 0)
-		(mirror y)
-		(unit 1)
-		(body_style 1)
-		(exclude_from_sim no)
-		(in_bom yes)
-		(on_board yes)
-		(in_pos_files yes)
-		(dnp no)
-		(uuid "fca0b474-9586-4b23-ad99-e95acaf4bb32")
-		(property "Reference" "J1"
-			(at 50.8 46.9899 0)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(justify left)
-			)
-		)
-		(property "Value" "NiMH CHARGER CIRCUIT"
-			(at 50.8 49.5299 0)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(justify left)
-			)
-		)
-		(property "Footprint" "Connector_PinHeader_2.54mm:PinHeader_1x04_P2.54mm_Vertical"
-			(at 53.34 46.99 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Datasheet" ""
-			(at 53.34 46.99 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Description" "Generic connector, single row, 01x04, script generated (kicad-library-utils/schlib/autogen/connector/)"
-			(at 53.34 46.99 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(pin "2"
-			(uuid "9cd2c2b3-da5b-4b52-9071-a85c06bb1900")
-		)
-		(pin "1"
-			(uuid "21d556ff-0bc8-4336-b087-10a1cdccf1ec")
-		)
-		(pin "3"
-			(uuid "9c245b49-89ab-4932-bb39-0af008c2b4d8")
-		)
-		(pin "4"
-			(uuid "fc5fbd41-0d46-4138-9c29-73fc802cdb35")
-		)
-		(instances
-			(project "PCB"
-				(path "/ab40fc32-b885-4754-9572-45a5defa6a02"
-					(reference "J1")
 					(unit 1)
 				)
 			)
