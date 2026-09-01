@@ -1284,11 +1284,11 @@
     const legendX = width - 12 - legendWidth;
     const legendY = Math.max(140, height * 0.22);
     const legendEntries = [
-      { color: "#8b5e3c", title: "Mole", lines: ["Whack it for", "+1 point."] },
-      { color: "#eab308", title: "Hat Mole", lines: ["2 hits to defeat,", `worth +${SUPER_MOLE_POINTS} points.`] },
-      { color: "#ef4444", title: "Bomb", lines: [`Avoid! -${BOMB_PENALTY} points`, "and a lost life."] },
+      { imgKey: "mole", color: "#8b5e3c", title: "Mole", lines: ["Whack it for", "+1 point."] },
+      { imgKey: "super_mole", color: "#eab308", title: "Hat Mole", lines: ["2 hits to defeat,", `worth +${SUPER_MOLE_POINTS} points.`] },
+      { imgKey: "bomb", color: "#ef4444", title: "Bomb", lines: [`Avoid! -${BOMB_PENALTY} points`, "and a lost life."] },
     ];
-    const legendEntryHeight = 74;
+    const legendEntryHeight = 82;
     const legendHeaderHeight = 40;
     const legendHeight = legendHeaderHeight + legendEntries.length * legendEntryHeight + 14;
     drawHudPanel(ctx, legendX, legendY, legendWidth, legendHeight, 14);
@@ -1298,21 +1298,30 @@
     ctx.font = "bold 16px monospace";
     ctx.fillText("How to Play", legendX + 16, legendY + 26);
 
+    const legendIconSize = 32;
     legendEntries.forEach((entry, index) => {
       const entryY = legendY + legendHeaderHeight + index * legendEntryHeight;
-      ctx.fillStyle = entry.color;
-      ctx.beginPath();
-      ctx.roundRect(legendX + 16, entryY, 18, 18, 5);
-      ctx.fill();
+      const iconImg = moleImages[entry.imgKey];
+      if (isImageReady(iconImg)) {
+        drawImageCentered(ctx, iconImg, legendX + 16 + legendIconSize / 2, entryY + legendIconSize / 2, legendIconSize);
+      } else {
+        // Falls back to a flat swatch until the asset finishes loading.
+        ctx.fillStyle = entry.color;
+        ctx.beginPath();
+        ctx.roundRect(legendX + 16, entryY, legendIconSize, legendIconSize, 6);
+        ctx.fill();
+      }
 
       ctx.fillStyle = "#f4f4f5";
       ctx.font = "bold 15px monospace";
-      ctx.fillText(entry.title, legendX + 44, entryY + 14);
+      ctx.fillText(entry.title, legendX + 16 + legendIconSize + 10, entryY + legendIconSize / 2 + 5);
 
       ctx.fillStyle = "#9298aa";
       ctx.font = "12px monospace";
       entry.lines.forEach((line, lineIndex) => {
-        ctx.fillText(line, legendX + 16, entryY + 34 + lineIndex * 15);
+        // Cleared below the (now taller) icon rather than the old fixed
+        // offset, which only had headroom for the small flat swatch.
+        ctx.fillText(line, legendX + 16, entryY + legendIconSize + 14 + lineIndex * 15);
       });
     });
 
