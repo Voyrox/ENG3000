@@ -458,6 +458,183 @@
 			)
 			(embedded_fonts no)
 		)
+		(symbol "Device:Buzzer"
+			(pin_names
+				(offset 0.0254)
+				(hide yes)
+			)
+			(exclude_from_sim no)
+			(in_bom yes)
+			(on_board yes)
+			(in_pos_files yes)
+			(duplicate_pin_numbers_are_jumpers no)
+			(property "Reference" "BZ"
+				(at 3.81 1.27 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+					(justify left)
+				)
+			)
+			(property "Value" "Buzzer"
+				(at 3.81 -1.27 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+					(justify left)
+				)
+			)
+			(property "Footprint" ""
+				(at -0.635 2.54 90)
+				(show_name no)
+				(do_not_autoplace no)
+				(hide yes)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(property "Datasheet" ""
+				(at -0.635 2.54 90)
+				(show_name no)
+				(do_not_autoplace no)
+				(hide yes)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(property "Description" "Buzzer, polarized"
+				(at 0 0 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(hide yes)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(property "ki_keywords" "quartz resonator ceramic"
+				(at 0 0 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(hide yes)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(property "ki_fp_filters" "*Buzzer*"
+				(at 0 0 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(hide yes)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(symbol "Buzzer_0_1"
+				(polyline
+					(pts
+						(xy -1.651 1.905) (xy -1.143 1.905)
+					)
+					(stroke
+						(width 0)
+						(type default)
+					)
+					(fill
+						(type none)
+					)
+				)
+				(polyline
+					(pts
+						(xy -1.397 2.159) (xy -1.397 1.651)
+					)
+					(stroke
+						(width 0)
+						(type default)
+					)
+					(fill
+						(type none)
+					)
+				)
+				(arc
+					(start 0 3.175)
+					(mid 3.1612 0)
+					(end 0 -3.175)
+					(stroke
+						(width 0)
+						(type default)
+					)
+					(fill
+						(type none)
+					)
+				)
+				(polyline
+					(pts
+						(xy 0 3.175) (xy 0 -3.175)
+					)
+					(stroke
+						(width 0)
+						(type default)
+					)
+					(fill
+						(type none)
+					)
+				)
+			)
+			(symbol "Buzzer_1_1"
+				(pin passive line
+					(at -2.54 2.54 0)
+					(length 2.54)
+					(name "+"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+					(number "1"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+				(pin passive line
+					(at -2.54 -2.54 0)
+					(length 2.54)
+					(name "-"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+					(number "2"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+			)
+			(embedded_fonts no)
+		)
 		(symbol "Device:LED"
 			(pin_numbers
 				(hide yes)
@@ -2059,9 +2236,31 @@
 		)
 		(uuid "c629bc2f-0648-4a36-9b6b-de2229d16635")
 	)
+	(rectangle
+		(start 173.99 60.96)
+		(end 204.47 80.01)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(fill
+			(type none)
+		)
+		(uuid "f0d95018-35c5-4f0d-bbe1-ad97d8652de9")
+	)
+	(text "Buzzer"
+		(exclude_from_sim no)
+		(at 189.23 59.944 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+		)
+		(uuid "55ff9ec5-2183-4376-806d-325c2da9d7c7")
+	)
 	(text "Battery Indicator"
 		(exclude_from_sim no)
-		(at 124.968 86.106 0)
+		(at 134.112 86.36 0)
 		(effects
 			(font
 				(size 1.27 1.27)
@@ -2100,12 +2299,6 @@
 		(diameter 0)
 		(color 0 0 0 0)
 		(uuid "852f3223-aeb4-452c-badb-a6cec7618c7a")
-	)
-	(junction
-		(at 137.16 118.11)
-		(diameter 0)
-		(color 0 0 0 0)
-		(uuid "8a112cdc-d569-4bdf-9cd9-ea6300c7c273")
 	)
 	(junction
 		(at 76.2 54.61)
@@ -2243,6 +2436,16 @@
 	)
 	(wire
 		(pts
+			(xy 129.54 118.11) (xy 128.27 118.11)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "281e42a4-49fa-4153-b16f-b6818bbdabcd")
+	)
+	(wire
+		(pts
 			(xy 80.01 93.98) (xy 80.01 106.68)
 		)
 		(stroke
@@ -2313,6 +2516,16 @@
 	)
 	(wire
 		(pts
+			(xy 137.16 118.11) (xy 143.51 118.11)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "579465b4-1730-49b5-9564-66cac3bb135c")
+	)
+	(wire
+		(pts
 			(xy 201.93 109.22) (xy 201.93 111.76)
 		)
 		(stroke
@@ -2323,16 +2536,6 @@
 	)
 	(wire
 		(pts
-			(xy 137.16 118.11) (xy 143.51 118.11)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "5a549efb-5e87-4924-83a1-ba12af345ebf")
-	)
-	(wire
-		(pts
 			(xy 80.01 29.21) (xy 104.14 29.21)
 		)
 		(stroke
@@ -2340,16 +2543,6 @@
 			(type default)
 		)
 		(uuid "64f8975f-93ce-445c-a1f8-c1f9590bf5cb")
-	)
-	(wire
-		(pts
-			(xy 137.0534 118.11) (xy 137.16 118.11)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "6b245753-cb73-41f8-92b5-7a4c062932aa")
 	)
 	(wire
 		(pts
@@ -2390,16 +2583,6 @@
 			(type default)
 		)
 		(uuid "7e5fe5bb-be89-4b18-956e-5fd6662e0082")
-	)
-	(wire
-		(pts
-			(xy 129.54 118.11) (xy 128.27 118.11)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "7f300811-2e7b-49f2-aee0-95724928b8a5")
 	)
 	(wire
 		(pts
@@ -2631,6 +2814,30 @@
 		)
 		(uuid "bfb8f11b-6ebf-48c6-a265-1440d99befff")
 	)
+	(global_label "BUZZER+"
+		(shape input)
+		(at 189.23 68.58 180)
+		(fields_autoplaced yes)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify right)
+		)
+		(uuid "01cfec81-1387-4490-be5a-86799fe6270a")
+		(property "Intersheetrefs" "${INTERSHEET_REFS}"
+			(at 177.2339 68.58 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify right)
+			)
+		)
+	)
 	(global_label "GPIO38"
 		(shape output)
 		(at 118.11 106.68 180)
@@ -2740,6 +2947,30 @@
 		(uuid "2aaf73f0-b781-47af-bee8-7483973c6d6a")
 		(property "Intersheetrefs" "${INTERSHEET_REFS}"
 			(at 69.4048 133.35 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify right)
+			)
+		)
+	)
+	(global_label "GND"
+		(shape input)
+		(at 189.23 73.66 180)
+		(fields_autoplaced yes)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify right)
+		)
+		(uuid "3ce6abc9-cefc-4e96-983d-8dcbb74f45c0")
+		(property "Intersheetrefs" "${INTERSHEET_REFS}"
+			(at 182.3743 73.66 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -3004,6 +3235,30 @@
 		(uuid "ae15dee9-038f-4847-83a6-bfc39261b90f")
 		(property "Intersheetrefs" "${INTERSHEET_REFS}"
 			(at 96.0748 72.39 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify right)
+			)
+		)
+	)
+	(global_label "BUZZER+"
+		(shape output)
+		(at 104.14 34.29 180)
+		(fields_autoplaced yes)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify right)
+		)
+		(uuid "b3ac10aa-6012-404a-b717-6bc8cfa67bf0")
+		(property "Intersheetrefs" "${INTERSHEET_REFS}"
+			(at 92.1439 34.29 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -3397,8 +3652,8 @@
 		)
 	)
 	(symbol
-		(lib_id "Device:LED")
-		(at 133.35 118.11 180)
+		(lib_id "Device:Buzzer")
+		(at 191.77 71.12 0)
 		(unit 1)
 		(body_style 1)
 		(exclude_from_sim no)
@@ -3406,29 +3661,32 @@
 		(on_board yes)
 		(in_pos_files yes)
 		(dnp no)
-		(uuid "2346f335-d793-463b-bb82-b4ce99370824")
-		(property "Reference" "D3"
-			(at 133.35 111.76 0)
+		(fields_autoplaced yes)
+		(uuid "243679d8-8d3f-4ef9-91cc-86217ecccf47")
+		(property "Reference" "BZ1"
+			(at 195.58 69.8499 0)
 			(show_name no)
 			(do_not_autoplace no)
 			(effects
 				(font
 					(size 1.27 1.27)
 				)
+				(justify left)
 			)
 		)
-		(property "Value" "Yellow"
-			(at 133.35 114.3 0)
+		(property "Value" "Buzzer"
+			(at 195.58 72.3899 0)
 			(show_name no)
 			(do_not_autoplace no)
 			(effects
 				(font
 					(size 1.27 1.27)
 				)
+				(justify left)
 			)
 		)
-		(property "Footprint" "LED_THT:LED_D5.0mm"
-			(at 133.35 118.11 0)
+		(property "Footprint" ""
+			(at 191.135 68.58 90)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -3439,7 +3697,7 @@
 			)
 		)
 		(property "Datasheet" ""
-			(at 133.35 118.11 0)
+			(at 191.135 68.58 90)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -3449,19 +3707,8 @@
 				)
 			)
 		)
-		(property "Description" "Light emitting diode"
-			(at 133.35 118.11 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Sim.Pins" "1=K 2=A"
-			(at 133.35 118.11 0)
+		(property "Description" "Buzzer, polarized"
+			(at 191.77 71.12 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -3472,15 +3719,15 @@
 			)
 		)
 		(pin "1"
-			(uuid "8b9a76ca-11e0-4500-afe2-1646ffd35453")
+			(uuid "3636c97f-ac37-48d1-a681-7ebf02a64d72")
 		)
 		(pin "2"
-			(uuid "641b3c45-02c5-4576-a930-b13482f4f25e")
+			(uuid "1d5ea58e-d757-444a-bc69-d37a4414c4fc")
 		)
 		(instances
 			(project "PCB"
 				(path "/ab40fc32-b885-4754-9572-45a5defa6a02"
-					(reference "D3")
+					(reference "BZ1")
 					(unit 1)
 				)
 			)
@@ -4004,6 +4251,96 @@
 			(project "PCB"
 				(path "/ab40fc32-b885-4754-9572-45a5defa6a02"
 					(reference "R1")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "Device:LED")
+		(at 133.35 118.11 180)
+		(unit 1)
+		(body_style 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(in_pos_files yes)
+		(dnp no)
+		(uuid "6ebd2441-bd72-42b7-8c36-d569b4002078")
+		(property "Reference" "D3"
+			(at 133.35 111.76 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Value" "Yellow"
+			(at 133.35 114.3 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Footprint" "LED_THT:LED_D5.0mm"
+			(at 133.35 118.11 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Datasheet" ""
+			(at 133.35 118.11 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Description" "Light emitting diode"
+			(at 133.35 118.11 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Sim.Pins" "1=K 2=A"
+			(at 133.35 118.11 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(pin "1"
+			(uuid "8f4449ac-2641-4b45-b871-2cea4bb16af5")
+		)
+		(pin "2"
+			(uuid "f07e3a9a-5d33-402d-8d0a-28cf279884c1")
+		)
+		(instances
+			(project "PCB"
+				(path "/ab40fc32-b885-4754-9572-45a5defa6a02"
+					(reference "D3")
 					(unit 1)
 				)
 			)
