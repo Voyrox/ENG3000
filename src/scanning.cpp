@@ -99,11 +99,8 @@ float ultraSonicRead(const int USS[2]){
 }
 
 int rotationWaitTrack = 0;
-int leftSensorWait = 0;
-int rightSesnorWait = 0;
 const int rotatationWait = 20;
-const int ultraSonicWait = 20;
-bool sensorWaiting = false;
+bool readLeftNext = true;
 
 float leftVal = 0;
 float rightVal = 0;
@@ -113,18 +110,14 @@ bool scanLoop(){
     return false;
   }
 
-  if(!sensorWaiting){
+  if(readLeftNext){
     leftVal = ultraSonicRead(leftUSS);
-    sensorWaiting = true;
-  }
-
-  if (leftSensorWait + ultraSonicWait >= millis()){
+    readLeftNext = false;
     return false;
-  } else  {
-    sensorWaiting = false;
   }
 
   rightVal = ultraSonicRead(rightUSS);
+  readLeftNext = true;
 
   bool leftInRange = (leftVal >= minDist && leftVal <= maxDist);
   bool rightInRange = (rightVal >= minDist && rightVal <= maxDist);
@@ -135,7 +128,7 @@ bool scanLoop(){
       state = 0;
     }
   } 
-  else if (leftInRange){ //Combine if no logic for individual sides will be processed here
+  else if (leftInRange){
     state = 1;
   }
   else if (rightInRange){
@@ -152,9 +145,6 @@ bool scanLoop(){
 
   switch (state){
     case 0:{
-      //Put in trilateration (+ angle correction? - depending on how the final value is caculated)
-      // Serial.println(leftVal);
-      // Serial.println(rightVal);
       break;
     }
     case 1:{
