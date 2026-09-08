@@ -116,6 +116,7 @@ bool scanLoop(){
     return false;
   }
 
+
   rightVal = ultraSonicRead(rightUSS);
   readLeftNext = true;
 
