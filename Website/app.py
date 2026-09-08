@@ -8,6 +8,7 @@ from flask import Flask, jsonify, render_template
 from websockets.asyncio.server import broadcast, serve
 import numpy as np
 
+
 def fft_filter_ultrasonic(readings, sample_rate_hz, cutoff_hz):
     signal = np.asarray(readings, dtype=float)
     n = len(signal)
@@ -30,6 +31,7 @@ def fft_filter_ultrasonic(readings, sample_rate_hz, cutoff_hz):
 
     # Restore original mean
     return clean_signal + mean
+
 
 app = Flask(__name__, template_folder="template", static_folder="public", static_url_path="/static")
 
@@ -56,22 +58,50 @@ BROWSER_CONNECTIONS = set()
 WS_LOOP = None
 
 
+def alloc_node_id():
+    global next_node_id
+    node_id = next_node_id
+    next_node_id += 1
+    return node_id
+
+
+def new_node(address, device_id=None):
+    return {
+        "id": None,
+        "address": f"{address[0]}:{address[1]}",
+        "device_id": device_id,
+        "latest": None,
+        "online": True,
+        "last_seen": time.monotonic(),
+        "samples": deque(),
+        "median_samples": deque(maxlen=MEDIAN_WINDOW),
+        "distance_samples": deque(maxlen=FFT_WINDOW),
+        "filtered_distance": None,
+        "rps": 0.0,
+        "conn": None,
+        "conn_lock": threading.Lock(),
+        "synced": False,
+        "has_turn": False,
+    }
+
+
+def serialize_node(node):
+    return {
+        "id": node["id"],
+        "address": node["address"],
+        "latest": node["latest"],
+        "filtered_distance": node["filtered_distance"],
+        "online": node["online"],
+        "last_seen": node["last_seen"],
+        "rps": node["rps"],
+        "synced": node["synced"],
+        "has_turn": node["has_turn"],
+    }
+
+
 def snapshot_nodes():
     with state_lock:
-        return [
-            {
-                "id": node["id"],
-                "address": node["address"],
-                "latest": node["latest"],
-                "filtered_distance": node["filtered_distance"],
-                "online": node["online"],
-                "last_seen": node["last_seen"],
-                "rps": node["rps"],
-                "synced": node["synced"],
-                "has_turn": node["has_turn"],
-            }
-            for node in nodes.values()
-        ]
+        return [serialize_node(node) for node in nodes.values()]
 
 
 async def broadcast_nodes():
@@ -85,53 +115,25 @@ def schedule_broadcast_nodes():
         asyncio.run_coroutine_threadsafe(broadcast_nodes(), WS_LOOP)
 
 
-def register_node(address):
-    global next_node_id
-    with state_lock:
-        node_id = next_node_id
-        next_node_id += 1
-        nodes[node_id] = {
-            "id": node_id,
-            "address": f"{address[0]}:{address[1]}",
-            "device_id": None,
-            "latest": None,
-            "online": True,
-            "last_seen": time.monotonic(),
-            "samples": deque(),
-            "median_samples": deque(maxlen=MEDIAN_WINDOW),
-            "distance_samples": deque(maxlen=FFT_WINDOW),
-            "filtered_distance": None,
-            "rps": 0.0,
-            "conn": None,
-            "conn_lock": threading.Lock(),
-            "synced": False,
-            "has_turn": False,
-        }
-    schedule_broadcast_nodes()
-    return node_id
+def find_known_node(claimed_node_id, device_id):
+    if device_id:
+        for existing in nodes.values():
+            if existing.get("device_id") == device_id:
+                return existing
+    if claimed_node_id is not None and claimed_node_id in nodes:
+        return nodes[claimed_node_id]
+    return None
 
 
 def reuse_or_register_node(address, claimed_node_id, device_id=None):
-    global next_node_id
     with state_lock:
-        now = time.monotonic()
-        node = None
-        reused_existing = False
-
-        if device_id:
-            for existing in nodes.values():
-                if existing.get("device_id") == device_id:
-                    node = existing
-                    break
-
-        if node is None and claimed_node_id is not None and claimed_node_id in nodes:
-            node = nodes[claimed_node_id]
+        node = find_known_node(claimed_node_id, device_id)
 
         if node is not None:
             reused_existing = True
             node["address"] = f"{address[0]}:{address[1]}"
             node["online"] = True
-            node["last_seen"] = now
+            node["last_seen"] = time.monotonic()
             node["rps"] = 0.0
             node["samples"].clear()
             node["median_samples"].clear()
@@ -144,27 +146,60 @@ def reuse_or_register_node(address, claimed_node_id, device_id=None):
                 node["device_id"] = device_id
             node_id = node["id"]
         else:
-            node_id = next_node_id
-            next_node_id += 1
-            nodes[node_id] = {
-                "id": node_id,
-                "address": f"{address[0]}:{address[1]}",
-                "device_id": device_id,
-                "latest": None,
-                "online": True,
-                "last_seen": now,
-                "samples": deque(),
-                "median_samples": deque(maxlen=MEDIAN_WINDOW),
-                "distance_samples": deque(maxlen=FFT_WINDOW),
-                "filtered_distance": None,
-                "rps": 0.0,
-                "conn": None,
-                "conn_lock": threading.Lock(),
-                "synced": False,
-                "has_turn": False,
-            }
+            reused_existing = False
+            node_id = alloc_node_id()
+            record = new_node(address, device_id)
+            record["id"] = node_id
+            nodes[node_id] = record
     schedule_broadcast_nodes()
     return node_id, reused_existing
+
+
+def parse_message(message):
+    try:
+        return json.loads(message)
+    except json.JSONDecodeError:
+        return {}
+
+
+def drop_duplicate_device(keep_node_id, device_id):
+    """A device's MAC is unique: remove any other node registered with it."""
+    for other_id, other in list(nodes.items()):
+        if other_id != keep_node_id and other.get("device_id") == device_id:
+            del nodes[other_id]
+
+
+def update_rate(node, now):
+    samples = node["samples"]
+    samples.append(now)
+    cutoff = now - RPS_WINDOW_SECONDS
+    while samples and samples[0] < cutoff:
+        samples.popleft()
+    node["rps"] = float(len(samples)) / float(RPS_WINDOW_SECONDS)
+
+
+def update_distance(node, payload):
+    distance = payload.get("distance")
+    if distance is None:
+        distance = payload.get("avg")
+    if distance is not None:
+        try:
+            distance = float(distance)
+        except (TypeError, ValueError):
+            distance = None
+    if distance is None:
+        return
+
+    medians = node["median_samples"]
+    medians.append(distance)
+    smoothed = float(np.median(medians))
+    history = node["distance_samples"]
+    history.append(smoothed)
+    if len(history) >= FFT_MIN_SAMPLES:
+        filtered = fft_filter_ultrasonic(history, DISTANCE_SAMPLE_RATE_HZ, DISTANCE_CUTOFF_HZ)
+        node["filtered_distance"] = float(filtered[-1])
+    else:
+        node["filtered_distance"] = smoothed
 
 
 def update_node(node_id, message):
@@ -173,51 +208,18 @@ def update_node(node_id, message):
         if node is None:
             return
         now = time.monotonic()
-        try:
-            payload = json.loads(message)
-        except json.JSONDecodeError:
-            payload = {}
+        payload = parse_message(message)
 
         device_id = payload.get("mac")
         if device_id:
-            for other_id, other in list(nodes.items()):
-                if other_id != node_id and other.get("device_id") == device_id:
-                    del nodes[other_id]
+            drop_duplicate_device(node_id, device_id)
             node["device_id"] = device_id
 
         node["latest"] = message
         node["online"] = True
         node["last_seen"] = now
-        samples = node["samples"]
-        samples.append(now)
-        cutoff = now - RPS_WINDOW_SECONDS
-        while samples and samples[0] < cutoff:
-            samples.popleft()
-        node["rps"] = float(len(samples)) / float(RPS_WINDOW_SECONDS)
-
-        distance = payload.get("distance")
-        if distance is None:
-            distance = payload.get("avg")
-        if distance is not None:
-            try:
-                distance = float(distance)
-            except (TypeError, ValueError):
-                distance = None
-        if distance is not None:
-            medians = node["median_samples"]
-            medians.append(distance)
-            smoothed = float(np.median(medians))
-            history = node["distance_samples"]
-            history.append(smoothed)
-            if len(history) >= FFT_MIN_SAMPLES:
-                filtered = fft_filter_ultrasonic(
-                    history,
-                    DISTANCE_SAMPLE_RATE_HZ,
-                    DISTANCE_CUTOFF_HZ,
-                )
-                node["filtered_distance"] = float(filtered[-1])
-            else:
-                node["filtered_distance"] = smoothed
+        update_rate(node, now)
+        update_distance(node, payload)
     schedule_broadcast_nodes()
 
 
@@ -262,9 +264,8 @@ def parse_handshake(raw_line):
     try:
         claimed_node_id = int(raw_line)
     except ValueError:
-        try:
-            payload = json.loads(raw_line)
-        except json.JSONDecodeError:
+        payload = parse_message(raw_line)
+        if not payload:
             return None, None
         claimed_node_id = payload.get("nodeId")
         device_id = payload.get("mac")
@@ -320,23 +321,14 @@ def sync_node(node_id):
     send_command(node_id, f"SYNC {tick}")
 
 
-def grant_turn(node_id):
-    """Grant a scan slot to a node; no other node may scan at the same time."""
-    send_command(node_id, "TURN")
+def set_turn(node_id, granted):
+    """Grant or revoke a scan slot. Mutually exclusive across nodes."""
     with state_lock:
         node = nodes.get(node_id)
-        if node is not None:
-            node["has_turn"] = True
-    schedule_broadcast_nodes()
-
-
-def revoke_turn(node_id):
-    """Take the scan slot away from a node until the next grant."""
-    send_command(node_id, "HALT")
-    with state_lock:
-        node = nodes.get(node_id)
-        if node is not None:
-            node["has_turn"] = False
+        if node is None:
+            return
+        node["has_turn"] = granted
+    send_command(node_id, "TURN" if granted else "HALT")
     schedule_broadcast_nodes()
 
 
@@ -362,10 +354,7 @@ def coordinator_loop():
 
         active = online_ids[sync_tick % len(online_ids)]
         for node_id in online_ids:
-            if node_id == active:
-                grant_turn(node_id)
-            else:
-                revoke_turn(node_id)
+            set_turn(node_id, node_id == active)
 
         print(
             f"Tick {sync_tick}: scanning node {active}, "
@@ -402,7 +391,6 @@ def handle_node_connection(conn, address):
                 message = line.strip()
                 if not message:
                     continue
-                #print(f"Node {node_id}: {message}")
                 update_node(node_id, message)
     except (OSError, TimeoutError) as exc:
         print(f"Node {node_id if node_id is not None else 'unknown'} disconnected: {exc}")
@@ -476,17 +464,7 @@ def api_node(node_id):
         node = nodes.get(node_id)
         if node is None:
             return jsonify({"error": "unknown node"}), 404
-        return jsonify({
-            "id": node["id"],
-            "address": node["address"],
-            "latest": node["latest"],
-            "filtered_distance": node["filtered_distance"],
-            "online": node["online"],
-            "last_seen": node["last_seen"],
-            "rps": node["rps"],
-            "synced": node["synced"],
-            "has_turn": node["has_turn"],
-        })
+        return jsonify(serialize_node(node))
 
 
 if __name__ == '__main__':
