@@ -10,13 +10,13 @@ const int triggerPin = 33;
 const int echoPin = 32;
 Ultrasonic center(triggerPin, echoPin, "Center");
 
-void sendSensorSnapshot() {
+void sendSensorSnapshot(float val) {
     center.updateReading();
 
     String payload = "{";
     payload += "\"nodeId\":" + String(nodeID);
     payload += ",\"mac\":\"" + WiFi.macAddress() + "\"";
-    payload += ",\"avg\":" + String(center.avg, 2);
+    payload += ",\"avg\":" + String(val, 2);
     payload += "}";
 
     sendData(payload);
@@ -69,6 +69,9 @@ void loop() {
     }
 
     pollCommands();
-    sendSensorSnapshot();
-    scanLoop();
+    bool ready = scanLoop();
+    if(ready){
+        float val = (getLeftVal() + getRightVal()) / 2.0; //For now just avg, will be done more formally in the scanning code later
+        sendSensorSnapshot(val);
+    }
 }

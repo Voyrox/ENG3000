@@ -37,8 +37,8 @@ void scanSetup(){
   // Servo setup
   theServo.attach(servoPin);
 
-  theServo.write(90);
-  delay(5000);
+  // theServo.write(90);
+  // delay(5000);
 }
 
 //If both sensors see the person, state = Found, state 0
