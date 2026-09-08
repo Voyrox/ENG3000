@@ -1,13 +1,10 @@
 import asyncio
 from collections import deque
 import json
-import os
-import re
 import socket
 import threading
 import time
-from datetime import datetime
-from flask import Flask, jsonify, render_template, request
+from flask import Flask, jsonify, render_template
 from websockets.asyncio.server import broadcast, serve
 import numpy as np
 
@@ -36,12 +33,6 @@ def fft_filter_ultrasonic(readings, sample_rate_hz, cutoff_hz):
 
 app = Flask(__name__, template_folder="template", static_folder="public", static_url_path="/static")
 
-# Session logs land in <repo>/logs. The browser cannot write there itself -
-# a download would go to the user's Downloads folder - so the page POSTs each
-# finished round here and the server writes it into the repository.
-LOGS_DIR = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "logs"))
-GAME_FILE_PATTERN = re.compile(r"^game-(\d+)-")
-
 TCP_HOST = "0.0.0.0"
 TCP_PORT = 3000
 WS_HOST = "0.0.0.0"
@@ -55,10 +46,12 @@ FFT_WINDOW = 64
 FFT_MIN_SAMPLES = 16
 DISTANCE_SAMPLE_RATE_HZ = 20.0
 DISTANCE_CUTOFF_HZ = 2.0
+TURN_INTERVAL_SECONDS = 1.0
 
 state_lock = threading.Lock()
 next_node_id = 1
 nodes = {}
+sync_tick = 0
 BROWSER_CONNECTIONS = set()
 WS_LOOP = None
 
@@ -74,6 +67,8 @@ def snapshot_nodes():
                 "online": node["online"],
                 "last_seen": node["last_seen"],
                 "rps": node["rps"],
+                "synced": node["synced"],
+                "has_turn": node["has_turn"],
             }
             for node in nodes.values()
         ]
@@ -107,6 +102,10 @@ def register_node(address):
             "distance_samples": deque(maxlen=FFT_WINDOW),
             "filtered_distance": None,
             "rps": 0.0,
+            "conn": None,
+            "conn_lock": threading.Lock(),
+            "synced": False,
+            "has_turn": False,
         }
     schedule_broadcast_nodes()
     return node_id
@@ -138,6 +137,9 @@ def reuse_or_register_node(address, claimed_node_id, device_id=None):
             node["median_samples"].clear()
             node["distance_samples"].clear()
             node["filtered_distance"] = None
+            node["synced"] = False
+            node["has_turn"] = False
+            node["conn"] = None
             if device_id:
                 node["device_id"] = device_id
             node_id = node["id"]
@@ -156,6 +158,10 @@ def reuse_or_register_node(address, claimed_node_id, device_id=None):
                 "distance_samples": deque(maxlen=FFT_WINDOW),
                 "filtered_distance": None,
                 "rps": 0.0,
+                "conn": None,
+                "conn_lock": threading.Lock(),
+                "synced": False,
+                "has_turn": False,
             }
     schedule_broadcast_nodes()
     return node_id, reused_existing
@@ -223,6 +229,9 @@ def mark_node_offline(node_id):
         node["online"] = False
         node["rps"] = 0.0
         node["samples"].clear()
+        node["synced"] = False
+        node["has_turn"] = False
+        node["conn"] = None
     schedule_broadcast_nodes()
 
 
@@ -285,6 +294,85 @@ def cleanup_stale_nodes():
             schedule_broadcast_nodes()
 
 
+def send_command(node_id, command):
+    """Send a CRLF-free control line to a node, respecting its conn lock."""
+    with state_lock:
+        node = nodes.get(node_id)
+        conn = node["conn"] if node is not None else None
+        conn_lock = node["conn_lock"] if node is not None else None
+    if conn is None or conn_lock is None:
+        return
+    with conn_lock:
+        try:
+            conn.sendall((command + "\n").encode("utf-8"))
+        except (OSError, TimeoutError):
+            pass
+
+
+def sync_node(node_id):
+    """Send the authoritative tick to one node (PC is source of truth)."""
+    with state_lock:
+        tick = sync_tick
+        node = nodes.get(node_id)
+        if node is None:
+            return
+        node["synced"] = True
+    send_command(node_id, f"SYNC {tick}")
+
+
+def grant_turn(node_id):
+    """Grant a scan slot to a node; no other node may scan at the same time."""
+    send_command(node_id, "TURN")
+    with state_lock:
+        node = nodes.get(node_id)
+        if node is not None:
+            node["has_turn"] = True
+    schedule_broadcast_nodes()
+
+
+def revoke_turn(node_id):
+    """Take the scan slot away from a node until the next grant."""
+    send_command(node_id, "HALT")
+    with state_lock:
+        node = nodes.get(node_id)
+        if node is not None:
+            node["has_turn"] = False
+    schedule_broadcast_nodes()
+
+
+def coordinator_loop():
+    """The PC is the source of truth: alternate scan turns across all online
+    nodes on a fixed schedule so two ultrasonic sensors never fire together.
+    """
+    global sync_tick
+    while True:
+        time.sleep(TURN_INTERVAL_SECONDS)
+        sync_tick += 1
+        with state_lock:
+            online_ids = sorted(
+                node_id for node_id, node in nodes.items()
+                if node.get("online") and node.get("conn") is not None
+            )
+        if not online_ids:
+            continue
+
+        # One tick of authority for every node, then the next node scans.
+        for node_id in online_ids:
+            sync_node(node_id)
+
+        active = online_ids[sync_tick % len(online_ids)]
+        for node_id in online_ids:
+            if node_id == active:
+                grant_turn(node_id)
+            else:
+                revoke_turn(node_id)
+
+        print(
+            f"Tick {sync_tick}: scanning node {active}, "
+            f"waiting: {[n for n in online_ids if n != active]}"
+        )
+
+
 def handle_node_connection(conn, address):
     node_id = None
     first_message = None
@@ -301,6 +389,12 @@ def handle_node_connection(conn, address):
         action = "restored" if reused_existing else "assigned"
         print(f"ESP32 connected from {address}, {action} id {node_id}")
         conn.sendall(f"{node_id}\n".encode("utf-8"))
+        with state_lock:
+            node = nodes.get(node_id)
+            if node is not None:
+                node["conn"] = conn
+                node["synced"] = False
+                node["has_turn"] = False
         if first_message is not None:
             update_node(node_id, first_message)
         with conn.makefile("r") as stream:
@@ -366,69 +460,6 @@ async def websocket_server():
         await asyncio.Future()
 
 
-def next_game_number():
-    """One past the highest game number already on disk.
-
-    Derived from the filenames rather than a counter in memory, so numbering
-    survives a server restart and never silently reuses a number.
-    """
-    os.makedirs(LOGS_DIR, exist_ok=True)
-    highest = 0
-    for name in os.listdir(LOGS_DIR):
-        match = GAME_FILE_PATTERN.match(name)
-        if match:
-            highest = max(highest, int(match.group(1)))
-    return highest + 1
-
-
-@app.route("/api/logs", methods=["POST"])
-def save_log():
-    """Writes one finished round to <repo>/logs as both JSON and CSV."""
-    payload = request.get_json(silent=True)
-    if not isinstance(payload, dict):
-        return jsonify({"error": "expected a JSON object"}), 400
-
-    data = payload.get("data")
-    csv_text = payload.get("csv")
-    if not isinstance(data, dict):
-        return jsonify({"error": "missing 'data'"}), 400
-
-    os.makedirs(LOGS_DIR, exist_ok=True)
-
-    game_number = next_game_number()
-    stamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    stem = f"game-{game_number:03d}-{stamp}"
-
-    # Record the number inside the file too, so a renamed file is still traceable.
-    data.setdefault("round", {})
-    data["round"]["gameNumber"] = game_number
-    data["round"]["savedAt"] = datetime.now().isoformat(timespec="seconds")
-
-    written = []
-    json_path = os.path.join(LOGS_DIR, stem + ".json")
-    with open(json_path, "w", encoding="utf-8") as handle:
-        json.dump(data, handle, indent=2)
-    written.append(os.path.basename(json_path))
-
-    if isinstance(csv_text, str) and csv_text:
-        csv_path = os.path.join(LOGS_DIR, stem + ".csv")
-        with open(csv_path, "w", encoding="utf-8", newline="") as handle:
-            handle.write(csv_text)
-        written.append(os.path.basename(csv_path))
-
-    rows = len(data.get("rows") or [])
-    print(f"Saved game {game_number}: {rows} rows -> {', '.join(written)}")
-    return jsonify({"game": game_number, "files": written, "rows": rows, "dir": LOGS_DIR})
-
-
-@app.route("/api/logs", methods=["GET"])
-def list_logs():
-    """What has been recorded so far, newest first."""
-    os.makedirs(LOGS_DIR, exist_ok=True)
-    names = sorted((n for n in os.listdir(LOGS_DIR) if n.endswith((".json", ".csv"))), reverse=True)
-    return jsonify({"dir": LOGS_DIR, "next": next_game_number(), "files": names})
-
-
 @app.route("/")
 def home():
     return render_template("index.html")
@@ -453,6 +484,8 @@ def api_node(node_id):
             "online": node["online"],
             "last_seen": node["last_seen"],
             "rps": node["rps"],
+            "synced": node["synced"],
+            "has_turn": node["has_turn"],
         })
 
 
@@ -460,4 +493,5 @@ if __name__ == '__main__':
     threading.Thread(target=lambda: asyncio.run(websocket_server()), daemon=True).start()
     threading.Thread(target=tcp_server, daemon=True).start()
     threading.Thread(target=cleanup_stale_nodes, daemon=True).start()
+    threading.Thread(target=coordinator_loop, daemon=True).start()
     app.run(debug=True, host="0.0.0.0", threaded=True, use_reloader=False)
