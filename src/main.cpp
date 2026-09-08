@@ -3,6 +3,7 @@
 #include "ultrasonicSensor.cpp"
 #include "wifi/connectionManager.h"
 #include "sync.h"
+#include "scanning.h"
 
 const int UltrasonicCount = 1;
 const int triggerPin = 33;
@@ -26,6 +27,7 @@ void setup() {
   Serial.println("ESP32 Node is starting...");
   initSync();
   connectWiFi();
+  scanSetup();
 }
 
 void loop() {
@@ -68,4 +70,5 @@ void loop() {
 
     pollCommands();
     sendSensorSnapshot();
+    scanLoop();
 }
