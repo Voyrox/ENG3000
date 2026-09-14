@@ -121,6 +121,18 @@
   const COLUMN_MARGIN_CM = 8;     // a rival sensor must beat this to steal the column
   const TOO_CLOSE_FRAMES = 2;     // consecutive raw frames needed to raise the alert
 
+  // Bottom-left HUD. The position map sits directly above the sensor panel.
+  const SENSOR_PANEL_H = 132;     // px
+  const MAP_AREA_WIDTH_CM = 150;  // matches PlayArea.width_cm in filterRules.py
+  const MAP_MIN_SIZE = 110;       // px; below this the grid stops being legible
+  const MAP_MAX_SIZE = 170;       // px
+  const MAP_GAP = 10;             // px between the map and the sensor panel
+
+  // Declared up here, not beside the render code, because resetSensorFilters()
+  // touches them and a `let` read before its line runs throws.
+  let coordinateMap = null;
+  let lastMapPoint = null;
+
   // Cell stabilisation. Filtering the distance is not enough on its own: a
   // single bad reading that survives the median still lands the cursor in the
   // wrong cell for a frame, which reads as jumping. Because the output is
@@ -674,6 +686,7 @@
     resetCellFilter();
     sensorHold.grid = null;
     sensorHold.lastOkAt = -Infinity;
+    resetCoordinateMap();
   }
 
   window.resetSensorFilters = resetSensorFilters;
@@ -1200,7 +1213,7 @@
     const sensor = gameState.sensor;
 
     const panelW = 322;
-    const panelH = 132;
+    const panelH = SENSOR_PANEL_H;
     const x = 12;
     const y = height - panelH - 12;
     const rowH = 20;
@@ -1290,11 +1303,86 @@
     ctx.textAlign = "start";
   }
 
+  // --- Position map ----------------------------------------------------------
+  // CoordinateMap (coordinateMap.js) takes a plain (x, y) in centimetres and
+  // knows nothing about sensors. mapCoordinateFromSensor() is the only place
+  // that translates today's fix into that form. Once filterRules.py sends the
+  // filtered coordinate from the server, pass its x and y straight to
+  // map.update() and delete mapCoordinateFromSensor().
+
+  // Created on first use so load order against coordinateMap.js cannot bite.
+  function getCoordinateMap() {
+    if (!coordinateMap && window.CoordinateMap) {
+      coordinateMap = new window.CoordinateMap({
+        widthCm: MAP_AREA_WIDTH_CM,
+        depthCm: maxCoordCm(),
+      });
+    }
+    return coordinateMap;
+  }
+
+  function resetCoordinateMap() {
+    lastMapPoint = null;
+    if (coordinateMap) coordinateMap.clear();
+  }
+
+  // Today's rig cannot resolve position within a column, so x is the centre of
+  // whichever column won and y is that sensor's filtered distance. While the
+  // cursor is being held through bad readings the fix belongs to the bad
+  // reading, so the last good position is shown instead.
+  function mapCoordinateFromSensor(sensor) {
+    const label = sensor.held ? "held"
+      : sensor.status === "ok" ? null
+      : String(sensor.status).replace(/-/g, " ");
+
+    if (sensor.held) {
+      return { x: lastMapPoint ? lastMapPoint.x : null,
+               y: lastMapPoint ? lastMapPoint.y : null, label };
+    }
+
+    const hasFix = Number.isInteger(sensor.column) && Number.isFinite(sensor.distanceCm);
+    if (!hasFix) return { x: null, y: null, label };
+
+    // Out-of-bounds fixes still carry a position; the map pins those to its
+    // edge in red, which shows the player which way they went.
+    const point = { x: ((sensor.column + 0.5) * MAP_AREA_WIDTH_CM) / 3, y: sensor.distanceCm };
+    if (sensor.status === "ok") lastMapPoint = point;
+    return { ...point, label };
+  }
+
+  function renderCoordinateMap(ctx, canvas) {
+    const map = getCoordinateMap();
+    if (!map) return;
+    const height = canvas.clientHeight || canvas.height;
+
+    // Fit the gutter left of the board, directly above the sensor panel that
+    // already owns the bottom-left corner.
+    const gutter = window.getGameGridLayout(canvas).gridLeft;
+    map.size = Math.max(MAP_MIN_SIZE, Math.min(MAP_MAX_SIZE, gutter - 48));
+    map.depthCm = maxCoordCm();
+
+    // Draw the SAME row boundaries rawToGrid() uses, and highlight the cell the
+    // game actually settled on. Letting the map derive its own cell from x and
+    // y made it disagree with the board near row edges, where hysteresis holds.
+    const bounds = window.getCalibrationBounds ? window.getCalibrationBounds() : null;
+    map.setColumns(bounds ? bounds.perColumn : null);
+
+    const sensor = gameState.sensor;
+    const { x, y, label } = mapCoordinateFromSensor(sensor);
+    const cell = Number.isInteger(sensor.gx) && Number.isInteger(sensor.gy)
+      ? { gx: sensor.gx, gy: sensor.gy } : null;
+    map.update(x, y, label, cell);
+
+    const sensorPanelTop = height - SENSOR_PANEL_H - 12;
+    map.render(ctx, 12, sensorPanelTop - MAP_GAP - map.height);
+  }
+
   function renderInputReadout(ctx, canvas) {
     const height = canvas.clientHeight || canvas.height;
 
     if (gameState.inputMode === "sensor") {
       renderSensorPanel(ctx, canvas);
+      renderCoordinateMap(ctx, canvas);
       return;
     }
 

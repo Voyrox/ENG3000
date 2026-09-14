@@ -1,5 +1,10 @@
 .pio
 .vscode/
 .DS_Store
-.pyc
+__pycache__/
+*.pyc
 /logs
+
+# KiCad lock files and automatic backups
+*.lck
+*-backups/
