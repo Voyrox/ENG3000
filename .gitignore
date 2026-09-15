@@ -8,3 +8,5 @@ __pycache__/
 # KiCad lock files and automatic backups
 *.lck
 *-backups/
+
+platformio.ini
