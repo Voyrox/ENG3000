@@ -75,6 +75,10 @@ the rule owner, until steps 2 (browser side) and 5-6 below are done.
 `Website/serverFilter.py` is the adapter between node messages and the
 pipeline.
 
+`Website/tracking.py` is a per-sensor constant-velocity Kalman tracker for
+path prediction (#18), tested in `Website/tests/test_tracking.py`; it is
+**not wired** into the server or the browser yet.
+
 The chain runs **once per new reading**. When one node reports, only its
 channel gets a new sample; the other channels are marked not fresh and are
 not fed their last reading again, which would fill their median windows with
