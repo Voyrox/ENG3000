@@ -34,6 +34,7 @@
 //   window.isCornerCalibrationComplete()
 //   window.getCornerCalibration()
 //   window.getCalibrationBounds()          - { nearCm, farCm, alertCm, maxCm, perColumn }
+//   window.getCapturedCalibration()        - [{ near, far }] x3 as captured, or null
 //   window.rawToGrid(column, distanceCm, previous) -> { gx, gy, inside, calibrated }
 
 (function () {
@@ -135,10 +136,14 @@
   // Derives the usable calibration. Each column keeps its own near/far; the
   // alert and out-of-bounds limits come from the extremes across all three, so
   // no column gets clipped by another column's geometry.
-  function getBounds() {
-    if (!isComplete()) return defaultBounds();
+  // The six captured points as { near, far } per column, exactly as measured,
+  // or null until all six are in. Unlike getBounds() there is no fallback to
+  // defaults here: this is what gets sent to the server, whose PlayArea
+  // applies the same shallow-column fallback itself.
+  function capturedPerColumn() {
+    if (!isComplete()) return null;
 
-    const perColumn = [0, 1, 2].map((column) => {
+    return [0, 1, 2].map((column) => {
       const near = POINTS.find((p) => p.column === column && p.edge === "near");
       const far = POINTS.find((p) => p.column === column && p.edge === "far");
       return {
@@ -146,6 +151,13 @@
         far: state.points[far.key].distanceCm,
       };
     });
+  }
+
+  window.getCapturedCalibration = capturedPerColumn;
+
+  function getBounds() {
+    const perColumn = capturedPerColumn();
+    if (!perColumn) return defaultBounds();
 
     const shallow = perColumn.some((col) => !(col.far - col.near >= MIN_PLAY_DEPTH_CM));
     if (shallow) return defaultBounds({ bad: true });

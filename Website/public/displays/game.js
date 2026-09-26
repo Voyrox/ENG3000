@@ -18,6 +18,8 @@
 //   window.getGameOverButtonAtPoint(canvas,x,y) - hit-test Restart / Return to Start
 //   window.renderGame(ctx, canvas)              - draw the current frame
 //   window.getGameState()                       - read-only peek at state (score/level/etc)
+//   window.setServerFilteringActive(active)     - the server has SERVER_FILTERING on
+//   window.setServerCoordinate(coordinate)      - latest filtered coordinate from the server
 //
 // Two input modes share all of the game logic. Only the cursor source differs:
 //   "mouse"  - canvas.js feeds raw canvas pixels straight from mousemove.
@@ -26,6 +28,9 @@
 //              rawToGrid() (callibrate_corners.js) turns that into 0-2 grid
 //              coordinates with (0,0) at BOTTOM-LEFT, and gridToCanvasPoint()
 //              places the cursor. Entered once all three nodes are configured.
+//              When the server runs filterRules.py (SERVER_FILTERING on), its
+//              coordinate replaces readSensorCoordinate() for the cursor and
+//              alert; with the flag off (the default) nothing here changes.
 
 (function () {
   const GAME_DURATION_MS = 60000; // overall round length shown as the countdown
@@ -393,7 +398,11 @@
   // [left, centre, right] in calibration slot order.
   window.updateGame = function updateGame(now, canvas, orderedNodes) {
     if (gameState.inputMode === "sensor" && canvas) {
-      updateSensorCursor(canvas, orderedNodes);
+      if (serverCoordinateActive) {
+        applyServerCoordinate(canvas, orderedNodes);
+      } else {
+        updateSensorCursor(canvas, orderedNodes);
+      }
     }
 
     if (gameState.status !== "playing") return;
@@ -941,6 +950,90 @@
     gameState.cursor = { x: null, y: null, inBounds: false };
   }
 
+  // --- Server-side coordinate (SERVER_FILTERING) -----------------------------
+  // With the server's flag on, filterRules.py runs the whole chain once per
+  // reading on the server and canvas.js hands each result over here. It takes
+  // the place of updateSensorCursor() - conditioning, column, row, vote and
+  // hold all happen on the server. With the flag off serverCoordinateActive
+  // stays false and none of this runs. The JS copy above is still the rule
+  // owner and is only deleted once the team drops the flag (README step 6).
+
+  let serverCoordinateActive = false;
+  let serverCoordinate = null;
+
+  window.setServerFilteringActive = function setServerFilteringActive(active) {
+    const next = Boolean(active);
+    if (next === serverCoordinateActive) return;
+    serverCoordinateActive = next;
+    serverCoordinate = null;
+    // Switching source mid-round must not carry the other path's state over.
+    gameState.sensor = emptySensorState();
+    resetSensorFilters();
+  };
+
+  // null means "no coordinate" (not assigned yet, or the socket dropped).
+  window.setServerCoordinate = function setServerCoordinate(coordinate) {
+    serverCoordinate = coordinate && typeof coordinate === "object" ? coordinate : null;
+  };
+
+  function listOrEmpty(values) {
+    return Array.isArray(values) ? values : [null, null, null];
+  }
+
+  function numberOrNull(value) {
+    return Number.isFinite(value) ? value : null;
+  }
+
+  // Server result (FilteredCoordinate.to_dict()) -> gameState.sensor, in the
+  // same shape updateSensorCursor() produces, so the HUD, alert and logging
+  // work unchanged.
+  function applyServerCoordinate(canvas, orderedNodes) {
+    // The server only recomputes when a reading arrives, so once every
+    // assigned sensor is offline its last coordinate would sit on screen
+    // forever. Treat that as no signal, which also pauses the round.
+    const list = Array.isArray(orderedNodes) ? orderedNodes : [];
+    const anyOnline = list.some((node) => node && node.online);
+    const c = anyOnline ? serverCoordinate : null;
+
+    if (!c) {
+      gameState.sensor = emptySensorState();
+      gameState.cursor = { x: null, y: null, inBounds: false };
+      return;
+    }
+
+    const hasCell = c.status === "ok" && Number.isInteger(c.gx) && Number.isInteger(c.gy);
+    const filtered = listOrEmpty(c.filtered);
+    gameState.sensor = {
+      // "ok" without a cell would let the round run with no cursor.
+      status: c.status === "ok" && !hasCell ? "no-signal" : c.status,
+      column: Number.isInteger(c.column) ? c.column : null,
+      // y is the distance the fix used; for too-close it is the nearest RAW
+      // reading, which the alert screen shows.
+      distanceCm: numberOrNull(c.y),
+      xCm: numberOrNull(c.x),
+      yCm: numberOrNull(c.y),
+      raw: listOrEmpty(c.raw),
+      filtered,
+      configured: filtered.filter((d) => d !== null && d !== undefined).length,
+      gx: hasCell ? c.gx : null,
+      gy: hasCell ? c.gy : null,
+      rawGx: Number.isInteger(c.rawGx) ? c.rawGx : null,
+      rawGy: Number.isInteger(c.rawGy) ? c.rawGy : null,
+      calibrated: Boolean(c.calibrated),
+      held: Boolean(c.held),
+      heldFor: Number.isInteger(c.heldFor) ? c.heldFor : 0,
+    };
+
+    if (!hasCell) {
+      gameState.cursor = { x: null, y: null, inBounds: false };
+      return;
+    }
+
+    const point = window.gridToCanvasPoint(canvas, c.gx, c.gy);
+    gameState.cursor = { x: point.x, y: point.y, inBounds: true };
+    window.handleGameHover(canvas, point.x, point.y);
+  }
+
   // Everything the sensor pipeline currently knows. Callable from the browser
   // console as getSensorDebug() while a round is running.
   window.getSensorDebug = function getSensorDebug() {
@@ -953,7 +1046,7 @@
       column: sensor.column,
       distanceCm: sensor.distanceCm,
       grid: sensor.gx === null ? null : { gx: sensor.gx, gy: sensor.gy },
-      badReadings: badReadingStreak,
+      badReadings: serverCoordinateActive ? sensor.heldFor || 0 : badReadingStreak,
       rejected: sensorFilters.map((filter) => filter.rejectCount),
       holdBudget: tuning.holdReadings,
       tuning: { ...tuning },
@@ -1350,6 +1443,15 @@
     return { ...point, label };
   }
 
+  // The server's coordinate already is a plain (x, y) in cm, and while held it
+  // carries the last good position, so it passes straight through.
+  function mapCoordinateFromServer(sensor) {
+    const label = sensor.held ? "held"
+      : sensor.status === "ok" ? null
+      : String(sensor.status).replace(/-/g, " ");
+    return { x: sensor.xCm, y: sensor.yCm, label };
+  }
+
   function renderCoordinateMap(ctx, canvas) {
     const map = getCoordinateMap();
     if (!map) return;
@@ -1368,7 +1470,9 @@
     map.setColumns(bounds ? bounds.perColumn : null);
 
     const sensor = gameState.sensor;
-    const { x, y, label } = mapCoordinateFromSensor(sensor);
+    const { x, y, label } = serverCoordinateActive
+      ? mapCoordinateFromServer(sensor)
+      : mapCoordinateFromSensor(sensor);
     const cell = Number.isInteger(sensor.gx) && Number.isInteger(sensor.gy)
       ? { gx: sensor.gx, gy: sensor.gy } : null;
     map.update(x, y, label, cell);

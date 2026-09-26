@@ -363,7 +363,60 @@ function stopGameLoop() {
 
 // Single entry point into a round, from either Skip (mouse) or the corner
 // calibration screen (sensor).
+// --- Server-side filtering (SERVER_FILTERING on the server) -----------------
+// The server reports its flag through nodes:update: with the flag on the
+// message carries a "coordinate" field (null until it has one); with it off
+// the field is absent. Off is the default, and then nothing in this section
+// sends or changes anything - game.js filters in the browser exactly as before.
+let serverFiltering = false;
+// What the server was last sent, so an unchanged setup is not resent: a
+// sensors:assign resets the server's filters. Cleared on every (re)connect,
+// since a restarted server has forgotten both.
+let sentAssignmentKey = null;
+let sentCalibrationKey = null;
+
+function sendToServer(message) {
+  if (!socket || socket.readyState !== WebSocket.OPEN) return false;
+  socket.send(JSON.stringify(message));
+  return true;
+}
+
+function applyServerFilteringFlag(payload) {
+  const reported = Object.prototype.hasOwnProperty.call(payload, "coordinate");
+  if (reported !== serverFiltering) {
+    serverFiltering = reported;
+    window.setServerFilteringActive(serverFiltering);
+    console.info(`[server] filtering ${serverFiltering ? "ON - using the server coordinate" : "OFF - filtering in the browser"}`);
+  }
+  if (serverFiltering) window.setServerCoordinate(payload.coordinate);
+}
+
+// The server cannot work out either of these itself: node IDs follow TCP
+// connection order, and the play area is captured on the corners screen.
+// Each is sent once complete, and again if it changes. Start Game needs both,
+// so the server always has them before a sensor round.
+function syncServerFilterSetup() {
+  if (!serverFiltering) return;
+
+  if (window.isSensorAssignmentComplete()) {
+    const slots = window.getSensorAssignment();
+    const key = JSON.stringify(slots);
+    if (key !== sentAssignmentKey && sendToServer({ type: "sensors:assign", slots })) {
+      sentAssignmentKey = key;
+    }
+  }
+
+  const perColumn = window.getCapturedCalibration();
+  if (perColumn) {
+    const key = JSON.stringify(perColumn);
+    if (key !== sentCalibrationKey && sendToServer({ type: "calibration:update", perColumn })) {
+      sentCalibrationKey = key;
+    }
+  }
+}
+
 function startGameWithMode(mode) {
+  syncServerFilterSetup();
   stopGameLoop();
   stopAlertNoise();
   window.setGameInputMode(mode);
@@ -378,6 +431,8 @@ function connectSocket() {
 
   socket.addEventListener("open", () => {
     console.log("WebSocket connected");
+    sentAssignmentKey = null;
+    sentCalibrationKey = null;
   });
 
   socket.addEventListener("message", (event) => {
@@ -398,11 +453,13 @@ function connectSocket() {
       // Tells the sensor pipeline a genuinely new reading has landed, so its
       // bad-reading budget counts readings rather than render frames.
       window.markSensorFrame();
+      applyServerFilteringFlag(payload);
 
       if (screen === "calibrate") {
         window.updateSensorAssignment(getSortedNodes());
       }
       updateCalibrateSlots(payload.nodes);
+      syncServerFilterSetup();
       maybeAutoContinueCalibration();
       logNodes();
       draw();
@@ -413,6 +470,9 @@ function connectSocket() {
 
   socket.addEventListener("close", () => {
     console.error("WebSocket closed. Reconnecting...");
+    // No server, no coordinate: the round pauses on "no signal" rather than
+    // playing on a frozen one.
+    if (serverFiltering) window.setServerCoordinate(null);
     if (reconnectTimer === null) {
       reconnectTimer = window.setTimeout(() => {
         reconnectTimer = null;

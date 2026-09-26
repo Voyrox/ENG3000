@@ -8,6 +8,7 @@ Tests for server-side filtering behind the SERVER_FILTERING flag.
     python -m unittest discover -s Website/tests
 """
 
+import asyncio
 import importlib
 import json
 import os
@@ -223,6 +224,162 @@ class AppWiring(unittest.TestCase):
         self.assertTrue(app.server_filter.pipeline.area.is_calibrated)
         app.apply_filter_event({"type": "sensors:assign", "slots": [1]})   # ignored
         self.assertEqual(app.server_filter.sensor_slots, [CENTRE, LEFT, RIGHT])
+
+
+class FakeBrowser:
+    """Stands in for a browser WebSocket: yields the given messages, records
+    what the server sends back."""
+
+    def __init__(self, messages):
+        self._messages = [json.dumps(m) if isinstance(m, dict) else m for m in messages]
+        self.sent = []
+
+    async def send(self, message):
+        self.sent.append(json.loads(message))
+
+    def __aiter__(self):
+        return self._iterate()
+
+    async def _iterate(self):
+        for message in self._messages:
+            yield message
+
+
+# Shapes exactly as canvas.js sends them (syncServerFilterSetup).
+ASSIGN = {"type": "sensors:assign", "slots": [LEFT, CENTRE, RIGHT]}
+# Near edge 60 cm, far edge 150 cm: 30 cm rows. 85 cm is row 0 here but row 1
+# of the default 20-140 cm area, so a test can tell whether it was applied.
+CALIBRATED_NEAR_CM, CALIBRATED_FAR_CM = 60.0, 150.0
+CALIBRATE = {"type": "calibration:update", "perColumn": [
+    {"near": CALIBRATED_NEAR_CM, "far": CALIBRATED_FAR_CM}] * 3}
+PROBE_CM = 85.0
+TOO_CLOSE_MARGIN_CM = 5.0     # how far inside the alert threshold the too-close probe sits
+
+
+@unittest.skipIf(app is None, "server requirements (Flask, websockets, numpy) not installed")
+class BrowserMessages(unittest.TestCase):
+    """The server half of the messages the browser now sends and reads."""
+
+    def setUp(self):
+        self._saved = (app.server_filter, dict(app.nodes))
+        app.nodes.clear()
+        for node_id in (LEFT, CENTRE, RIGHT):
+            record = app.new_node(("10.0.0.1", 1000 + node_id))
+            record["id"] = node_id
+            app.nodes[node_id] = record
+
+    def tearDown(self):
+        app.server_filter, saved_nodes = self._saved
+        app.nodes.clear()
+        app.nodes.update(saved_nodes)
+
+    def run_browser(self, *messages):
+        browser = FakeBrowser(messages)
+        asyncio.run(app.browser_handler(browser))
+        return browser
+
+    def send(self, node_id, distance_cm):
+        app.update_node(node_id, json.dumps({"distance": distance_cm}))
+
+    # --- the flag, as the browser detects it -------------------------------
+
+    def test_flag_off_first_message_has_no_coordinate_key(self):
+        app.server_filter = None
+        browser = self.run_browser()
+        self.assertEqual(browser.sent[0]["type"], "nodes:update")
+        self.assertNotIn("coordinate", browser.sent[0])
+
+    def test_flag_on_first_message_has_coordinate_key_before_setup(self):
+        # canvas.js keys on the key being present, so it must be there (as
+        # null) before any assignment or reading.
+        app.server_filter = ServerFilterStage()
+        browser = self.run_browser()
+        self.assertIn("coordinate", browser.sent[0])
+        self.assertIsNone(browser.sent[0]["coordinate"])
+
+    def test_flag_off_ignores_setup_messages(self):
+        app.server_filter = None
+        browser = self.run_browser(ASSIGN, CALIBRATE)   # must not raise
+        self.assertEqual(len(browser.sent), 1)
+        self.assertIsNone(app.server_filter)
+
+    # --- sensors:assign and calibration:update over the socket -------------
+
+    def test_setup_messages_over_socket(self):
+        app.server_filter = ServerFilterStage()
+        self.run_browser(ASSIGN, CALIBRATE)
+        self.assertEqual(app.server_filter.sensor_slots, [LEFT, CENTRE, RIGHT])
+        area = app.server_filter.pipeline.area
+        self.assertTrue(area.is_calibrated)
+        self.assertEqual(area.per_column, ((CALIBRATED_NEAR_CM, CALIBRATED_FAR_CM),) * 3)
+
+    def test_non_json_and_unknown_messages_are_ignored(self):
+        app.server_filter = ServerFilterStage()
+        self.run_browser("not json", {"type": "something:else"}, ASSIGN)
+        self.assertEqual(app.server_filter.sensor_slots, [LEFT, CENTRE, RIGHT])
+
+    def test_bad_calibration_leaves_area_unchanged(self):
+        app.server_filter = ServerFilterStage()
+        self.run_browser(CALIBRATE,
+                         {"type": "calibration:update", "perColumn": [{"near": 1.0}] * 3},
+                         {"type": "calibration:update", "perColumn": [{"near": 1.0, "far": 99.0}]},
+                         {"type": "calibration:update", "perColumn": None})
+        self.assertEqual(app.server_filter.pipeline.area.per_column,
+                         ((CALIBRATED_NEAR_CM, CALIBRATED_FAR_CM),) * 3)
+
+    def test_shallow_calibration_falls_back_like_the_browser(self):
+        # The browser sends the points as captured; a column shallower than
+        # the minimum depth falls back to defaults, as getBounds() does.
+        app.server_filter = ServerFilterStage()
+        self.run_browser({"type": "calibration:update", "perColumn": [
+            {"near": 60.0, "far": 150.0}, {"near": 60.0, "far": 65.0},
+            {"near": 60.0, "far": 150.0}]})
+        self.assertFalse(app.server_filter.pipeline.area.is_calibrated)
+
+    def test_calibration_changes_the_row(self):
+        for message, expected_gy, calibrated in ((None, 1, False), (CALIBRATE, 0, True)):
+            app.server_filter = ServerFilterStage()
+            self.run_browser(*(m for m in (ASSIGN, message) if m is not None))
+            self.send(LEFT, PROBE_CM)
+            coordinate = app.nodes_message()["coordinate"]
+            self.assertEqual(coordinate["status"], STATUS_OK)
+            self.assertEqual((coordinate["gx"], coordinate["gy"]), (0, expected_gy))
+            self.assertIs(coordinate["calibrated"], calibrated)
+
+    def test_reassign_resets_the_filters(self):
+        # Why canvas.js does not resend an unchanged assignment.
+        app.server_filter = ServerFilterStage()
+        self.run_browser(ASSIGN)
+        self.send(LEFT, PROBE_CM)
+        self.assertIsNotNone(app.nodes_message()["coordinate"])
+        self.run_browser(ASSIGN)
+        self.assertIsNone(app.nodes_message()["coordinate"])
+        self.assertEqual(samples_in(app.server_filter.pipeline, 0), 0)
+
+    def test_coordinate_has_every_field_game_js_reads(self):
+        app.server_filter = ServerFilterStage()
+        self.run_browser(ASSIGN, CALIBRATE)
+        self.send(LEFT, PROBE_CM)
+        coordinate = app.nodes_message()["coordinate"]
+        for key in ("status", "x", "y", "gx", "gy", "rawGx", "rawGy", "column",
+                    "held", "heldFor", "calibrated", "raw", "filtered"):
+            self.assertIn(key, coordinate)
+        # y is the distance used, x the column centre; lists are L, C, R.
+        self.assertEqual(coordinate["y"], PROBE_CM)
+        self.assertEqual(coordinate["x"], app.server_filter.pipeline.area.column_centre_cm(0))
+        self.assertEqual(coordinate["raw"], [PROBE_CM, None, None])
+
+    def test_too_close_reports_raw_distance_in_y(self):
+        # The browser shows y on the alert screen for too-close.
+        app.server_filter = ServerFilterStage()
+        self.run_browser(ASSIGN, CALIBRATE)
+        threshold_cm = app.server_filter.pipeline.area.alert_threshold_cm
+        close_cm = threshold_cm - TOO_CLOSE_MARGIN_CM
+        self.send(LEFT, close_cm)
+        self.send(CENTRE, PROBE_CM)
+        coordinate = app.nodes_message()["coordinate"]
+        self.assertEqual(coordinate["status"], "too-close")
+        self.assertEqual(coordinate["y"], close_cm)
 
 
 if __name__ == "__main__":

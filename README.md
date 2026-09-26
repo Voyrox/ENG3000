@@ -52,13 +52,21 @@ message gains one field; the existing fields do not change. `coordinate` is
 
 `canvas.js` connects to `ws://<host>:8765/browser` and renders live node data on an HTML canvas. It can also send `menu:select` messages back to the server for UI interactions.
 
-With server-side filtering on, the server also accepts (nothing sends these
-yet; see step 2 below):
+With server-side filtering on, the server also accepts:
 
 ```json
 {"type": "sensors:assign",     "slots": [2, 1, 3]}
 {"type": "calibration:update", "perColumn": [{"near": 28.5, "far": 140.7}, ...]}
 ```
+
+The browser sends these only when the server reports the flag on, which it
+does by including the `coordinate` field in `nodes:update`. With the flag off
+the field is absent and the browser sends nothing new. `canvas.js` sends
+`sensors:assign` once the hand-wave assignment is complete, and
+`calibration:update` once all six corners are captured. Each is sent again
+only if it changes or the socket reconnects, because `sensors:assign` resets
+the server's filters. `perColumn` is sent as captured; the server applies the
+same shallow-column fallback as `getBounds()`.
 
 ## Filtering pipeline (`Website/filterRules.py`)
 
@@ -69,9 +77,11 @@ standalone Python pipeline, so the filtered coordinate can be computed once on
 the server instead of in every browser tab.
 
 **It is wired into `app.py` behind a flag, off by default.** Start the server
-with `SERVER_FILTERING=1` to run it; without the flag the server behaves
-exactly as before. Either way the game still filters in `game.js`, which stays
-the rule owner, until steps 2 (browser side) and 5-6 below are done.
+with `SERVER_FILTERING=1` to run it; without the flag the server and the
+browser behave exactly as before and the game filters in `game.js`. With the
+flag on, the game's cursor and too-close alert come from the server's
+`coordinate` instead. `game.js` still holds the JS copy of the rules and stays
+the rule owner until step 6 below.
 `Website/serverFilter.py` is the adapter between node messages and the
 pipeline.
 
@@ -122,8 +132,9 @@ node Website/tests/generate_parity_trace.js
 
 ### Integrating into `app.py`
 
-Steps 1, 3, 4 and the server half of 2 are done (behind the flag); they are
-kept here as the record of the design.
+Steps 1-5 are done, behind the flag; they are kept here as the record of the
+design. Step 6 waits until the team drops the flag, since the flag-off path
+still needs the JS copy.
 
 **1. Create one pipeline** at module level, next to the other shared state:
 
@@ -175,7 +186,11 @@ json.dumps({"type": "coordinate:update", "coordinate": result.to_dict()})
 
 **5. Switch the browser over.** In `canvas.js`, on `coordinate:update`, hand
 the result to the game through one exported function, e.g.
-`window.setServerCoordinate(message.coordinate)`. In `game.js`, that function
+`window.setServerCoordinate(message.coordinate)`. (As built, the coordinate
+rides on `nodes:update`, and `window.setServerFilteringActive()` switches
+`game.js` between its own filters and the server's result. With the flag on,
+the cursor is also cleared once every assigned node is offline or the socket
+closes, because the server only recomputes on a new reading.) In `game.js`, that function
 replaces what `updateSensorCursor()` computes today:
 
 - store it as `gameState.sensor`, and drive the cursor from its `gx` / `gy`;
