@@ -7,8 +7,9 @@ callibrate_corners.js and the alert threshold from alert.js) into Python, so
 the filtered coordinate can be computed once on the server and sent to every
 client, instead of being recomputed in each browser tab.
 
-NOT YET WIRED INTO app.py. See "Filtering pipeline" in the root README for the
-integration steps.
+Wired into app.py behind the SERVER_FILTERING flag (off by default) through
+serverFilter.py. game.js still filters in the browser and remains the rule
+owner until the switch-over; see "Filtering pipeline" in the root README.
 
 Pipeline, in order:
 
@@ -659,9 +660,18 @@ class CoordinatePipeline:
     def rejected(self) -> list:
         return [channel.reject_count for channel in self._channels]
 
-    def update(self, sample, now_ms: float) -> FilteredCoordinate:
+    def update(self, sample, now_ms: float,
+               fresh: Optional[Sequence[bool]] = None) -> FilteredCoordinate:
+        """fresh marks which channels carry a NEW reading. A channel marked
+        False is not fed again: its filter keeps its current value, so a
+        repeated reading never fills the median window. None means all fresh,
+        which is what the parity tests and a single-source rig use. The
+        proximity guard still sees every channel's raw value."""
         raw = self.geometry.channels(sample)
-        filtered = [ch.update(v, now_ms) for ch, v in zip(self._channels, raw)]
+        if fresh is None:
+            fresh = [True] * len(raw)
+        filtered = [ch.update(v, now_ms) if is_fresh else ch.value
+                    for ch, v, is_fresh in zip(self._channels, raw, fresh)]
 
         # Safety first, on raw values, before anything is smoothed.
         nearest = self.geometry.nearest_raw_cm(raw)

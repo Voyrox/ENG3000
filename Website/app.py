@@ -1,12 +1,15 @@
 import asyncio
 from collections import deque
 import json
+import os
 import socket
 import threading
 import time
 from flask import Flask, jsonify, render_template
 from websockets.asyncio.server import broadcast, serve
 import numpy as np
+
+from serverFilter import ServerFilterStage, server_filtering_enabled
 
 
 def fft_filter_ultrasonic(readings, sample_rate_hz, cutoff_hz):
@@ -49,6 +52,11 @@ FFT_MIN_SAMPLES = 16
 DISTANCE_SAMPLE_RATE_HZ = 20.0
 DISTANCE_CUTOFF_HZ = 2.0
 TURN_INTERVAL_SECONDS = 1.0
+MS_PER_SECOND = 1000.0
+# Server-side filtering (filterRules.py) runs only when the SERVER_FILTERING
+# environment variable is set to 1/true/yes/on. Off by default: the browser
+# keeps filtering in game.js and the messages are exactly as before.
+SERVER_FILTERING = server_filtering_enabled(os.environ)
 
 state_lock = threading.Lock()
 next_node_id = 1
@@ -56,6 +64,8 @@ nodes = {}
 sync_tick = 0
 BROWSER_CONNECTIONS = set()
 WS_LOOP = None
+# Guarded by state_lock. None when the flag is off.
+server_filter = ServerFilterStage() if SERVER_FILTERING else None
 
 
 def alloc_node_id():
@@ -104,8 +114,20 @@ def snapshot_nodes():
         return [serialize_node(node) for node in nodes.values()]
 
 
+def nodes_message():
+    """The nodes:update payload. With server filtering on it gains a
+    "coordinate" field; the existing fields never change."""
+    with state_lock:
+        message = {"type": "nodes:update",
+                   "nodes": [serialize_node(node) for node in nodes.values()]}
+        if server_filter is not None:
+            latest = server_filter.latest
+            message["coordinate"] = latest.to_dict() if latest is not None else None
+    return message
+
+
 async def broadcast_nodes():
-    message = json.dumps({"type": "nodes:update", "nodes": snapshot_nodes()})
+    message = json.dumps(nodes_message())
     if BROWSER_CONNECTIONS:
         broadcast(BROWSER_CONNECTIONS.copy(), message)
 
@@ -178,7 +200,8 @@ def update_rate(node, now):
     node["rps"] = float(len(samples)) / float(RPS_WINDOW_SECONDS)
 
 
-def update_distance(node, payload):
+def parse_distance_cm(payload):
+    """The raw distance in a node message, as sent: negative means no echo."""
     distance = payload.get("distance")
     if distance is None:
         distance = payload.get("avg")
@@ -187,6 +210,11 @@ def update_distance(node, payload):
             distance = float(distance)
         except (TypeError, ValueError):
             distance = None
+    return distance
+
+
+def update_distance(node, payload):
+    distance = parse_distance_cm(payload)
     if distance is None:
         return
 
@@ -220,6 +248,12 @@ def update_node(node_id, message):
         node["last_seen"] = now
         update_rate(node, now)
         update_distance(node, payload)
+        if server_filter is not None:
+            # RAW distance, never node["filtered_distance"]: the chain does its
+            # own filtering and the proximity guard needs unsmoothed readings.
+            raw_cm = parse_distance_cm(payload)
+            if raw_cm is not None:
+                server_filter.on_reading(node_id, raw_cm, now * MS_PER_SECOND)
     schedule_broadcast_nodes()
 
 
@@ -234,6 +268,8 @@ def mark_node_offline(node_id):
         node["synced"] = False
         node["has_turn"] = False
         node["conn"] = None
+        if server_filter is not None:
+            server_filter.on_missing(node_id)
     schedule_broadcast_nodes()
 
 
@@ -287,6 +323,8 @@ def cleanup_stale_nodes():
                     node["online"] = False
                     node["rps"] = 0.0
                     node["samples"].clear()
+                    if server_filter is not None:
+                        server_filter.on_missing(node_id)
                     stale_ids.append(node_id)
 
         for node_id in stale_ids:
@@ -413,10 +451,24 @@ def tcp_server():
         thread.start()
 
 
+def apply_filter_event(event):
+    """Sensor order and calibration for server-side filtering. Both are only
+    known in the browser (calibrate.js, callibrate_corners.js)."""
+    try:
+        with state_lock:
+            if event.get("type") == "sensors:assign":
+                server_filter.assign_slots(event["slots"])
+            elif event.get("type") == "calibration:update":
+                server_filter.set_calibration(
+                    [(c["near"], c["far"]) for c in event["perColumn"]])
+    except (KeyError, TypeError, ValueError) as exc:
+        print(f"Ignored bad {event.get('type')} message: {exc}")
+
+
 async def browser_handler(websocket):
     BROWSER_CONNECTIONS.add(websocket)
     try:
-        await websocket.send(json.dumps({"type": "nodes:update", "nodes": snapshot_nodes()}))
+        await websocket.send(json.dumps(nodes_message()))
         async for message in websocket:
             try:
                 event = json.loads(message)
@@ -428,6 +480,8 @@ async def browser_handler(websocket):
                 print(f"Menu selection received: {option}")
                 status = json.dumps({"type": "menu:status", "message": f"Selected: {option}"})
                 broadcast(BROWSER_CONNECTIONS.copy(), status)
+            elif server_filter is not None:
+                apply_filter_event(event)
     finally:
         BROWSER_CONNECTIONS.discard(websocket)
 

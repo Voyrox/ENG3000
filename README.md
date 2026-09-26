@@ -40,9 +40,25 @@ When the TCP broker receives a sensor reading, it updates the node's state and b
 
 Nodes that haven't reported in 5 seconds are marked stale and removed.
 
+With server-side filtering on (`SERVER_FILTERING=1`, see below), the same
+message gains one field; the existing fields do not change. `coordinate` is
+`null` until the sensors are assigned and a reading arrives:
+
+```json
+{"type":"nodes:update","nodes":[...],"coordinate":{"status":"ok","x":25.0,"y":60.0,"gx":0,"gy":1,"rawGx":0,"rawGy":1,"column":0,"held":false,"heldFor":0,"calibrated":false,"raw":[60.0,null,null],"filtered":[60.0,null,null]}}
+```
+
 ### Browser → Server (WebSocket)
 
 `canvas.js` connects to `ws://<host>:8765/browser` and renders live node data on an HTML canvas. It can also send `menu:select` messages back to the server for UI interactions.
+
+With server-side filtering on, the server also accepts (nothing sends these
+yet; see step 2 below):
+
+```json
+{"type": "sensors:assign",     "slots": [2, 1, 3]}
+{"type": "calibration:update", "perColumn": [{"near": 28.5, "far": 140.7}, ...]}
+```
 
 ## Filtering pipeline (`Website/filterRules.py`)
 
@@ -52,8 +68,18 @@ and hold-and-recovery - are ported from `public/displays/game.js` into a
 standalone Python pipeline, so the filtered coordinate can be computed once on
 the server instead of in every browser tab.
 
-**It is not wired into `app.py` yet.** The game still filters in `game.js`
-until the steps below are done.
+**It is wired into `app.py` behind a flag, off by default.** Start the server
+with `SERVER_FILTERING=1` to run it; without the flag the server behaves
+exactly as before. Either way the game still filters in `game.js`, which stays
+the rule owner, until steps 2 (browser side) and 5-6 below are done.
+`Website/serverFilter.py` is the adapter between node messages and the
+pipeline.
+
+The chain runs **once per new reading**. When one node reports, only its
+channel gets a new sample; the other channels are marked not fresh and are
+not fed their last reading again, which would fill their median windows with
+repeats and add lag. The proximity guard still sees every channel's latest
+raw reading.
 
 ```text
 sample ──► Geometry ──► ProximityGuard (RAW) ──► ChannelFilter per channel
@@ -92,6 +118,9 @@ node Website/tests/generate_parity_trace.js
 
 ### Integrating into `app.py`
 
+Steps 1, 3, 4 and the server half of 2 are done (behind the flag); they are
+kept here as the record of the design.
+
 **1. Create one pipeline** at module level, next to the other shared state:
 
 ```python
@@ -126,7 +155,9 @@ result = pipeline.update(reading, time.monotonic() * 1000.0)
 ```
 
 where `raw_distance()` returns the payload's `distance`/`avg` as a float, and
-`None` for a missing node or a negative value. **Do not pass
+`None` for a missing node or a negative value. (As built, `serverFilter.py`
+also passes a `fresh` mask so only the reporting node's channel is fed; the
+snippet above alone would re-feed the other nodes' last readings.) **Do not pass
 `node["filtered_distance"]`** — that is already median- and FFT-smoothed, and
 filtering it again would add lag and could hide the spikes the proximity alert
 depends on.
