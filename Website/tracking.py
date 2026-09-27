@@ -1,10 +1,12 @@
 """
 tracking.py - per-sensor constant-velocity Kalman tracker for path prediction.
 
-NOT WIRED YET: nothing in app.py, serverFilter.py or the browser uses this
-module. It is the building block for issue #18 (path prediction); wiring it
-into the server pipeline is a later change. The median in filterRules.py
-remains the rule owner for filtering until then.
+Wired for PREDICTION ONLY (issue #18): serverFilter.py keeps one tracker per
+channel behind the SERVER_FILTERING flag and publishes the predicted distance
+alongside the coordinate. It does not replace the median: the median in
+filterRules.py remains the rule owner for filtering, and the coordinate, the
+cell vote and the proximity alert never read this module's output. Replacing
+the median would first need the NIS spike gate ported from the model.
 
 One tracker per sensor channel. State is [distance_cm, velocity_cm_s],
 updated only when that channel reports. Discrete white-noise acceleration
@@ -47,6 +49,12 @@ DEFAULT_GAP_RESET_S = 0.5
 # Initial velocity uncertainty of a new track, cm/s (walking pace ~ 1 m/s).
 DEFAULT_V0_SIGMA_CM_S = 100.0
 
+# Lead cap: predict() never extrapolates further ahead than this, s. The
+# constant-velocity guess is only good for a few readings (~79 ms apart); at
+# 1 m/s a 250 ms cap bounds the extrapolation to 25 cm, about half a row.
+# The value used by the unit's sensing model.
+DEFAULT_MAX_LEAD_S = 0.25
+
 
 class ConstantVelocityTracker:
     """Constant-velocity Kalman filter for one distance channel, in cm.
@@ -54,21 +62,26 @@ class ConstantVelocityTracker:
     update(z_cm, t_s) feeds one reading (None or negative = no echo, which
     is missing, never 0 cm) taken at t_s seconds; dt comes from the
     timestamps. predict(ahead_s) returns the extrapolated distance without
-    changing the state, or None when there is no track."""
+    changing the state, or None when there is no track; the lead is capped
+    at max_lead_s."""
 
     def __init__(self,
                  sigma_a_cm_s2: float = DEFAULT_SIGMA_A_CM_S2,  # process noise (acceleration), cm/s^2
                  sigma_r_cm: float = DEFAULT_SIGMA_R_CM,        # measurement noise SD, cm
                  gap_reset_s: float = DEFAULT_GAP_RESET_S,      # drop the track after this long without a reading, s
-                 v0_sigma_cm_s: float = DEFAULT_V0_SIGMA_CM_S):  # initial velocity SD of a new track, cm/s
+                 v0_sigma_cm_s: float = DEFAULT_V0_SIGMA_CM_S,  # initial velocity SD of a new track, cm/s
+                 max_lead_s: float = DEFAULT_MAX_LEAD_S):       # longest extrapolation predict() makes, s
         if sigma_a_cm_s2 <= 0 or sigma_r_cm <= 0:
             raise ValueError("noise levels must be positive")
         if gap_reset_s <= 0:
             raise ValueError("gap_reset_s must be positive")
+        if max_lead_s < 0:
+            raise ValueError("max_lead_s must not be negative")
         self.sigma_a_cm_s2 = sigma_a_cm_s2
         self.sigma_r_cm = sigma_r_cm
         self.gap_reset_s = gap_reset_s
         self.v0_sigma_cm_s = v0_sigma_cm_s
+        self.max_lead_s = max_lead_s
         self.reset()
 
     # ------------------------------------------------------------------
@@ -147,10 +160,52 @@ class ConstantVelocityTracker:
 
     def predict(self, ahead_s: float = 0.0) -> Optional[float]:
         """Predicted distance ahead_s seconds after the last update, without
-        changing the state. None when there is no track."""
+        changing the state. The lead is clamped to [0, max_lead_s]. None when
+        there is no track."""
         if not self.alive:
             return None
-        return self.distance_cm + self.velocity_cm_s * max(0.0, ahead_s)
+        lead_s = min(max(0.0, ahead_s), self.max_lead_s)
+        return self.distance_cm + self.velocity_cm_s * lead_s
+
+    def predict_at(self, now_s: float, lead_s: float = 0.0) -> Optional[float]:
+        """Predicted distance at now_s + lead_s (s), without changing the
+        state; the total lead from the last update is capped at max_lead_s.
+        None when there is no track, or when now_s is more than gap_reset_s
+        after the last reading (update() would drop the track then)."""
+        if not self.alive or now_s - self.t_reading_s > self.gap_reset_s:
+            return None
+        return self.predict(now_s + lead_s - self.t_s)
+
+
+class PathPredictor:
+    """One ConstantVelocityTracker per channel, indexed 0..n-1.
+
+    Plain data: channel index, distance in cm (None or negative = missing),
+    time in s. Knows nothing about node ids or messages."""
+
+    def __init__(self, channel_count: int, **tracker_kwargs):
+        if channel_count <= 0:
+            raise ValueError("channel_count must be positive")
+        self.trackers = [ConstantVelocityTracker(**tracker_kwargs)
+                         for _ in range(channel_count)]
+
+    def reset(self) -> None:
+        """Drop every track."""
+        for tracker in self.trackers:
+            tracker.reset()
+
+    def reset_channel(self, channel: int) -> None:
+        """Drop one channel's track (e.g. its sensor went offline)."""
+        self.trackers[channel].reset()
+
+    def update(self, channel: int, distance_cm: Optional[float], t_s: float) -> None:
+        """Feed one new reading to one channel's tracker."""
+        self.trackers[channel].update(distance_cm, t_s)
+
+    def predicted_cm(self, now_s: float, lead_s: float = 0.0) -> list:
+        """Each channel's predicted distance at now_s + lead_s, in cm, or
+        None for a channel with no live track (see predict_at)."""
+        return [tracker.predict_at(now_s, lead_s) for tracker in self.trackers]
 
 
 # =============================================================================

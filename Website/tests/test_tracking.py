@@ -1,5 +1,6 @@
 """
-Tests for tracking.py (constant-velocity Kalman tracker, not wired yet).
+Tests for tracking.py (constant-velocity Kalman tracker and the per-channel
+PathPredictor that serverFilter.py uses for path prediction).
 
 Standard library only:
 
@@ -15,9 +16,11 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(HERE))
 
 from tracking import (  # noqa: E402
+    DEFAULT_MAX_LEAD_S,
     DEFAULT_SIGMA_A_CM_S2,
     DEFAULT_SIGMA_R_CM,
     ConstantVelocityTracker,
+    PathPredictor,
     alpha_beta_closed_form,
 )
 
@@ -149,6 +152,68 @@ class SteadyState(unittest.TestCase):
             ConstantVelocityTracker(sigma_r_cm=0.0)
         with self.assertRaises(ValueError):
             ConstantVelocityTracker(gap_reset_s=0.0)
+
+
+class LeadCap(unittest.TestCase):
+    def test_cap_matches_the_model(self):
+        # The unit's sensing model capped display extrapolation at 250 ms.
+        self.assertEqual(DEFAULT_MAX_LEAD_S, 0.25)
+
+    def test_predict_beyond_cap_is_clamped(self):
+        tr = ConstantVelocityTracker()
+        run_ramp(tr, 30)
+        at_cap = tr.predict(DEFAULT_MAX_LEAD_S)
+        self.assertEqual(tr.predict(DEFAULT_MAX_LEAD_S * 4), at_cap)
+        self.assertEqual(tr.predict(10.0), at_cap)
+        self.assertGreater(at_cap, tr.predict(DEFAULT_MAX_LEAD_S / 2))
+
+    def test_custom_cap(self):
+        tr = ConstantVelocityTracker(max_lead_s=0.1)
+        run_ramp(tr, 30)
+        self.assertEqual(tr.predict(0.5), tr.predict(0.1))
+
+    def test_negative_cap_rejected(self):
+        with self.assertRaises(ValueError):
+            ConstantVelocityTracker(max_lead_s=-0.1)
+
+    def test_predict_at_caps_total_lead(self):
+        tr = ConstantVelocityTracker()
+        t_last = run_ramp(tr, 30)
+        # 0.2 s since the update plus 0.2 s lead is 0.4 s: capped at 0.25 s.
+        self.assertEqual(tr.predict_at(t_last + 0.2, lead_s=0.2),
+                         tr.predict(DEFAULT_MAX_LEAD_S))
+
+
+class PredictAtGap(unittest.TestCase):
+    def test_no_prediction_after_gap(self):
+        tr = ConstantVelocityTracker(gap_reset_s=0.5)
+        t_last = run_ramp(tr, 20)
+        self.assertIsNotNone(tr.predict_at(t_last + 0.4))
+        self.assertIsNone(tr.predict_at(t_last + 0.6))
+
+    def test_no_prediction_without_track(self):
+        self.assertIsNone(ConstantVelocityTracker().predict_at(1.0))
+
+
+class PathPredictorChannels(unittest.TestCase):
+    def test_channels_are_independent(self):
+        pp = PathPredictor(3)
+        pp.update(0, 60.0, 0.0)
+        pp.update(2, 120.0, 0.05)
+        self.assertEqual(pp.predicted_cm(0.05), [60.0, None, 120.0])
+        pp.reset_channel(0)
+        self.assertEqual(pp.predicted_cm(0.05), [None, None, 120.0])
+        pp.reset()
+        self.assertEqual(pp.predicted_cm(0.05), [None, None, None])
+
+    def test_tracker_settings_are_passed_through(self):
+        pp = PathPredictor(2, max_lead_s=0.1, gap_reset_s=0.3)
+        self.assertTrue(all(t.max_lead_s == 0.1 and t.gap_reset_s == 0.3
+                            for t in pp.trackers))
+
+    def test_needs_a_channel(self):
+        with self.assertRaises(ValueError):
+            PathPredictor(0)
 
 
 if __name__ == "__main__":

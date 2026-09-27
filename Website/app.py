@@ -115,14 +115,17 @@ def snapshot_nodes():
 
 
 def nodes_message():
-    """The nodes:update payload. With server filtering on it gains a
-    "coordinate" field; the existing fields never change."""
+    """The nodes:update payload. With server filtering on it gains the
+    "coordinate" and "predicted_cm" fields; the existing fields never change."""
     with state_lock:
         message = {"type": "nodes:update",
                    "nodes": [serialize_node(node) for node in nodes.values()]}
         if server_filter is not None:
             latest = server_filter.latest
             message["coordinate"] = latest.to_dict() if latest is not None else None
+            # A copy: the stage edits its list in place when a node drops out,
+            # and the message is serialised after the lock is released.
+            message["predicted_cm"] = list(server_filter.predicted_cm)
     return message
 
 

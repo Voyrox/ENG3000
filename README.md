@@ -41,12 +41,16 @@ When the TCP broker receives a sensor reading, it updates the node's state and b
 Nodes that haven't reported in 5 seconds are marked stale and removed.
 
 With server-side filtering on (`SERVER_FILTERING=1`, see below), the same
-message gains one field; the existing fields do not change. `coordinate` is
-`null` until the sensors are assigned and a reading arrives:
+message gains two fields; the existing fields do not change. `coordinate` is
+`null` until the sensors are assigned and a reading arrives. `predicted_cm`
+is each channel's predicted distance in cm (left, centre, right; see
+path prediction below), `null` for a channel with no live track:
 
 ```json
-{"type":"nodes:update","nodes":[...],"coordinate":{"status":"ok","x":25.0,"y":60.0,"gx":0,"gy":1,"rawGx":0,"rawGy":1,"column":0,"held":false,"heldFor":0,"calibrated":false,"raw":[60.0,null,null],"filtered":[60.0,null,null]}}
+{"type":"nodes:update","nodes":[...],"coordinate":{"status":"ok","x":25.0,"y":60.0,"gx":0,"gy":1,"rawGx":0,"rawGy":1,"column":0,"held":false,"heldFor":0,"calibrated":false,"raw":[60.0,null,null],"filtered":[60.0,null,null]},"predicted_cm":[60.4,null,null]}
 ```
+
+With the flag off neither field is present.
 
 ### Browser → Server (WebSocket)
 
@@ -85,9 +89,20 @@ the rule owner until step 6 below.
 `Website/serverFilter.py` is the adapter between node messages and the
 pipeline.
 
-`Website/tracking.py` is a per-sensor constant-velocity Kalman tracker for
-path prediction (#18), tested in `Website/tests/test_tracking.py`; it is
-**not wired** into the server or the browser yet.
+**Path prediction (#18).** `Website/tracking.py` is a per-sensor
+constant-velocity Kalman tracker (distance and velocity). With the flag on,
+`serverFilter.py` keeps one tracker per channel, feeds it the same fresh raw
+reading that channel's filter gets, and publishes every channel's predicted
+distance as `predicted_cm` in `nodes:update`, brought forward to the time of
+the latest reading. It is **published only**: the coordinate, the cell vote
+and the proximity alert do not read it, the median stays the rule owner, and
+the browser does not use it yet. Replacing the median with the tracker would
+first need the model's NIS spike gate ported. Tunables, all named constants
+in `tracking.py` / `serverFilter.py`: process noise 400 cm/s², measurement
+noise 0.91 cm, track dropped after 0.5 s without a reading (or when its node
+goes offline), extrapolation capped at 250 ms, extra display lead 0 s until
+the end-to-end latency is measured. Tests are in
+`Website/tests/test_tracking.py` and `Website/tests/test_serverFilter.py`.
 
 The chain runs **once per new reading**. When one node reports, only its
 channel gets a new sample; the other channels are marked not fresh and are

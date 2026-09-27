@@ -1,7 +1,8 @@
 """
 Tests for server-side filtering behind the SERVER_FILTERING flag.
 
-  * serverFilter.py on its own (standard library only).
+  * serverFilter.py on its own (standard library only), including the
+    per-channel path-prediction trackers (#18).
   * app.py with the flag off and on. These need the server's requirements
     (Flask, websockets, numpy) and are skipped if they are not installed.
 
@@ -29,6 +30,7 @@ from serverFilter import (  # noqa: E402
     ServerFilterStage,
     server_filtering_enabled,
 )
+from tracking import DEFAULT_GAP_RESET_S, DEFAULT_MAX_LEAD_S, PathPredictor  # noqa: E402
 
 try:
     import app  # noqa: E402
@@ -49,6 +51,29 @@ class RecordingPipeline(CoordinatePipeline):
     def update(self, sample, now_ms, fresh=None):
         self.calls.append((list(sample), now_ms, fresh))
         return super().update(sample, now_ms, fresh=fresh)
+
+
+class RecordingPredictor(PathPredictor):
+    """A real per-channel predictor that records every update() call."""
+
+    def __init__(self):
+        super().__init__(3)
+        self.calls = []
+
+    def update(self, channel, distance_cm, t_s):
+        self.calls.append((channel, distance_cm, t_s))
+        super().update(channel, distance_cm, t_s)
+
+
+# Walking-pace ramp for the prediction tests, cm/s.
+RAMP_SPEED_CM_S = 50.0
+RAMP_START_CM = 60.0
+# How far the tracker may miss a noiseless ramp after a few readings, cm.
+RAMP_TOLERANCE_CM = 0.5
+
+
+def ramp_cm(now_ms):
+    return RAMP_START_CM + RAMP_SPEED_CM_S * now_ms / 1000.0
 
 
 def samples_in(pipeline, channel):
@@ -127,6 +152,127 @@ class StageOncePerReading(unittest.TestCase):
             self.stage.assign_slots([LEFT, CENTRE])
 
 
+class StagePathPrediction(unittest.TestCase):
+    """The per-channel trackers behind the flag (#18)."""
+
+    def setUp(self):
+        self.pipeline = RecordingPipeline()
+        self.predictor = RecordingPredictor()
+        self.stage = ServerFilterStage(self.pipeline, self.predictor)
+        self.stage.assign_slots([LEFT, CENTRE, RIGHT])
+
+    def ramp(self, node, n, stage=None):
+        """n noiseless ramp readings from one node; returns the last time, ms."""
+        stage = stage or self.stage
+        now_ms = 0.0
+        for k in range(n):
+            now_ms = k * STEP_MS
+            stage.on_reading(node, ramp_cm(now_ms), now_ms)
+        return now_ms
+
+    def test_nothing_predicted_before_readings(self):
+        self.assertEqual(self.stage.predicted_cm, [None, None, None])
+
+    def test_each_node_feeds_its_own_channel(self):
+        self.stage.on_reading(CENTRE, 80.0, STEP_MS)
+        self.stage.on_reading(RIGHT, 120.0, 2 * STEP_MS)
+        self.stage.on_reading(LEFT, 60.0, 3 * STEP_MS)
+        self.assertEqual([c for c, _, _ in self.predictor.calls], [1, 2, 0])
+        self.assertEqual([t.alive for t in self.predictor.trackers], [True, True, True])
+
+    def test_tracker_gets_the_same_raw_reading_as_the_chain(self):
+        for i, (node, cm) in enumerate([(LEFT, 60.0), (CENTRE, -1.0), (LEFT, 3.0)]):
+            self.stage.on_reading(node, cm, (i + 1) * STEP_MS)
+        self.assertEqual(len(self.pipeline.calls), len(self.predictor.calls))
+        for (sample, now_ms, fresh), (channel, cm, t_s) in zip(self.pipeline.calls,
+                                                               self.predictor.calls):
+            self.assertTrue(fresh[channel])
+            self.assertEqual(sample[channel], cm)
+            self.assertAlmostEqual(t_s * 1000.0, now_ms, places=9)
+
+    def test_one_tracker_update_per_reading(self):
+        for i, node in enumerate([LEFT, CENTRE, RIGHT, LEFT, CENTRE]):
+            self.stage.on_reading(node, 60.0, (i + 1) * STEP_MS)
+        self.assertEqual(len(self.predictor.calls), 5)
+
+    def test_unassigned_node_feeds_no_tracker(self):
+        self.stage.on_reading(99, 50.0, STEP_MS)
+        self.assertEqual(self.predictor.calls, [])
+
+    def test_no_echo_is_not_zero(self):
+        self.stage.on_reading(LEFT, -1.0, STEP_MS)
+        self.assertIsNone(self.stage.predicted_cm[0])
+
+    def test_follows_a_ramp(self):
+        t_ms = self.ramp(LEFT, 10)
+        self.assertAlmostEqual(self.stage.predicted_cm[0], ramp_cm(t_ms),
+                               delta=RAMP_TOLERANCE_CM)
+
+    def test_stale_channel_is_extrapolated_to_now(self):
+        t_ms = self.ramp(LEFT, 10)
+        later_ms = t_ms + STEP_MS
+        self.stage.on_reading(CENTRE, 80.0, later_ms)
+        self.assertAlmostEqual(self.stage.predicted_cm[0], ramp_cm(later_ms),
+                               delta=RAMP_TOLERANCE_CM)
+        self.assertEqual(self.stage.predicted_cm[1], 80.0)
+
+    def test_lead_is_capped(self):
+        stage = ServerFilterStage(prediction_lead_s=10.0)
+        stage.assign_slots([LEFT, CENTRE, RIGHT])
+        t_ms = self.ramp(LEFT, 10, stage)
+        tracker = stage.predictor.trackers[0]
+        self.assertEqual(stage.predicted_cm[0], tracker.predict(DEFAULT_MAX_LEAD_S))
+        capped_ms = t_ms + DEFAULT_MAX_LEAD_S * 1000.0
+        self.assertAlmostEqual(stage.predicted_cm[0], ramp_cm(capped_ms),
+                               delta=RAMP_TOLERANCE_CM)
+
+    def test_gap_reset(self):
+        t_ms = self.ramp(LEFT, 10)
+        # Only the centre reports for longer than the gap: left's track is
+        # no longer extrapolated.
+        gap_ms = DEFAULT_GAP_RESET_S * 1000.0 + STEP_MS
+        self.stage.on_reading(CENTRE, 80.0, t_ms + gap_ms)
+        self.assertIsNone(self.stage.predicted_cm[0])
+        # The next left reading starts a new track at that reading.
+        self.stage.on_reading(LEFT, 150.0, t_ms + gap_ms + STEP_MS)
+        self.assertEqual(self.stage.predicted_cm[0], 150.0)
+        self.assertEqual(self.predictor.trackers[0].velocity_cm_s, 0.0)
+
+    def test_offline_node_drops_its_track(self):
+        self.ramp(LEFT, 5)
+        self.stage.on_reading(CENTRE, 80.0, 6 * STEP_MS)
+        self.stage.on_missing(LEFT)
+        self.assertIsNone(self.stage.predicted_cm[0])
+        self.assertFalse(self.predictor.trackers[0].alive)
+        self.assertEqual(self.stage.predicted_cm[1], 80.0)
+
+    def test_assign_slots_resets_trackers(self):
+        self.ramp(LEFT, 5)
+        self.stage.assign_slots([CENTRE, LEFT, RIGHT])
+        self.assertEqual(self.stage.predicted_cm, [None, None, None])
+        self.assertFalse(any(t.alive for t in self.predictor.trackers))
+
+    def test_coordinate_is_unchanged_by_the_trackers(self):
+        # The trackers only publish: the chain's result is exactly what the
+        # pipeline gives on its own, including the raw-reading too-close alert.
+        readings = [(LEFT, 60.0), (CENTRE, 90.0), (LEFT, 200.0), (LEFT, 61.0),
+                    (RIGHT, -1.0), (LEFT, 5.0), (CENTRE, 90.0), (LEFT, 62.0)]
+        reference = CoordinatePipeline(UltrasonicArrayGeometry())
+        slots = [LEFT, CENTRE, RIGHT]
+        latest = {}
+        statuses = set()
+        for i, (node, cm) in enumerate(readings):
+            now_ms = (i + 1) * STEP_MS
+            latest[node] = cm
+            sample = [latest.get(slot) for slot in slots]
+            fresh = [slot == node or sample[c] is None for c, slot in enumerate(slots)]
+            expected = reference.update(sample, now_ms, fresh=fresh)
+            got = self.stage.on_reading(node, cm, now_ms)
+            self.assertEqual(got.to_dict(), expected.to_dict())
+            statuses.add(got.status)
+        self.assertIn("too-close", statuses)
+
+
 class PipelineFreshMask(unittest.TestCase):
 
     def test_default_is_all_fresh(self):
@@ -194,8 +340,8 @@ class AppWiring(unittest.TestCase):
         self.send(RIGHT, 120.0)
         self.assertEqual(len(pipeline.calls), 3)
         message = app.nodes_message()
-        # Existing fields untouched; the coordinate is an added field.
-        self.assertEqual(list(message), ["type", "nodes", "coordinate"])
+        # Existing fields untouched; coordinate and predicted_cm are added.
+        self.assertEqual(list(message), ["type", "nodes", "coordinate", "predicted_cm"])
         self.assertEqual(message["nodes"], app.snapshot_nodes())
         self.assertEqual(message["coordinate"]["status"], STATUS_OK)
         self.assertEqual(message["coordinate"]["column"], 0)
@@ -207,6 +353,30 @@ class AppWiring(unittest.TestCase):
         self.send(LEFT, -1)                     # no echo
         self.assertEqual(pipeline.calls[-1][0][0], -1.0)
         self.assertIsNone(app.server_filter.latest.raw[0])
+
+    def test_flag_off_has_no_prediction(self):
+        app.server_filter = None
+        self.send(LEFT, 60.0)
+        self.send(LEFT, 61.0)
+        self.assertNotIn("predicted_cm", app.nodes_message())
+
+    def test_flag_on_publishes_prediction_per_channel(self):
+        app.server_filter = ServerFilterStage()
+        app.server_filter.assign_slots([LEFT, CENTRE, RIGHT])
+        self.send(LEFT, 60.0)
+        self.send(RIGHT, 120.0)
+        message = app.nodes_message()
+        self.assertEqual(message["predicted_cm"], [60.0, None, 120.0])
+        json.dumps(message)          # serialisable as sent
+
+    def test_flag_on_prediction_is_a_copy(self):
+        app.server_filter = ServerFilterStage()
+        app.server_filter.assign_slots([LEFT, CENTRE, RIGHT])
+        self.send(LEFT, 60.0)
+        message = app.nodes_message()
+        app.mark_node_offline(LEFT)
+        self.assertEqual(message["predicted_cm"], [60.0, None, None])
+        self.assertEqual(app.nodes_message()["predicted_cm"], [None, None, None])
 
     def test_message_without_distance_is_not_a_reading(self):
         pipeline = RecordingPipeline()
@@ -288,6 +458,7 @@ class BrowserMessages(unittest.TestCase):
         browser = self.run_browser()
         self.assertEqual(browser.sent[0]["type"], "nodes:update")
         self.assertNotIn("coordinate", browser.sent[0])
+        self.assertNotIn("predicted_cm", browser.sent[0])
 
     def test_flag_on_first_message_has_coordinate_key_before_setup(self):
         # canvas.js keys on the key being present, so it must be there (as
@@ -296,6 +467,7 @@ class BrowserMessages(unittest.TestCase):
         browser = self.run_browser()
         self.assertIn("coordinate", browser.sent[0])
         self.assertIsNone(browser.sent[0]["coordinate"])
+        self.assertEqual(browser.sent[0]["predicted_cm"], [None, None, None])
 
     def test_flag_off_ignores_setup_messages(self):
         app.server_filter = None
