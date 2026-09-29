@@ -157,10 +157,12 @@ reporting whatever its beam hits while it sweeps. The position methods
   - a node's reading is used once, when it is new - never again while the
     other node takes its turn;
   - a node that is sweeping (lost) is left out;
-  - its aim is used only when it is new (the servo moved, or the node has
-    just started its turn); while the servo holds still only its distance
-    goes in, so the same small aim error is not counted again and again, and
-    the two nodes' distances pin the player down;
+  - its aim counts in full only when it is new (the servo moved, or the node
+    has just started its turn); while the servo holds still each further
+    reading's aim counts less (the k-th repeat 1/(k+1)², about one and a half
+    readings' worth in all), so the same small aim error is not counted again
+    and again, and the two nodes' distances - counted in full every time -
+    pin the player down;
   - a reading far from where the track expects the player is left out
     (a 99.9 % gate), and six of those in a row restart the track there;
   - after 1.5 s with nothing usable there is no position.
@@ -182,9 +184,14 @@ noise, a player walking the board and pausing - over three seeds:
 | Method | Median error | 90th percentile | Right cell |
 |---|---|---|---|
 | Before (main) | 7.0 cm | 24.7 cm | 58 % |
-| Line of sight | 5.6 cm | 19.1 cm | 65 % |
-| Trilateration | 2.4 cm | 26.0 cm | 62 % |
-| Average | 3.4 cm | 20.0 cm | 66 % |
+| Line of sight | 6.3 cm | 16.7 cm | 65 % |
+| Trilateration | 2.3 cm | 26.2 cm | 63 % |
+| Average | 3.5 cm | 20.3 cm | 66 % |
+
+Reproduce it with `node Website/tools/simulate_positions.js` (options:
+`--turn-ms 1000,250,0` - 0 is both nodes at once - `--furniture 140,125`,
+`--seeds`, `--methods`, and `--site` to score another copy of `public/`; the
+"Before" row is main at 247006b scored that way).
 
 Trilateration is the most exact while the player stands still and the worst
 while they move (a distance a turn old is still right for a still player).
@@ -199,9 +206,11 @@ was a turn ago.
 
 ### Channel smoothing: median → Kalman → FFT
 
-Every sensor channel, in the game (`conditionSensor()` in `game.js`), in its
-Python copy (`ChannelFilter`) and in each node's `filtered_distance` in
-`app.py`, runs:
+Every sensor channel, in the game (`conditionSensor()` in `game.js`) and in
+its Python copy (`ChannelFilter`), runs the five steps below. Each node's
+`filtered_distance` in `app.py` runs steps 2-4 only - median, Kalman, FFT, no
+gate and no hold - and is published in `nodes:update` and `/api/nodes`;
+nothing in the game reads it.
 
 1. **Slew gate** - a jump no person could make is dropped (unchanged).
 2. **Median** of the last 5 readings - kills single-reading spikes.
@@ -209,8 +218,11 @@ Python copy (`ChannelFilter`) and in each node's `filtered_distance` in
    game has a line-for-line port, `kalmanUpdate()`): process noise
    400 cm/s², measurement noise 0.91 cm. Its velocity state follows a walking
    player without the lag an average adds.
-4. **FFT low-pass** over the last 32 Kalman outputs, cut above 3 Hz
-   (readings taken as 20 Hz), read back at the newest reading. The window's
+4. **FFT low-pass** over the last 32 Kalman outputs, cut above 3 Hz, read
+   back at the newest reading. The sample rate is measured from the window's
+   own timestamps: a node sends about 11-12 readings a second while it has its
+   turn, fewer with multi-pulse on, and a window never spans the other node's
+   turn (the channel starts again after a silence). The window's
    straight-line trend is taken out first and added back after, and the rest
    is mirrored at the newest end. Without that, the FFT treats the window as
    a loop: the old version (mean removed only, 64 readings, 2 Hz) put a
@@ -226,9 +238,10 @@ rig. In the browser console, `tuneSensor({ fftWindow: 0 })` turns it off and
 `tuneSensor({ fftCutoffHz: 2 })` / `tuneSensor({ kalmanSigmaA: 200 })` change
 it, from the next reading; the Python side takes the same settings through
 `FilterConfig` (`fft_window`, `fft_cutoff_hz`, `kalman_sigma_a_cm_s2`, ...).
-The game steps its filters once per new `nodes:update`, not on every
-animation frame. On the server a no-echo reading (negative) is skipped rather
-than put into the median.
+The game steps a node's filters only on that node's new readings, not on
+every animation frame. On the server a no-echo reading (negative) is skipped
+rather than put into the median, and the median takes the upper of the two
+middle values, as the game's does.
 
 The chain runs **once per new reading**. When one node reports, only its
 channel gets a new sample; the other channels are marked not fresh and are

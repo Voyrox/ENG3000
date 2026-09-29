@@ -128,8 +128,11 @@
   // fftCutoffHz and the newest sample is read back (fftLowpassLast()). The
   // trend and the mirror stop the transform treating the window as a loop:
   // with only the mean taken out, a player walking at 50 cm/s read about 35 cm
-  // behind where they were. Readings are taken to be FFT_SAMPLE_RATE_HZ apart.
-  const FFT_SAMPLE_RATE_HZ = 20;
+  // behind where they were. The sample rate is measured from the window's own
+  // timestamps: a node sends about 11-12 readings a second while it has its
+  // turn, fewer with multi-pulse on, so a fixed rate would put the cutoff
+  // somewhere else. A window never spans the other node's turn - the channel
+  // starts again after a silence (conditionSensor()).
   const FFT_MIN_SAMPLES = 8;          // fewer and the Kalman output passes straight through
 
   // --- Live-tunable smoothing -----------------------------------------------
@@ -879,6 +882,7 @@
       rejectCount: 0,   // total discarded, surfaced for diagnosis
       kalman: makeKalman(),
       smoothed: [],     // recent Kalman outputs: the FFT stage's window
+      smoothedAt: [],   // ms each of those was taken at
       steppedAt: -Infinity, // ms of the last reading (or dropout) through this channel
     };
   }
@@ -901,6 +905,7 @@
     filter.samples.length = 0;
     resetKalman(filter.kalman);
     filter.smoothed.length = 0;
+    filter.smoothedAt.length = 0;
   }
 
   // --- Kalman stage ----------------------------------------------------------
@@ -1023,17 +1028,26 @@
     return vMean + slope * (at - tMean) + sum / m;
   }
 
-  // Adds one Kalman output to the FFT window and returns the channel's value.
-  function smoothWindow(filter, tracked) {
+  // Adds one Kalman output, taken at `now` (ms), to the FFT window and returns
+  // the channel's value. The window's sample rate is what its timestamps say.
+  function smoothWindow(filter, tracked, now) {
     const size = Math.max(0, Math.floor(tuning.fftWindow));
     if (size === 0) {
       filter.smoothed.length = 0;
+      filter.smoothedAt.length = 0;
       return tracked;
     }
     filter.smoothed.push(tracked);
-    while (filter.smoothed.length > size) filter.smoothed.shift();
-    if (filter.smoothed.length < Math.min(FFT_MIN_SAMPLES, size)) return tracked;
-    return fftLowpassLast(filter.smoothed, FFT_SAMPLE_RATE_HZ, tuning.fftCutoffHz);
+    filter.smoothedAt.push(now);
+    while (filter.smoothed.length > size) {
+      filter.smoothed.shift();
+      filter.smoothedAt.shift();
+    }
+    const n = filter.smoothed.length;
+    if (n < Math.min(FFT_MIN_SAMPLES, size)) return tracked;
+    const span = (filter.smoothedAt[n - 1] - filter.smoothedAt[0]) / 1000;
+    if (!(span > 0)) return tracked;
+    return fftLowpassLast(filter.smoothed, (n - 1) / span, tuning.fftCutoffHz);
   }
 
   const sensorFilters = [makeFilter(), makeFilter(), makeFilter()];
@@ -1116,7 +1130,7 @@
       if (filter.samples.length > SENSOR_HISTORY) filter.samples.shift();
       const middle = median(filter.samples);
       const tracked = kalmanUpdate(filter.kalman, middle, now / 1000);
-      filter.value = smoothWindow(filter, tracked);
+      filter.value = smoothWindow(filter, tracked, now);
       filter.lastGoodAt = now;
       // The slew gate judges readings against the median, as it always has:
       // the stages after it lag a little, and must not tighten the gate.
@@ -1262,7 +1276,6 @@
   const LOS_RANGE_SIGMA_CM = 3;           // a filtered distance, along the line of sight
   const LOS_V0_SIGMA_CM_S = 100;          // a new track's velocity uncertainty
   const LOS_GATE_NIS = 13.8;              // chi-square, 2 dof, 99.9 %: further off is an outlier
-  const RANGE_GATE_NIS = 10.83;           // chi-square, 1 dof, 99.9 %: the same, for a distance alone
   const LOS_RELOCK_READINGS = 6;          // outliers in a row that move the track instead
   const LOS_TRACK_TIMEOUT_MS = 1500;      // no usable reading for this long: no position
   const LOS_BOTH_WINDOW_MS = 2500;        // both nodes fed the track within this: source "both"
@@ -1294,15 +1307,20 @@
 
   // One node's reading as a measurement: the point along its line of sight,
   // and that point's covariance (2x2, cm^2) - LOS_RANGE_SIGMA_CM along the
-  // line, the distance times the bearing uncertainty across it.
-  function lineOfSight(nodeX, distance, angle, state) {
+  // line, the distance times the bearing uncertainty across it. `repeats` is
+  // how many readings in a row have already used this same aim: a servo that
+  // holds still repeats the same small aim error on every reading, so the k-th
+  // repeat counts 1/(k+1)^2 as much across the line - a held aim adds up to
+  // about one and a half readings' worth, however long it is held - while the
+  // distance along the line counts in full every time.
+  function lineOfSight(nodeX, distance, angle, state, repeats) {
     const phi = (angle - 90) * Math.PI / 180;
     const along = [-Math.sin(phi), Math.cos(phi)];
     const across = [Math.cos(phi), Math.sin(phi)];
     const bearingDeg = state === 0 ? tuning.losBearingFoundDeg
       : state === 1 ? tuning.losBearingHalfDeg : tuning.losBearingUnknownDeg;
     const radial = LOS_RANGE_SIGMA_CM * LOS_RANGE_SIGMA_CM;
-    const sideways = distance * bearingDeg * Math.PI / 180;
+    const sideways = distance * bearingDeg * Math.PI / 180 * (repeats + 1);
     const tangential = sideways * sideways;
     const cov = [[0, 0], [0, 0]];
     for (let i = 0; i < 2; i++) {
@@ -1321,6 +1339,7 @@
       updatedAt: -Infinity,                 // ms of the last reading the track took
       fedAt: [-Infinity, -Infinity, -Infinity], // ms each slot last fed it
       aimedAt: [null, null, null],          // the servo angle each slot's aim was last taken at
+      aimRepeats: [0, 0, 0],                // readings in a row that have used that aim since
       lastSlot: null,
       outliers: 0,                          // readings in a row that failed the gate
     };
@@ -1393,30 +1412,6 @@
     losTook(slot, now);
   }
 
-  // One node's distance alone, as a range from the node to the player (an
-  // extended Kalman update: the range is linearised about the track). Used
-  // while the node's servo holds still: its aim then repeats the same small
-  // error on every reading, and feeding that in again and again would drown
-  // the other node's distance, which is what pins the player down. Returns
-  // whether the track took the reading's aim (only when it restarted there).
-  function losObserveRange(nodeX, distance, m, slot, now) {
-    losPredict(now / 1000);
-    const dx = losTrack.x[0] - nodeX;
-    const dy = losTrack.x[1];
-    const expected = Math.sqrt(dx * dx + dy * dy);
-    if (!(expected > 1e-6)) return false;
-    const H = [[dx / expected, dy / expected, 0, 0]];
-    const P = losTrack.P;
-    const PHt = P.map((row) => [row[0] * H[0][0] + row[1] * H[0][1]]);
-    const r = LOS_RANGE_SIGMA_CM * LOS_RANGE_SIGMA_CM;
-    const sVar = H[0][0] * PHt[0][0] + H[0][1] * PHt[1][0] + r;
-    const nu = [distance - expected];
-    if (!(sVar > 0)) return false;
-    if ((nu[0] * nu[0]) / sVar > RANGE_GATE_NIS) return losOutlier(m, slot, now);
-    losApply(PHt.map((row) => [row[0] / sVar]), nu, H, [[r]], slot, now);
-    return false;
-  }
-
   // One node's line of sight into the track: distance and aim together. A
   // reading too far from where the track expects the player (the gate) is
   // left out. Returns whether the track took the reading.
@@ -1448,21 +1443,22 @@
 
   // Feeds the track every node reading that has the player in its line of
   // sight: new in this update (a reading is used once, when it arrives), with
-  // a distance and a servo angle, from a node that is not sweeping. The aim is
-  // used when it is new - the servo has moved, or the node has just come back
-  // for its turn - and the distance alone while the servo holds still.
+  // a distance and a servo angle, from a node that is not sweeping. An aim is
+  // new when the servo has moved, or the node has just come back for its turn;
+  // after that each reading at the same aim counts for less across the line
+  // (lineOfSight()).
   function stepLosTrack(filtered, scans, fresh, now) {
     [LEFT_SENSOR, RIGHT_SENSOR].forEach((slot) => {
       const scan = scans[slot];
       if (!fresh[slot] || filtered[slot] === null || scan.angle === null || scan.state === SCAN_LOST) return;
-      const nodeX = columnCentreCm(slot);
-      const m = lineOfSight(nodeX, filtered[slot], scan.angle, scan.state);
       const newAim = losTrack.x === null || scan.angle !== losTrack.aimedAt[slot] ||
         now - losTrack.fedAt[slot] > SENSOR_HOLD_MS;
-      const tookAim = newAim
-        ? losObserve(m, slot, now)
-        : losObserveRange(nodeX, filtered[slot], m, slot, now);
-      if (tookAim) losTrack.aimedAt[slot] = scan.angle;
+      const repeats = newAim ? 0 : losTrack.aimRepeats[slot] + 1;
+      const m = lineOfSight(columnCentreCm(slot), filtered[slot], scan.angle, scan.state, repeats);
+      if (losObserve(m, slot, now)) {
+        losTrack.aimedAt[slot] = scan.angle;
+        losTrack.aimRepeats[slot] = repeats;
+      }
     });
     if (losTrack.x !== null && now - losTrack.updatedAt > LOS_TRACK_TIMEOUT_MS) resetLosTrack();
   }

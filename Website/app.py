@@ -72,7 +72,6 @@ _DISTANCE_CHAIN = FilterConfig()
 MEDIAN_WINDOW = _DISTANCE_CHAIN.median_window
 FFT_WINDOW = _DISTANCE_CHAIN.fft_window
 FFT_MIN_SAMPLES = _DISTANCE_CHAIN.fft_min_samples
-DISTANCE_SAMPLE_RATE_HZ = _DISTANCE_CHAIN.fft_sample_rate_hz
 DISTANCE_CUTOFF_HZ = _DISTANCE_CHAIN.fft_cutoff_hz
 TURN_INTERVAL_SECONDS = 1.0
 MS_PER_SECOND = 1000.0
@@ -115,6 +114,7 @@ def new_node(address, device_id=None):
         "median_samples": deque(maxlen=MEDIAN_WINDOW),
         "distance_tracker": new_distance_tracker(),
         "distance_samples": deque(maxlen=FFT_WINDOW),
+        "distance_times": deque(maxlen=FFT_WINDOW),
         "filtered_distance": None,
         "rps": 0.0,
         "conn": None,
@@ -201,6 +201,7 @@ def reuse_or_register_node(address, claimed_node_id, device_id=None, conn=None):
             node["median_samples"].clear()
             node["distance_tracker"].reset()
             node["distance_samples"].clear()
+            node["distance_times"].clear()
             node["filtered_distance"] = None
             node["synced"] = False
             node["has_turn"] = False
@@ -286,7 +287,10 @@ def new_distance_tracker():
 def update_distance(node, payload, now):
     """One reading into the node's filtered_distance: median, then Kalman,
     then the FFT low-pass once FFT_MIN_SAMPLES Kalman outputs are in. `now` is
-    the reading's time in seconds (time.monotonic())."""
+    the reading's time in seconds (time.monotonic()); the FFT's sample rate is
+    measured from the window's own times. There is no slew gate or hold here
+    (the game's chain, and filterRules.py's, have both): this value is
+    published in nodes:update and /api/nodes, and nothing in the game reads it."""
     distance = parse_distance_cm(payload)
     # No distance, or no echo (negative): nothing to filter, and the last value
     # stands. A -1 in the median window would drag it towards zero.
@@ -296,18 +300,26 @@ def update_distance(node, payload, now):
     medians = node["median_samples"]
     tracker = node["distance_tracker"]
     history = node["distance_samples"]
+    times = node["distance_times"]
     # After a gap the Kalman starts a new track (a node waits out the other
     # node's scanning turn, for one); the windows before it start again too.
     if tracker.alive and now - tracker.t_reading_s > tracker.gap_reset_s:
         medians.clear()
         history.clear()
+        times.clear()
 
     medians.append(distance)
-    smoothed = float(np.median(medians))
+    # The upper of the two middle values when the window is even, as the
+    # game's median (and filterRules.py's) takes.
+    ordered = sorted(medians)
+    smoothed = float(ordered[len(ordered) // 2])
     tracked = tracker.update(smoothed, now)
     history.append(tracked)
-    if len(history) >= FFT_MIN_SAMPLES:
-        filtered = fft_filter_ultrasonic(history, DISTANCE_SAMPLE_RATE_HZ, DISTANCE_CUTOFF_HZ)
+    times.append(now)
+    span = times[-1] - times[0]
+    if len(history) >= FFT_MIN_SAMPLES and span > 0:
+        rate_hz = (len(history) - 1) / span
+        filtered = fft_filter_ultrasonic(history, rate_hz, DISTANCE_CUTOFF_HZ)
         node["filtered_distance"] = float(filtered[-1])
     else:
         node["filtered_distance"] = float(tracked)

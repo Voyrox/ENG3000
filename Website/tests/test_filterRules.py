@@ -248,6 +248,18 @@ class FftLowpassLast(unittest.TestCase):
         with self.assertRaises(ValueError):
             FilterConfig(fft_window=-1)
 
+    def test_the_channel_measures_the_fft_rate_from_its_readings(self):
+        # A 5 Hz swing is above a 3 Hz cutoff when readings come 25 ms apart
+        # (40/s, window rate measured), and the same readings 100 ms apart are
+        # a 1.25 Hz swing, which passes.
+        swing = [100.0 + (4.0 if i % 8 < 4 else -4.0) for i in range(40)]
+        fast = ChannelFilter(FilterConfig())
+        slow = ChannelFilter(FilterConfig())
+        for i, value in enumerate(swing):
+            a = fast.update(value, i * 25)
+            b = slow.update(value, i * 100)
+        self.assertLess(abs(a - 100.0), abs(b - 100.0))
+
 
 class ProximityGuardRules(unittest.TestCase):
 
@@ -508,8 +520,9 @@ class TwoSensorGeometryBehaviour(unittest.TestCase):
 
     def test_while_the_servos_hold_still_the_distances_pin_the_player_down(self):
         # Both servos hold an aim 5 degrees off; the distances are exact. Each
-        # aim alone puts the player some 7-10 cm out, but after the first
-        # reading only the distances go in, and they cross where the player is.
+        # aim alone puts the player some 7-10 cm out, but a held aim counts for
+        # less with every reading while the distances count in full, and the
+        # distances cross where the player is.
         truth = (75.0, 90.0)
         sample = scanner_sample(*truth, aim_error_deg=5.0)
         off = max(math.dist(scanner_point(25.0, *sample[0][:2]), truth),
@@ -554,6 +567,11 @@ class TwoSensorGeometryBehaviour(unittest.TestCase):
         # Half-found is less sure of its aim than found.
         _, _, half = line_of_sight(25.0, 100.0, 90.0, 1, self.config)
         self.assertGreater(half[0][0], cov[0][0])
+        # The same aim again counts a quarter as much across the line, and the
+        # distance along it just as much.
+        _, _, again = line_of_sight(25.0, 100.0, 90.0, 0, self.config, repeats=1)
+        self.assertAlmostEqual(again[0][0], 4 * cov[0][0])
+        self.assertAlmostEqual(again[1][1], cov[1][1])
 
     def test_without_angles_the_nodes_trilaterate(self):
         fix = self.locate(self.geometry.channels(two_sensor_sample(60.0, 80.0)))

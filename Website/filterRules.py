@@ -102,15 +102,14 @@ class FilterConfig:
     anchor_ttl_ms: float = 3000.0
 
     # Smoothing after the median (tuning.kalmanSigmaA, tuning.kalmanSigmaR,
-    # tuning.fftWindow, tuning.fftCutoffHz, FFT_MIN_SAMPLES,
-    # FFT_SAMPLE_RATE_HZ). The Kalman is tracking.ConstantVelocityTracker with
-    # its default gap reset and starting velocity; fft_window 0 turns the FFT
-    # stage off.
+    # tuning.fftWindow, tuning.fftCutoffHz, FFT_MIN_SAMPLES). The Kalman is
+    # tracking.ConstantVelocityTracker with its default gap reset and starting
+    # velocity; fft_window 0 turns the FFT stage off. The FFT stage measures
+    # its sample rate from the window's own timestamps.
     kalman_sigma_a_cm_s2: float = DEFAULT_SIGMA_A_CM_S2
     kalman_sigma_r_cm: float = DEFAULT_SIGMA_R_CM
     fft_window: int = 32
     fft_min_samples: int = 8
-    fft_sample_rate_hz: float = 20.0
     fft_cutoff_hz: float = 3.0
 
     # Line-of-sight tracker (LOS_* in game.js; tuning.losAccelCmS2 and the
@@ -124,7 +123,6 @@ class FilterConfig:
     los_bearing_half_deg: float = 15.0
     los_bearing_unknown_deg: float = 7.0
     los_gate_nis: float = 13.8          # chi-square, 2 dof, 99.9 %
-    range_gate_nis: float = 10.83       # chi-square, 1 dof, 99.9 %
     los_relock_readings: int = 6
     los_track_timeout_ms: float = 1500.0
     los_both_window_ms: float = 2500.0
@@ -154,8 +152,8 @@ class FilterConfig:
             raise ValueError("cell_votes cannot exceed cell_window")
         if self.fft_window < 0:
             raise ValueError("fft_window cannot be negative (0 turns the FFT stage off)")
-        if self.fft_sample_rate_hz <= 0 or self.fft_cutoff_hz < 0:
-            raise ValueError("the FFT stage needs a positive sample rate and a cutoff of 0 or more")
+        if self.fft_cutoff_hz < 0:
+            raise ValueError("the FFT stage needs a cutoff of 0 or more")
 
 
 @dataclass(frozen=True)
@@ -394,6 +392,7 @@ class ChannelFilter:
                                                 sigma_r_cm=cfg.kalman_sigma_r_cm,
                                                 negative_is_missing=False)
         self._smoothed: deque = deque(maxlen=cfg.fft_window)
+        self._smoothed_ms: deque = deque(maxlen=cfg.fft_window)
         self._stepped_ms = -math.inf
         self.value: Optional[float] = None
         self._last_good_ms = -math.inf
@@ -419,7 +418,7 @@ class ChannelFilter:
             ordered = sorted(self._samples)
             middle = ordered[len(ordered) // 2]
             tracked = self._tracker.update(middle, now_ms / 1000.0)
-            self.value = self._smooth(tracked)
+            self.value = self._smooth(tracked, now_ms)
             self._last_good_ms = now_ms
             # The gate judges readings against the median, as it always has:
             # the stages after it lag a little, and must not tighten the gate.
@@ -434,16 +433,22 @@ class ChannelFilter:
         self.value = None
         return None
 
-    def _smooth(self, tracked: float) -> float:
-        """One Kalman output into the FFT window; the channel's value."""
+    def _smooth(self, tracked: float, now_ms: float) -> float:
+        """One Kalman output, taken at now_ms, into the FFT window; the
+        channel's value. The window's sample rate is what its timestamps say
+        (smoothWindow() in game.js)."""
         cfg = self._cfg
         if cfg.fft_window <= 0:
             return tracked
         self._smoothed.append(tracked)
-        if len(self._smoothed) < min(cfg.fft_min_samples, cfg.fft_window):
+        self._smoothed_ms.append(now_ms)
+        n = len(self._smoothed)
+        if n < min(cfg.fft_min_samples, cfg.fft_window):
             return tracked
-        return fft_lowpass_last(list(self._smoothed), cfg.fft_sample_rate_hz,
-                                cfg.fft_cutoff_hz)
+        span = (self._smoothed_ms[-1] - self._smoothed_ms[0]) / 1000
+        if not span > 0:
+            return tracked
+        return fft_lowpass_last(list(self._smoothed), (n - 1) / span, cfg.fft_cutoff_hz)
 
     def _restart_channel(self) -> None:
         """restartChannel() in game.js: nothing the channel remembers - the
@@ -462,6 +467,7 @@ class ChannelFilter:
         self._samples.clear()
         self._tracker.reset()
         self._smoothed.clear()
+        self._smoothed_ms.clear()
 
     def _plausible(self, raw: float, now_ms: float) -> bool:
         cfg = self._cfg
@@ -655,10 +661,16 @@ def _mat_add(a, b):
 
 
 def line_of_sight(node_x_cm: float, distance_cm: float, angle_deg: float,
-                  scan_state: Optional[float], config: FilterConfig) -> tuple:
+                  scan_state: Optional[float], config: FilterConfig,
+                  repeats: int = 0) -> tuple:
     """lineOfSight() in game.js: one node's reading as (x_cm, y_cm, cov) - the
     point along its line of sight and that point's 2x2 covariance, small along
-    the line and the distance times the bearing uncertainty across it."""
+    the line and the distance times the bearing uncertainty across it.
+
+    repeats is how many readings in a row have already used this same aim: a
+    servo that holds still repeats the same small aim error, so the k-th
+    repeat counts 1/(k+1)^2 as much across the line (a held aim adds up to
+    about one and a half readings' worth) while the distance counts in full."""
     phi = (angle_deg - 90) * math.pi / 180
     along = [-math.sin(phi), math.cos(phi)]
     across = [math.cos(phi), math.sin(phi)]
@@ -669,7 +681,7 @@ def line_of_sight(node_x_cm: float, distance_cm: float, angle_deg: float,
     else:
         bearing_deg = config.los_bearing_unknown_deg
     radial = config.los_range_sigma_cm * config.los_range_sigma_cm
-    sideways = distance_cm * bearing_deg * math.pi / 180
+    sideways = distance_cm * bearing_deg * math.pi / 180 * (repeats + 1)
     tangential = sideways * sideways
     cov = [[radial * along[i] * along[j] + tangential * across[i] * across[j]
             for j in range(2)] for i in range(2)]
@@ -683,9 +695,9 @@ class LineOfSightTracker:
     State [x, y, vx, vy] in cm and cm/s, constant velocity with white-noise
     acceleration. Each node reading that has the player in its line of sight
     (new, with a distance and an angle, not sweeping) is used once, when it
-    arrives. While a node's servo holds still only its distance goes in (an
-    extended Kalman range update): its aim repeats the same small error on
-    every reading, and taking it again and again would drown the other node's
+    arrives. While a node's servo holds still its aim counts for less with
+    every reading (line_of_sight(repeats=...)): the aim repeats the same small
+    error, and taking it in full again and again would drown the other node's
     distance. Readings far from where the track expects the player are left
     out; los_relock_readings of those in a row restart the track there.
     """
@@ -703,6 +715,7 @@ class LineOfSightTracker:
         self.updated_ms = -math.inf
         self.fed_ms = [-math.inf] * GRID_SIZE
         self.aimed_at = [None] * GRID_SIZE
+        self.aim_repeats = [0] * GRID_SIZE
         self.last_slot: Optional[int] = None
         self.outliers = 0
 
@@ -715,16 +728,14 @@ class LineOfSightTracker:
             if (not fresh[slot] or filtered[slot] is None or angle is None
                     or state == SCAN_LOST):
                 continue
-            node_x = area.column_centre_cm(slot)
-            m = line_of_sight(node_x, filtered[slot], angle, state, config)
             new_aim = (self.x is None or angle != self.aimed_at[slot]
                        or now_ms - self.fed_ms[slot] > config.hold_ms)
-            if new_aim:
-                took_aim = self._observe(m, slot, now_ms, config)
-            else:
-                took_aim = self._observe_range(node_x, filtered[slot], m, slot, now_ms, config)
-            if took_aim:
+            repeats = 0 if new_aim else self.aim_repeats[slot] + 1
+            m = line_of_sight(area.column_centre_cm(slot), filtered[slot], angle, state,
+                              config, repeats)
+            if self._observe(m, slot, now_ms, config):
                 self.aimed_at[slot] = angle
+                self.aim_repeats[slot] = repeats
         if self.x is not None and now_ms - self.updated_ms > config.los_track_timeout_ms:
             self.reset()
 
@@ -793,26 +804,6 @@ class LineOfSightTracker:
                           _mat_mul(_mat_mul(K, R), _mat_transpose(K)))
         self.outliers = 0
         self._took(slot, now_ms)
-
-    def _observe_range(self, node_x, distance, m, slot, now_ms, config) -> bool:
-        self._predict(now_ms / 1000, config)
-        dx = self.x[0] - node_x
-        dy = self.x[1]
-        expected = math.sqrt(dx * dx + dy * dy)
-        if not expected > 1e-6:
-            return False
-        H = [[dx / expected, dy / expected, 0, 0]]
-        P = self.P
-        PHt = [[row[0] * H[0][0] + row[1] * H[0][1]] for row in P]
-        r = config.los_range_sigma_cm * config.los_range_sigma_cm
-        s_var = H[0][0] * PHt[0][0] + H[0][1] * PHt[1][0] + r
-        nu = [distance - expected]
-        if not s_var > 0:
-            return False
-        if (nu[0] * nu[0]) / s_var > config.range_gate_nis:
-            return self._outlier(m, slot, now_ms, config)
-        self._apply([[row[0] / s_var] for row in PHt], nu, H, [[r]], slot, now_ms)
-        return False
 
     def _observe(self, m, slot, now_ms, config) -> bool:
         if self.x is None:
