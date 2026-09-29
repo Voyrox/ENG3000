@@ -177,6 +177,15 @@
     losBearingFoundDeg: 4,
     losBearingHalfDeg: 15,
     losBearingUnknownDeg: 7,
+    // The nearest-node method (see nearestNodeFix()). nearMaxAgeMs: how old a
+    // node's last reading may be and still place the player - a little more
+    // than one scanning turn. triMaxGapMs: how far apart the two nodes'
+    // readings may be and still be trilaterated. triBearingDeg: how far the
+    // crossing may be from where each servo points. Python: FilterConfig
+    // near_max_age_ms, tri_max_gap_ms, tri_bearing_deg.
+    nearMaxAgeMs: 1500,
+    triMaxGapMs: 500,
+    triBearingDeg: 20,
   };
 
   window.tuneSensor = function tuneSensor(partial) {
@@ -1153,6 +1162,7 @@
       filter.steppedAt = -Infinity;
     });
     resetLosTrack();
+    resetSightings();
     lastSeenStamp.fill(null);
     heardAt.fill(-Infinity);
     closeStreak = 0;
@@ -1180,10 +1190,14 @@
   // --- Placing the player ----------------------------------------------------
   // The two nodes sit on the screen line at the centres of the outer columns.
   // Each is a servo scanner that reports its distance to the player and the
-  // servo angle it read at. Three ways to turn that into a position, switched
+  // servo angle it read at. Four ways to turn that into a position, switched
   // with the buttons above the sensor panel (positioning.method):
   //
-  //   "los" - line of sight, the default. Each node's reading is a point along
+  //   "near" - the nearest node, the default (nearestNodeFix()). The node
+  //           nearer the player places them by its servo angle and distance;
+  //           when both nodes see the player, their two distances are
+  //           trilaterated instead.
+  //   "los" - line of sight. Each node's reading is a point along
   //           its line of sight (its distance along its servo angle), with an
   //           uncertainty that is small along the line - the distance is good
   //           - and grows across it with the distance and with how sure the
@@ -1197,9 +1211,9 @@
   //           earlier method, kept to compare against. It pairs each node's
   //           distance with the other node's latest one, however old, and
   //           whatever that node was looking at.
-  //   "avg" - the midpoint of the two.
+  //   "avg" - the midpoint of line of sight and trilateration.
   //
-  // All three are worked out on every update, so the board can show them side
+  // All four are worked out on every update, so the board can show them side
   // by side (Compare). x picks the column (the centre one included) and y, the
   // depth from the screen, picks the row. filterRules.py (TwoSensorGeometry)
   // is the parity-tested Python port.
@@ -1472,15 +1486,119 @@
     return { x: losTrack.x[0], y: losTrack.x[1], source };
   }
 
-  // All three positions for this update, { los, tri, avg }, each { x, y,
-  // source } or null. Pure apart from reading the track. With no servo angle
-  // from either node there is no line of sight, and every method is
-  // trilateration, as it always was for that firmware.
-  function solvePositions(filtered, angles, now) {
-    const tri = trilaterate(filtered);
-    if (angles[LEFT_SENSOR] === null && angles[RIGHT_SENSOR] === null) {
-      return { los: tri, tri, avg: tri };
+  // --- Nearest node, trilateration when both see the player -----------------
+  // The node nearer the player is the main source:
+  // its servo angle and its distance place them (scannerPoint()). When both
+  // nodes see the player, their two distances are trilaterated instead, which
+  // is more exact - a distance is good to a centimetre or two, while a servo
+  // angle is only good to within the beam, about 15 degrees, which is 40 cm
+  // sideways at 150 cm.
+  //
+  // Each node's sighting is its last reading that saw the player: a new
+  // reading with a distance, from a node that is not sweeping (lost). It is
+  // kept through a missed echo and through the other node's turn, until it is
+  // more than tuning.nearMaxAgeMs old. The two sightings are trilaterated only
+  // when:
+  //   - they were taken at most tuning.triMaxGapMs apart - a walking player
+  //     covers 30 cm in half a second, and the older distance still says
+  //     where they were;
+  //   - the circles cross inside the play area; and
+  //   - the crossing lies within tuning.triBearingDeg of where each servo
+  //     pointed. Two nodes looking at different things - the player and a
+  //     chair - can still have circles that cross, just not where both are
+  //     aimed.
+  // Otherwise the nearer node that still sees the player (its latest reading
+  // is not lost) places them on its own, one whose point is inside the play
+  // area first. With neither there is no position, and the hold rides it out.
+  const NEAR_SIDE_MARGIN_CM = 15;   // past a side edge that still counts; EDGE_MARGIN_CM in callibrate_corners.js
+
+  // [left, centre, right]: { distance, angle, at } or null; see above.
+  const sightings = [null, null, null];
+
+  function resetSightings() {
+    sightings.fill(null);
+  }
+
+  // Keeps each new reading that sees the player as that node's sighting.
+  function noteSightings(raw, filtered, scans, fresh, now) {
+    [LEFT_SENSOR, RIGHT_SENSOR].forEach((slot) => {
+      if (!fresh[slot] || raw[slot] === null || filtered[slot] === null) return;
+      if (scans[slot].state === SCAN_LOST) return;
+      sightings[slot] = { distance: filtered[slot], angle: scans[slot].angle, at: now };
+    });
+  }
+
+  // Inside the play area, with the same margin as isWithinPlayArea() at the sides.
+  function isInPlayAt(x, y) {
+    if (x < -NEAR_SIDE_MARGIN_CM || x > PLAY_WIDTH_CM + NEAR_SIDE_MARGIN_CM) return false;
+    return isInPlay(columnAtCm(Math.max(0, Math.min(PLAY_WIDTH_CM, x))), y);
+  }
+
+  // The servo angle at which a node at nodeX points at (x, y): the inverse of
+  // scannerPoint().
+  function bearingFrom(nodeX, x, y) {
+    return 90 + (Math.atan2(nodeX - x, y) * 180) / Math.PI;
+  }
+
+  // The two nodes' distances trilaterated, if they are fit to be; see above.
+  // left and right are nearestNodeFix()'s entries. { x, y, source } or null.
+  function crossNodes(left, right) {
+    if (Math.abs(left.at - right.at) > tuning.triMaxGapMs) return null;
+    const base = right.nodeX - left.nodeX;
+    const along = (left.distance * left.distance - right.distance * right.distance + base * base) / (2 * base);
+    const h2 = left.distance * left.distance - along * along;
+    if (!(h2 > 0)) return null;
+    const x = left.nodeX + along;
+    const y = Math.sqrt(h2);
+    if (!isInPlayAt(x, y)) return null;
+    const aimedAt = (node) =>
+      node.angle === null || Math.abs(bearingFrom(node.nodeX, x, y) - node.angle) <= tuning.triBearingDeg;
+    if (!aimedAt(left) || !aimedAt(right)) return null;
+    return { x, y, source: "both" };
+  }
+
+  // Where the nearest-node method puts the player, { x, y, source } or null.
+  // Pure: reads the sightings but changes nothing. Left wins a tie.
+  function nearestNodeFix(scans, now) {
+    const seen = [];
+    [LEFT_SENSOR, RIGHT_SENSOR].forEach((slot) => {
+      const sighting = sightings[slot];
+      if (sighting === null || now - sighting.at > tuning.nearMaxAgeMs) return;
+      const nodeX = columnCentreCm(slot);
+      const point = scannerPoint(nodeX, sighting.distance, sighting.angle);
+      seen.push({
+        slot, nodeX, distance: sighting.distance, angle: sighting.angle, at: sighting.at,
+        x: point.x, y: point.y, inside: isInPlayAt(point.x, point.y),
+        seeing: scans[slot].state !== SCAN_LOST,
+      });
+    });
+
+    if (seen.length === 2) {
+      const both = crossNodes(seen[0], seen[1]);
+      if (both) return both;
     }
+
+    const seeing = seen.filter((node) => node.seeing);
+    const inBounds = seeing.filter((node) => node.inside);
+    const pool = inBounds.length > 0 ? inBounds : seeing;
+    let best = null;
+    pool.forEach((node) => {
+      if (best === null || node.distance < best.distance) best = node;
+    });
+    if (best === null) return null;
+    return { x: best.x, y: best.y, source: best.slot === LEFT_SENSOR ? "left" : "right" };
+  }
+
+  // Every method's position for this update, { near, los, tri, avg }, each
+  // { x, y, source } or null. Pure apart from reading the track. With no servo
+  // angle from either node there is no line of sight and no aim, and every
+  // method is trilateration, as it always was for that firmware.
+  function solvePositions(filtered, scans, now) {
+    const tri = trilaterate(filtered);
+    if (scans[LEFT_SENSOR].angle === null && scans[RIGHT_SENSOR].angle === null) {
+      return { near: tri, los: tri, tri, avg: tri };
+    }
+    const near = nearestNodeFix(scans, now);
     const los = losFix(now);
     let avg = los || tri;
     if (los && tri) {
@@ -1490,14 +1608,14 @@
         source: los.source === tri.source ? los.source : "both",
       };
     }
-    return { los, tri, avg };
+    return { near, los, tri, avg };
   }
 
   // --- Which method places the player ----------------------------------------
-  const POSITION_METHODS = ["los", "tri", "avg"];
+  const POSITION_METHODS = ["near", "los", "tri", "avg"];
   const positioning = {
-    method: "los",   // what drives the cursor and the game
-    compare: true,   // draw all three on the board
+    method: "near",  // what drives the cursor and the game
+    compare: true,   // draw all four on the board
   };
 
   window.getPositionMethod = function getPositionMethod() {
@@ -1550,7 +1668,7 @@
   //   filtered:   [l, c, r] after median, Kalman, FFT and hold,
   //   fresh:      [l, c, r] whether each slot brought a new reading this update,
   //   heardMsAgo: [l, c, r] ms since each node's last new reading,
-  //   fixes:      { los, tri, avg } - every method's position, see solvePositions(),
+  //   fixes:      { near, los, tri, avg } - every method's position, see solvePositions(),
   //   method:     the method the position above came from,
   //   depth:      [l, c, r] each node's own depth reading (filtered distance
   //               turned by its servo angle) - what corner calibration captures,
@@ -1576,8 +1694,11 @@
 
     const filtered = raw.map((value, slot) =>
       fresh[slot] ? conditionSensor(sensorFilters[slot], value, now) : sensorFilters[slot].value);
-    if (isNewReading) stepLosTrack(filtered, scans, fresh, now);
-    const fixes = solvePositions(filtered, angles, now);
+    if (isNewReading) {
+      stepLosTrack(filtered, scans, fresh, now);
+      noteSightings(raw, filtered, scans, fresh, now);
+    }
+    const fixes = solvePositions(filtered, scans, now);
     const configured = filtered.filter((d) => d !== null).length;
     const depth = filtered.map((distance, slot) =>
       distance === null || slot === 1 ? null : scannerPoint(columnCentreCm(slot), distance, angles[slot]).y);
@@ -2313,11 +2434,13 @@
     { index: RIGHT_SENSOR, label: "R", source: "right" },
   ];
   const SOURCE_LABELS = { both: "L+R", left: "L only", right: "R only" };
-  // The three ways of placing the player, as the switch and the board show them.
+  // The four ways of placing the player, as the switch (button), the sensor
+  // panel and the board (short) show them.
   const METHOD_STYLES = {
-    los: { label: "Line of sight", short: "LOS", colour: "#22d3ee" },
-    tri: { label: "Trilateration", short: "TRI", colour: "#e879f9" },
-    avg: { label: "Average", short: "AVG", colour: "#f8fafc" },
+    near: { label: "Nearest node", button: "Nearest", short: "NEAR", colour: "#facc15" },
+    los: { label: "Line of sight", button: "Sightline", short: "LOS", colour: "#22d3ee" },
+    tri: { label: "Trilateration", button: "Trilaterate", short: "TRI", colour: "#e879f9" },
+    avg: { label: "Average", button: "Average", short: "AVG", colour: "#f8fafc" },
   };
   // The scanner's state (src/scanning.cpp): both sensors agree, one sees the
   // player, or it is sweeping for them.
@@ -2445,7 +2568,7 @@
       ctx.font = `${inUse ? "bold " : ""}11px monospace`;
       ctx.fillStyle = fix ? style.colour : "#63736f";
       const where = fix ? `${fix.x.toFixed(0)},${fix.y.toFixed(0)}` : "--";
-      ctx.fillText(`${style.short} ${where}`, x + 16 + k * 118, compareY);
+      ctx.fillText(`${style.short} ${where}`, x + 16 + k * 88, compareY);
     });
 
     // Resolved fix
@@ -2478,8 +2601,8 @@
   }
 
   // --- Position switch ---------------------------------------------------------
-  // Sensor mode only: three buttons above the sensor panel pick the method that
-  // places the player, and Compare shows all three on the board.
+  // Sensor mode only: four buttons above the sensor panel pick the method that
+  // places the player, and Compare shows all four on the board.
 
   function getPositionSwitchLayout(canvas) {
     const height = canvas.clientHeight || canvas.height;
@@ -2487,8 +2610,8 @@
     const buttons = [];
     let x = HUD_EDGE;
     POSITION_METHODS.forEach((method) => {
-      buttons.push({ kind: "method", method, x, y, width: 100, height: POSITION_SWITCH_H });
-      x += 104;
+      buttons.push({ kind: "method", method, x, y, width: 76, height: POSITION_SWITCH_H });
+      x += 80;
     });
     buttons.push({ kind: "compare", x, y, width: HUD_EDGE + SENSOR_PANEL_W - x, height: POSITION_SWITCH_H });
     return { top: y, buttons };
@@ -2519,9 +2642,9 @@
         drawHudPanel(ctx, b.x, b.y, b.width, b.height, 8);
       }
       ctx.textAlign = "center";
-      ctx.font = "bold 11px monospace";
+      ctx.font = "bold 10px monospace";
       ctx.fillStyle = on ? "#13131c" : colour;
-      const label = b.kind === "method" ? METHOD_STYLES[b.method].label : "Compare";
+      const label = b.kind === "method" ? METHOD_STYLES[b.method].button : "Compare";
       ctx.fillText(label, b.x + b.width / 2, b.y + b.height / 2 + 4);
     });
     ctx.textAlign = "start";
@@ -2530,7 +2653,8 @@
   // Compare: each method's position as a small labelled ring on the board. The
   // big cursor is the method in use, eased by the spring; these are where each
   // method puts the player right now.
-  const MARKER_LABEL_OFFSET = { los: [0, -13], tri: [0, 22], avg: [16, 4] };
+  const MARKER_LABEL_OFFSET = { near: [-16, 4], los: [0, -13], tri: [0, 22], avg: [16, 4] };
+  const MARKER_LABEL_ALIGN = { near: "right", los: "center", tri: "center", avg: "left" };
 
   function renderPositionMarkers(ctx, canvas) {
     const fixes = gameState.sensor && gameState.sensor.fixes;
@@ -2550,7 +2674,7 @@
       ctx.stroke();
       ctx.fillStyle = style.colour;
       ctx.font = "bold 10px monospace";
-      ctx.textAlign = method === "avg" ? "left" : "center";
+      ctx.textAlign = MARKER_LABEL_ALIGN[method];
       const [dx, dy] = MARKER_LABEL_OFFSET[method];
       ctx.fillText(style.short, point.x + dx, point.y + dy);
       ctx.restore();

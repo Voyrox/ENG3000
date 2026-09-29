@@ -7,6 +7,7 @@
 //     node Website/tools/simulate_positions.js
 //     node Website/tools/simulate_positions.js --methods los,tri --turn-ms 1000,250
 //     node Website/tools/simulate_positions.js --site path/to/other/public --seeds 5
+//     node Website/tools/simulate_positions.js --tour deep --range-cm 145 --miss 0.3
 //
 // The rig: nodes at x = 25 and 125 cm on the screen line. A node scans only in
 // its turn (the server's TURN / HALT), reading every 66 ms. A head sees the
@@ -16,6 +17,20 @@
 // lost. Distances carry 2 cm of noise. A --furniture x,y adds an object the
 // beam can find instead of the player. The player walks a tour of the board at
 // 60 cm/s, pausing at each stop.
+//
+// The far end of the range, off unless asked for:
+//   --range-cm N   no echo from further than N cm (the firmware's echo timeout:
+//                  about 145 cm before 29 Sep, 220 cm after);
+//   --target-cm N  an echo further than N cm is not the player: the node
+//                  reports it as lost (the firmware's MAX_TARGET_CM, 180);
+//   --miss P       a pair misses the player (no echo) with probability P at
+//                  150 cm, rising from 0 at 50 cm - a person's echo gets weak
+//                  with distance;
+//   --firmware search  the 29 Sep firmware's search when lost: stay put for
+//                  two pairs, then look 10, 20 and 30 degrees either side of
+//                  where the player was last seen, then sweep. The default,
+//                  sweep, sweeps on the first lost pair, as before;
+//   --tour deep    a tour that also stands in the back row (130-145 cm deep).
 //
 // Reported per method: median and 90th percentile position error (cm) over the
 // frames with a position, and the share of frames in the right cell. Scores
@@ -37,6 +52,13 @@ const TURNS_MS = option("turn-ms", "1000,0").split(",").map(Number);   // 0 = bo
 const SEEDS = Number(option("seeds", "3"));
 const DURATION_S = Number(option("duration", "45"));
 const FURNITURE = option("furniture", null);
+const RANGE_CM = Number(option("range-cm", "Infinity"));
+const TARGET_CM = Number(option("target-cm", "Infinity"));
+const MISS_AT_150 = Number(option("miss", "0"));
+const FIRMWARE = option("firmware", "sweep");
+const TOUR_NAME = option("tour", "board");
+// --tune '{"triMaxGapMs":800}': passed to the game's tuneSensor() before each run.
+const TUNE = JSON.parse(option("tune", "null"));
 
 const NODE_X = [25, null, 125];
 const BEAM_DEG = 15;
@@ -47,8 +69,17 @@ const FRAME_MS = 1000 / 60;
 const WALK_CM_S = 60;
 const SETTLE_MS = 2000;
 // Stops on the tour: x, depth (cm), and how long to stand there (s).
-const TOUR = [[75, 60, 3], [30, 50, 2], [30, 110, 2.5], [75, 120, 2], [120, 110, 2.5],
-  [120, 50, 2], [75, 80, 3], [40, 80, 2], [110, 70, 2], [75, 80, 0]];
+const TOURS = {
+  board: [[75, 60, 3], [30, 50, 2], [30, 110, 2.5], [75, 120, 2], [120, 110, 2.5],
+    [120, 50, 2], [75, 80, 3], [40, 80, 2], [110, 70, 2], [75, 80, 0]],
+  deep: [[75, 80, 2], [30, 135, 3], [75, 145, 3], [120, 135, 3], [120, 90, 2],
+    [75, 140, 3], [30, 100, 2], [30, 145, 3], [120, 145, 3], [75, 120, 0]],
+};
+const TOUR = TOURS[TOUR_NAME];
+// The 29 Sep firmware's search (--firmware search): src/Config.h.
+const LOST_GRACE_PAIRS = 2;
+const LOCAL_SEARCH_STEP_DEG = 10;
+const LOCAL_SEARCH_SPAN_DEG = 30;
 
 function lcg(seed) {
   let state = seed >>> 0;
@@ -93,25 +124,51 @@ function scan(slot, servo, player, furniture, rand) {
   const aim = servo[slot];
   let distance = -1;
   let state = 2;
+  // What the beam finds, if anything: an echo inside the range, not missed.
+  const echo = (point, off) => {
+    const range = Math.hypot(point[0] - nodeX, point[1]);
+    const miss = MISS_AT_150 * Math.max(0, (range - 50) / 100);
+    if (range > RANGE_CM || (miss > 0 && rand() < miss)) return false;
+    distance = range + 2 * gauss();
+    state = range > TARGET_CM ? 2 : off <= BOTH_DEG ? 0 : 1;
+    return true;
+  };
   const off = Math.abs(bearingTo(player) - aim);
-  if (off <= BEAM_DEG) {
-    distance = Math.hypot(player[0] - nodeX, player[1]) + 2 * gauss();
-    state = off <= BOTH_DEG ? 0 : 1;
-  } else if (furniture) {
+  const sawPlayer = off <= BEAM_DEG && echo(player, off);
+  if (!sawPlayer && furniture) {
     const furnitureOff = Math.abs(bearingTo(furniture) - aim);
-    if (furnitureOff <= BEAM_DEG) {
-      distance = Math.hypot(furniture[0] - nodeX, furniture[1]) + 2 * gauss();
-      state = furnitureOff <= BOTH_DEG ? 0 : 1;
-    }
+    if (furnitureOff <= BEAM_DEG) echo(furniture, furnitureOff);
   }
   const [low, high] = SERVO_LIMITS[slot];
-  const target = state === 2 ? null : bearingTo(off <= BEAM_DEG ? player : furniture);
-  if (state === 1) servo[slot] = Math.max(low, Math.min(high, aim + (target > aim ? 3 : -3)));
+  const clampAim = (angle) => Math.max(low, Math.min(high, angle));
+  const target = state === 2 ? null : bearingTo(sawPlayer ? player : furniture);
+  if (state !== 2) {
+    servo.lastSeen[slot] = aim;
+    servo.lostPairs[slot] = 0;
+    servo.searchStep[slot] = 0;
+  }
+  if (state === 1) {
+    servo.steer[slot] = target > aim ? 1 : -1;
+    servo[slot] = clampAim(aim + 3 * servo.steer[slot]);
+  }
   if (state === 2) {
-    servo[slot] += 14 * servo.dir[slot];
-    if (servo[slot] > high || servo[slot] < low) {
-      servo.dir[slot] = -servo.dir[slot];
-      servo[slot] = Math.max(low, Math.min(high, servo[slot]));
+    const seen = servo.lastSeen[slot];
+    const step = servo.searchStep[slot];
+    const offset = (Math.floor(step / 2) + 1) * LOCAL_SEARCH_STEP_DEG;
+    servo.lostPairs[slot] += 1;
+    if (FIRMWARE === "search" && seen !== null && servo.lostPairs[slot] <= LOST_GRACE_PAIRS) {
+      // Stay put: one weak echo is not a player gone.
+    } else if (FIRMWARE === "search" && seen !== null && offset <= LOCAL_SEARCH_SPAN_DEG) {
+      const side = step % 2 === 0 ? servo.steer[slot] : -servo.steer[slot];
+      servo[slot] = clampAim(seen + side * offset);
+      servo.searchStep[slot] += 1;
+    } else {
+      servo.lastSeen[slot] = null;
+      servo[slot] += 14 * servo.dir[slot];
+      if (servo[slot] > high || servo[slot] < low) {
+        servo.dir[slot] = -servo.dir[slot];
+        servo[slot] = clampAim(servo[slot]);
+      }
     }
   }
   return { avg: distance, left: distance, right: distance, angle: aim, scanState: state };
@@ -122,10 +179,16 @@ function run(method, turnMs, seed) {
   const rand = lcg(seed);
   const canvas = { clientWidth: 1280, clientHeight: 720, width: 1280, height: 720 };
   if (game.setPositionMethod) game.setPositionMethod(method);
+  if (TUNE) game.tuneSensor(TUNE);
   game.setGameInputMode("sensor");
   game.resetGame();
   const nodes = [{ id: 1, online: true, latest: null }, null, { id: 3, online: true, latest: null }];
-  const servo = { 0: 90, 2: 90, dir: { 0: 1, 2: 1 } };
+  const servo = {
+    0: 90, 2: 90, dir: { 0: 1, 2: 1 },
+    // The search when lost (--firmware search): where each node last saw the
+    // player, lost pairs since, local search steps taken, last steer direction.
+    lastSeen: { 0: null, 2: null }, lostPairs: { 0: 0, 2: 0 }, searchStep: { 0: 0, 2: 0 }, steer: { 0: 1, 2: 1 },
+  };
   const furniture = FURNITURE ? FURNITURE.split(",").map(Number) : null;
   const errors = [];
   let frames = 0;
@@ -161,21 +224,34 @@ function run(method, turnMs, seed) {
   }
   errors.sort((a, b) => a - b);
   const quantile = (q) => (errors.length ? errors[Math.min(errors.length - 1, Math.floor(q * errors.length))] : NaN);
-  return { median: quantile(0.5), p90: quantile(0.9), cell: frames ? rightCell / frames : 0 };
+  return {
+    median: quantile(0.5), p90: quantile(0.9), cell: frames ? rightCell / frames : 0,
+    placed: frames ? errors.length / frames : 0,
+  };
 }
 
-const LABELS = { los: "Line of sight", tri: "Trilateration", avg: "Average" };
+const LABELS = { near: "Nearest node", los: "Line of sight", tri: "Trilateration", avg: "Average" };
+const farEnd = [
+  Number.isFinite(RANGE_CM) ? `echoes to ${RANGE_CM} cm` : null,
+  Number.isFinite(TARGET_CM) ? `player to ${TARGET_CM} cm` : null,
+  MISS_AT_150 > 0 ? `${Math.round(100 * MISS_AT_150)} % misses at 150 cm` : null,
+  FIRMWARE === "search" ? "search when lost" : null,
+  TOUR_NAME !== "board" ? `${TOUR_NAME} tour` : null,
+].filter(Boolean).join(", ");
+// Placed: the share of frames with a position at all (status ok).
 for (const turnMs of TURNS_MS) {
   const rig = turnMs > 0 ? `${turnMs} ms turns` : "both nodes at once";
-  console.log(`\n${rig}${FURNITURE ? `, furniture at (${FURNITURE})` : ""} - ${SEEDS} seeds, ${DURATION_S} s each`);
-  console.log("| Method | Median error | 90th percentile | Right cell |");
-  console.log("|---|---|---|---|");
+  console.log(`\n${rig}${FURNITURE ? `, furniture at (${FURNITURE})` : ""}${farEnd ? `, ${farEnd}` : ""}` +
+    ` - ${SEEDS} seeds, ${DURATION_S} s each`);
+  console.log("| Method | Median error | 90th percentile | Right cell | Placed |");
+  console.log("|---|---|---|---|---|");
   for (const method of METHODS) {
-    const total = { median: 0, p90: 0, cell: 0 };
+    const total = { median: 0, p90: 0, cell: 0, placed: 0 };
     for (let seed = 1; seed <= SEEDS; seed++) {
       const score = run(method, turnMs, seed * 11);
       Object.keys(total).forEach((key) => { total[key] += score[key] / SEEDS; });
     }
-    console.log(`| ${LABELS[method] || method} | ${total.median.toFixed(1)} cm | ${total.p90.toFixed(1)} cm | ${(100 * total.cell).toFixed(0)} % |`);
+    console.log(`| ${LABELS[method] || method} | ${total.median.toFixed(1)} cm | ${total.p90.toFixed(1)} cm |` +
+      ` ${(100 * total.cell).toFixed(0)} % | ${(100 * total.placed).toFixed(0)} % |`);
   }
 }

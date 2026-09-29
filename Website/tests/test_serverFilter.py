@@ -190,10 +190,29 @@ class StageTwoSensorRig(unittest.TestCase):
 
     def test_the_position_method_can_be_switched(self):
         stage = ServerFilterStage()
+        # The game's default, the nearest node, until the switch says otherwise.
+        self.assertEqual(stage.pipeline.geometry.method, "near")
         stage.set_position_method("tri")
         self.assertEqual(stage.pipeline.geometry.method, "tri")
+        stage.set_position_method("near")
+        self.assertEqual(stage.pipeline.geometry.method, "near")
         with self.assertRaises(ValueError):
             stage.set_position_method("guess")
+
+    def test_the_nearest_node_trilaterates_across_turns(self):
+        stage = ServerFilterStage()
+        stage.assign_slots([LEFT, None, RIGHT])
+        # A player at (60, 80); each node reports on its own turn, one reading
+        # apart, with its servo 6 degrees off. The second reading crosses the
+        # two distances, which puts the player exactly where they are.
+        left = math.hypot(60 - 25, 80)
+        right = math.hypot(60 - 125, 80)
+        left_aim = 90 + math.degrees(math.atan2(25 - 60, 80)) + 6
+        right_aim = 90 + math.degrees(math.atan2(125 - 60, 80)) - 6
+        stage.on_reading(LEFT, left, 0.0, angle_deg=left_aim, scan_state=0)
+        result = stage.on_reading(RIGHT, right, 300.0, angle_deg=right_aim, scan_state=0)
+        self.assertAlmostEqual(result.x_cm, 60.0, places=6)
+        self.assertAlmostEqual(result.y_cm, 80.0, places=6)
 
     def test_a_node_going_offline_forgets_its_angle(self):
         stage = ServerFilterStage()

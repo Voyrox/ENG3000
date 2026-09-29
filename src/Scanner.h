@@ -37,6 +37,11 @@ struct ScanReading {
 //   half-found a small step towards the sensor that has the player
 //   lost       a large sweep step, reversing at each servo limit
 //
+// Lost straight after having the player, it first stays put for
+// config::LOST_GRACE_PAIRS pairs (one weak echo is not a player gone), then
+// looks either side of where the player was last seen, widening out to
+// config::LOCAL_SEARCH_SPAN_DEG, and only then sweeps (search()).
+//
 // Multi-pulse: with pulsesPerAngle above 1, a pair that is found or half-found
 // is not acted on straight away. The servo stays where it is for that many
 // pairs, each sensor's readings are averaged with outliers left out, and the
@@ -78,6 +83,9 @@ private:
     bool isCollectingMore(const PulsePair& pair) const;
     ScanReading averagePulses() const;
     void move(const ScanReading& reading);
+    void search();
+    void rememberPlayer();
+    void forgetPlayer();
     void logPair(const PulsePair& pair) const;
 
     // The average of one sensor's echoes, outliers left out; see Scanner.cpp.
@@ -105,4 +113,14 @@ private:
     // steering with it, and vice versa.
     int sweepDir_ = 1;
     int steerDir_ = 1;
+
+    // Where the player was last seen (found or half-found), and how the search
+    // for them is going since. Kept through a HALT: the servo does not move
+    // while the other node takes its turn. Forgotten when a command moves the
+    // servo (setRole, holdAt, resumeScanning).
+    bool hasLastSeen_ = false;
+    int lastSeenDeg_ = config::CENTRE_DEG;
+    int lastSteerSign_ = 1; // +1 = last steered towards left
+    int lostPairs_ = 0;     // lost readings in a row
+    int searchStep_ = 0;    // local search angles tried so far
 };

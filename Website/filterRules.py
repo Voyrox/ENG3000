@@ -127,6 +127,15 @@ class FilterConfig:
     los_track_timeout_ms: float = 1500.0
     los_both_window_ms: float = 2500.0
 
+    # Nearest node (tuning.nearMaxAgeMs, tuning.triMaxGapMs,
+    # tuning.triBearingDeg): how old a node's last reading may be and still
+    # place the player, how far apart the two nodes' readings may be and still
+    # be trilaterated, and how far the crossing may be from where each servo
+    # points. See TwoSensorGeometry._nearest().
+    near_max_age_ms: float = 1500.0
+    tri_max_gap_ms: float = 500.0
+    tri_bearing_deg: float = 20.0
+
     # Geometry (COLUMN_MARGIN_CM)
     column_margin_cm: float = 8.0
 
@@ -634,8 +643,11 @@ class UltrasonicArrayGeometry(Geometry):
                    column=column, distance_cm=best)
 
 
-POSITION_METHODS = ("los", "tri", "avg")
+POSITION_METHODS = ("near", "los", "tri", "avg")
 SCAN_LOST = 2          # scanState: sweeping, the player is not in its line of sight
+# How far past a side edge of the play area a position still counts
+# (NEAR_SIDE_MARGIN_CM in game.js); the same margin PlayArea gives the depth.
+NEAR_SIDE_MARGIN_CM = PlayArea.EDGE_MARGIN_CM
 
 
 def _mat_mul(a, b):
@@ -841,17 +853,21 @@ class TwoSensorGeometry(Geometry):
     1 half-found, 2 lost and sweeping). method picks how that becomes a
     position, as the game's position switch does:
 
+      "near" - the nearest node, the default (_nearest()): the node nearer
+              the player places them by its servo angle and distance; when
+              both nodes see the player their two distances are trilaterated
+              instead.
       "los" - line of sight: LineOfSightTracker, fed by track() once per
-              update. The default.
+              update.
       "tri" - trilateration of the two distances alone: each distance is a
               circle around its node, and where the two circles cross is the
               player. When only one reading is inside its own column's play
               area, or the circles miss each other, the nearer node places
               the player straight in front of itself.
-      "avg" - the midpoint of the two.
+      "avg" - the midpoint of line of sight and trilateration.
 
     With no angle from either node (firmware from before the scanner) there is
-    no line of sight, and every method is trilateration.
+    no line of sight and no aim, and every method is trilateration.
 
     Sample: [left, centre, right]. Each entry is a distance in cm, a
     (distance_cm, angle_deg) pair, or a (distance_cm, angle_deg, scan_state)
@@ -863,12 +879,16 @@ class TwoSensorGeometry(Geometry):
     LEFT = 0
     RIGHT = 2
 
-    def __init__(self, method: str = "los"):
+    def __init__(self, method: str = "near"):
         self.method = method
         self._los = LineOfSightTracker()
         self._last_column: Optional[int] = None
         self._angles: list = [None] * GRID_SIZE
         self._states: list = [None] * GRID_SIZE
+        self._raw: list = [None] * GRID_SIZE
+        # Each slot's sighting, (distance_cm, angle_deg, at_ms) or None: see
+        # _nearest() (sightings in game.js).
+        self._sightings: list = [None] * GRID_SIZE
         self._now_ms = -math.inf
         self._config: Optional[FilterConfig] = None
 
@@ -891,6 +911,8 @@ class TwoSensorGeometry(Geometry):
         self._last_column = None
         self._angles = [None] * GRID_SIZE
         self._states = [None] * GRID_SIZE
+        self._raw = [None] * GRID_SIZE
+        self._sightings = [None] * GRID_SIZE
         self._now_ms = -math.inf
 
     def channels(self, sample) -> list:
@@ -905,6 +927,7 @@ class TwoSensorGeometry(Geometry):
             out[slot] = _valid_cm(distance)
             self._angles[slot] = _finite(angle)
             self._states[slot] = _finite(state)
+        self._raw = out
         return out
 
     def nearest_raw_cm(self, raw_channels) -> Optional[float]:
@@ -914,19 +937,88 @@ class TwoSensorGeometry(Geometry):
     def track(self, filtered, fresh, now_ms, area, config) -> None:
         self._now_ms = now_ms
         self._config = config
+        # A new reading that sees the player is that node's sighting
+        # (noteSightings() in game.js).
+        for slot in (self.LEFT, self.RIGHT):
+            if not fresh[slot] or self._raw[slot] is None or filtered[slot] is None:
+                continue
+            if self._states[slot] == SCAN_LOST:
+                continue
+            self._sightings[slot] = (filtered[slot], self._angles[slot], now_ms)
         self._los.step(filtered, self._angles, self._states, fresh, now_ms, area, config)
 
     def fixes(self, filtered, area) -> dict:
-        """Every method's position: {"los", "tri", "avg"} -> (x_cm, y_cm) or
-        None. Pure apart from reading the tracker."""
+        """Every method's position: {"near", "los", "tri", "avg"} -> (x_cm,
+        y_cm) or None. Pure apart from reading the tracker and when each node
+        was last heard."""
         tri = self._trilaterate(filtered, area)
         if self._angles[self.LEFT] is None and self._angles[self.RIGHT] is None:
-            return {"los": tri, "tri": tri, "avg": tri}
+            return {"near": tri, "los": tri, "tri": tri, "avg": tri}
+        near = self._nearest(area, self._config) if self._config else None
         los = self._los.fix(self._now_ms, self._config) if self._config else None
         avg = los or tri
         if los and tri:
             avg = ((los[0] + tri[0]) / 2, (los[1] + tri[1]) / 2)
-        return {"los": los, "tri": tri, "avg": avg}
+        return {"near": near, "los": los, "tri": tri, "avg": avg}
+
+    # --- nearest node: nearestNodeFix() and crossNodes() in game.js ---------
+
+    def _nearest(self, area, config) -> Optional[tuple]:
+        """Each node's sighting is its last new reading that saw the player (a
+        distance, not lost), kept through missed echoes and the other node's
+        turn until it is more than near_max_age_ms old. Both sightings are
+        trilaterated when _cross() accepts them. Otherwise the nearer node
+        that still sees the player (its latest reading is not lost) places
+        them by its angle and distance, one whose point is inside the play
+        area first; left wins a tie. None when there is neither."""
+        seen = []
+        for slot in (self.LEFT, self.RIGHT):
+            sighting = self._sightings[slot]
+            if sighting is None or self._now_ms - sighting[2] > config.near_max_age_ms:
+                continue
+            distance, angle, at_ms = sighting
+            node_x = area.column_centre_cm(slot)
+            x, y = scanner_point(node_x, distance, angle)
+            seen.append({"node_x": node_x, "distance": distance, "angle": angle,
+                         "at_ms": at_ms, "x": x, "y": y, "inside": _in_play_at(x, y, area),
+                         "seeing": self._states[slot] != SCAN_LOST})
+
+        if len(seen) == 2:
+            both = self._cross(seen[0], seen[1], area, config)
+            if both is not None:
+                return both
+
+        seeing = [node for node in seen if node["seeing"]]
+        pool = [node for node in seeing if node["inside"]] or seeing
+        best = None
+        for node in pool:
+            if best is None or node["distance"] < best["distance"]:
+                best = node
+        return None if best is None else (best["x"], best["y"])
+
+    @staticmethod
+    def _cross(left, right, area, config) -> Optional[tuple]:
+        """Where the two distance circles cross, if the readings were taken at
+        most tri_max_gap_ms apart, the crossing is inside the play area, and
+        it lies within tri_bearing_deg of where each servo points. Else None."""
+        if abs(left["at_ms"] - right["at_ms"]) > config.tri_max_gap_ms:
+            return None
+        base = right["node_x"] - left["node_x"]
+        d_left, d_right = left["distance"], right["distance"]
+        along = (d_left * d_left - d_right * d_right + base * base) / (2 * base)
+        h2 = d_left * d_left - along * along
+        if not h2 > 0:
+            return None
+        x = left["node_x"] + along
+        y = math.sqrt(h2)
+        if not _in_play_at(x, y, area):
+            return None
+        for node in (left, right):
+            off = abs(bearing_from(node["node_x"], x, y) - node["angle"]) \
+                if node["angle"] is not None else 0.0
+            if off > config.tri_bearing_deg:
+                return None
+        return x, y
 
     def position(self, filtered, area) -> Optional[tuple]:
         """(x_cm, y_cm) by the chosen method, or None. x is not yet clamped
@@ -1279,6 +1371,20 @@ def scanner_point(node_x_cm: float, distance_cm: float,
     """
     phi = ((90.0 if angle_deg is None else angle_deg) - 90) * math.pi / 180
     return node_x_cm - distance_cm * math.sin(phi), distance_cm * math.cos(phi)
+
+
+def bearing_from(node_x_cm: float, x_cm: float, y_cm: float) -> float:
+    """The servo angle at which a node at node_x_cm points at (x_cm, y_cm):
+    the inverse of scanner_point(). bearingFrom() in game.js."""
+    return 90 + (math.atan2(node_x_cm - x_cm, y_cm) * 180) / math.pi
+
+
+def _in_play_at(x_cm: float, y_cm: float, area: PlayArea) -> bool:
+    """isInPlayAt() in game.js: no more than NEAR_SIDE_MARGIN_CM past a side
+    edge, and inside the depth span of the column x falls in."""
+    if x_cm < -NEAR_SIDE_MARGIN_CM or x_cm > area.width_cm + NEAR_SIDE_MARGIN_CM:
+        return False
+    return area.contains(area.column_at(_clamp(x_cm, 0.0, area.width_cm)), y_cm)
 
 
 def _split_reading(entry) -> tuple:

@@ -102,10 +102,14 @@ class ParityWithGameJs(unittest.TestCase):
         return len(run["steps"])
 
     def test_default_bounds(self):
+        self.assertEqual(self.trace["runs"]["default"]["method"], "near")
         self.assertGreater(self._replay("default"), 0)
 
     def test_calibrated_bounds(self):
         self.assertGreater(self._replay("calibrated"), 0)
+
+    def test_line_of_sight(self):
+        self.assertGreater(self._replay("lineOfSight"), 0)
 
     def test_trilateration(self):
         self.assertGreater(self._replay("trilateration"), 0)
@@ -113,12 +117,19 @@ class ParityWithGameJs(unittest.TestCase):
     def test_average_of_line_of_sight_and_trilateration(self):
         self.assertGreater(self._replay("average"), 0)
 
-    def test_the_methods_really_differ_on_the_recorded_stream(self):
+    def _steps_that_differ(self, run_a, run_b):
         runs = self.trace["runs"]
         at = self.trace["fields"].index("x")
-        differ = sum(1 for a, b in zip(runs["default"]["steps"], runs["trilateration"]["steps"])
-                     if a[at] is not None and b[at] is not None and abs(a[at] - b[at]) > 1.0)
-        self.assertGreater(differ, 50, "line of sight and trilateration should not agree everywhere")
+        return sum(1 for a, b in zip(runs[run_a]["steps"], runs[run_b]["steps"])
+                   if a[at] is not None and b[at] is not None and abs(a[at] - b[at]) > 1.0)
+
+    def test_the_methods_really_differ_on_the_recorded_stream(self):
+        self.assertGreater(self._steps_that_differ("lineOfSight", "trilateration"), 50,
+                           "line of sight and trilateration should not agree everywhere")
+        self.assertGreater(self._steps_that_differ("default", "trilateration"), 50,
+                           "the nearest node and plain trilateration should not agree everywhere")
+        self.assertGreater(self._steps_that_differ("default", "lineOfSight"), 50,
+                           "the nearest node and line of sight should not agree everywhere")
 
     def test_the_stream_has_turns_where_a_node_is_silent(self):
         fresh = self.trace["fields"].index("fresh")
@@ -398,10 +409,11 @@ def two_sensor_sample(x_cm, depth_cm):
 
 
 class TwoSensorGeometryBehaviour(unittest.TestCase):
-    """Today's rig: LEFT and RIGHT sensors, basic trilateration."""
+    """Today's rig: LEFT and RIGHT sensors; trilateration without angles, and
+    line of sight with them. The nearest-node method is NearestNodeBehaviour."""
 
     def setUp(self):
-        self.geometry = TwoSensorGeometry()
+        self.geometry = TwoSensorGeometry(method="los")
         self.area = PlayArea.default()
         self.config = FilterConfig()
 
@@ -577,6 +589,97 @@ class TwoSensorGeometryBehaviour(unittest.TestCase):
         fix = self.locate(self.geometry.channels(two_sensor_sample(60.0, 80.0)))
         self.assertAlmostEqual(fix.x_cm, 60.0)
         self.assertAlmostEqual(fix.y_cm, 80.0)
+
+
+class NearestNodeBehaviour(unittest.TestCase):
+    """The default method: the nearer node that sees the player places them by
+    its angle and distance; both nodes' distances are trilaterated when both
+    see the player, their readings are close in time, and the crossing is
+    where both servos point."""
+
+    def setUp(self):
+        self.geometry = TwoSensorGeometry()
+        self.area = PlayArea.default()
+        self.config = FilterConfig()
+
+    def scan(self, sample, now_ms=0.0, fresh=(True, True, True)):
+        """One update as the pipeline runs it, on unfiltered readings."""
+        readings = self.geometry.channels(sample)
+        self.geometry.track(readings, list(fresh), now_ms, self.area, self.config)
+        return self.geometry.locate(readings, self.area, self.config)
+
+    def assertAt(self, fix, x, y, places=6):
+        self.assertEqual(fix.status, STATUS_OK)
+        self.assertAlmostEqual(fix.x_cm, x, places=places)
+        self.assertAlmostEqual(fix.y_cm, y, places=places)
+
+    def test_it_is_the_default(self):
+        self.assertEqual(TwoSensorGeometry().method, "near")
+
+    def test_both_nodes_seeing_the_player_are_trilaterated(self):
+        # Both aims are 8 degrees off; the distances are exact, and so is the fix.
+        self.assertAt(self.scan(scanner_sample(60.0, 80.0, aim_error_deg=8.0)), 60.0, 80.0)
+
+    def test_one_node_places_the_player_by_its_angle_and_distance(self):
+        fix = self.scan([(None, 70, 2), None, (90.0, 115, 0)])
+        self.assertAt(fix, *scanner_point(125.0, 90.0, 115))
+
+    def test_a_lost_node_is_left_out(self):
+        # The left node is sweeping, and its beam has found furniture at 120 cm.
+        sample = scanner_sample(80.0, 95.0)
+        sample[0] = (120.0, 60, 2)
+        self.assertAt(self.scan(sample), 80.0, 95.0)
+
+    def test_readings_too_far_apart_in_time_are_not_trilaterated(self):
+        truth = (40.0, 70.0)
+        sample = scanner_sample(*truth, aim_error_deg=5.0)
+        self.scan(sample, now_ms=0.0)
+        # Only the right node reports now: the left node's reading is 800 ms
+        # old, too old to cross with, but still new enough to place the player,
+        # and the left node is the nearer one.
+        fix = self.scan(sample, now_ms=800.0, fresh=(False, True, True))
+        self.assertGreater(800.0, self.config.tri_max_gap_ms)
+        self.assertAt(fix, *scanner_point(25.0, *sample[0][:2]))
+        self.assertGreater(math.dist((fix.x_cm, fix.y_cm), truth), 4.0)
+
+    def test_a_missed_echo_does_not_throw_away_a_sighting(self):
+        truth = (60.0, 120.0)
+        sample = scanner_sample(*truth, aim_error_deg=6.0)
+        self.scan(sample, now_ms=0.0)
+        # 100 ms later the left node misses (no echo: lost); the right one
+        # still sees the player. The left node's sighting from before the
+        # miss is still crossed with the right node's new distance.
+        missed = [(None, sample[0][1], 2), None, sample[2]]
+        self.assertAt(self.scan(missed, now_ms=100.0), *truth)
+
+    def test_a_reading_too_old_no_longer_counts(self):
+        self.scan(scanner_sample(40.0, 70.0), now_ms=0.0)
+        late = self.config.near_max_age_ms + 1
+        # The right node is lost now; the left node was last heard too long ago.
+        fix = self.scan([scanner_sample(40.0, 70.0)[0], None, (None, 120, 2)],
+                        now_ms=late, fresh=(False, True, True))
+        self.assertEqual(fix.status, STATUS_NO_SIGNAL)
+
+    def test_a_crossing_where_a_servo_does_not_point_is_refused(self):
+        # The left node is locked onto furniture at (40, 120); the right one is
+        # on the player at (100, 70). Their circles cross, but far from where
+        # the left servo points, so the nearer node, the right, places them.
+        left = scanner_sample(40.0, 120.0)[0]
+        right = scanner_sample(100.0, 70.0)[2]
+        self.assertAt(self.scan([left, None, right]), 100.0, 70.0)
+
+    def test_circles_that_do_not_cross_leave_the_nearer_node(self):
+        # 30 + 40 is less than the 100 cm between the nodes.
+        self.assertAt(self.scan([(30.0, 90, 0), None, (40.0, 90, 0)]), 25.0, 30.0)
+
+    def test_a_nearer_node_pointing_off_the_play_area_gives_way(self):
+        # The left node's point is 27 cm off the left edge of the board; the
+        # right node's is on it, so the right node places the player although
+        # it is further away.
+        left = (60.0, 150, 0)
+        right = scanner_sample(80.0, 95.0)[2]
+        self.assertLess(scanner_point(25.0, 60.0, 150)[0], -15.0)
+        self.assertAt(self.scan([left, None, right]), 80.0, 95.0)
 
 
 class CartesianGeometryBehaviour(unittest.TestCase):

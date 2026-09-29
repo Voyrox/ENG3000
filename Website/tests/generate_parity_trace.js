@@ -152,6 +152,14 @@ function buildStream() {
     push(scanned(SENSOR_X_CM[0], 120, 60), scanned(SENSOR_X_CM[1], 120, 60));
   }
 
+  // 16. The left scanner has locked onto furniture at (40, 120) and calls it
+  //     found; the right one tracks the player at (100, 70). The two circles
+  //     still cross, but some 45 degrees from where the left servo points, so
+  //     the nearest node - the right one - places the player on its own.
+  for (let i = 0; i < 60; i++) {
+    push(scanned(SENSOR_X_CM[0], 40, 120), scanned(SENSOR_X_CM[1], 100, 70));
+  }
+
   return steps;
 }
 
@@ -250,10 +258,11 @@ const trace = {
   fields: FIELDS,
   stream,
   // One run per position method (the game's switch), on the default bounds,
-  // plus line of sight on calibrated bounds.
+  // plus the default method (nearest node) on calibrated bounds.
   runs: {
-    default: { method: "los", ...runJs(stream, null, "los") },
-    calibrated: { method: "los", ...runJs(stream, calibrated, "los") },
+    default: { method: "near", ...runJs(stream, null, "near") },
+    calibrated: { method: "near", ...runJs(stream, calibrated, "near") },
+    lineOfSight: { method: "los", ...runJs(stream, null, "los") },
     trilateration: { method: "tri", ...runJs(stream, null, "tri") },
     average: { method: "avg", ...runJs(stream, null, "avg") },
   },

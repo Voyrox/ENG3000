@@ -72,15 +72,30 @@ constexpr float NO_ECHO = -1.0f;
 // Speed of sound in cm/us. A reading is half the round trip.
 constexpr double SOUND_CM_PER_US = 0.034;
 
-// How long a reading may wait for its echo. Sound covers the round trip to the
-// far edge of the play area in about 8.2 ms, so anything past this is not a
-// target.
-constexpr unsigned long ECHO_TIMEOUT_US = 9000;
-
 // A reading inside this range is taken to be the player; outside it there is no
-// target.
+// target. With the nodes 50 cm out from the wall the play area runs 10-150 cm
+// deep. At 180 cm a node reaches the far edge up to about 100 cm to either side
+// of itself: the left node covers x = 0-125 cm of it and the right node
+// 25-150 cm, so every corner is in range of at least one node.
 constexpr float MIN_TARGET_CM = 10;
 constexpr float MAX_TARGET_CM = 180;
+
+// Echoes are listened for this far out, a little past MAX_TARGET_CM, so a player
+// who steps off the back of the play area still reads as a distance (the game
+// says "come back in bounds") rather than as silence.
+constexpr float ECHO_RANGE_CM = MAX_TARGET_CM + 40;
+
+// The sensor sends its burst before it raises the echo line, and pulseIn()'s
+// timeout counts from the call, not from that rising edge.
+constexpr unsigned long ECHO_START_US = 1000;
+
+// How long a reading may wait for its echo: the round trip to ECHO_RANGE_CM, plus
+// ECHO_START_US (about 13.9 ms). It follows MAX_TARGET_CM on purpose. It used to
+// be a fixed 9000 us, sized for a 140 cm range, which cut off every echo from
+// past about 145 cm: the back row and the diagonals read as no echo at all, and
+// raising MAX_TARGET_CM on its own never let a node see any further.
+constexpr unsigned long ECHO_TIMEOUT_US =
+    static_cast<unsigned long>(2 * ECHO_RANGE_CM / SOUND_CM_PER_US) + ECHO_START_US;
 
 // --- Scan timing ----------------------------------------------------------
 // Quiet time after one pulse pair before the next pair starts.
@@ -107,6 +122,21 @@ constexpr int STEER_STEP_DEG = 3;
 
 // Lost: a large sweep step, reversing at each servo limit.
 constexpr int SWEEP_STEP_DEG = 14;
+
+// Lost straight after having the player: this many lost pairs in a row are
+// ridden out at the angle the player was last seen before the search starts.
+// Towards the back of the play area a person's echo is weak and a pair often
+// misses; a node that sweeps away on the first miss loses a player who never
+// moved.
+constexpr int LOST_GRACE_PAIRS = 2;
+
+// Then the search starts where the player was last seen, LOCAL_SEARCH_STEP_DEG
+// to one side and then the other, widening each time out to
+// LOCAL_SEARCH_SPAN_DEG, and only then sweeps the whole range. It looks first on
+// the side the node was last steering towards, which is where the player was
+// heading.
+constexpr int LOCAL_SEARCH_STEP_DEG = 10;
+constexpr int LOCAL_SEARCH_SPAN_DEG = 30;
 
 // --- Multi-pulse ----------------------------------------------------------
 // In found or half-found, take this many pulse pairs at one angle and average

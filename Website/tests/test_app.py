@@ -58,7 +58,11 @@ def counting_sleep(ticks):
     """
     state = {"n": 0}
 
-    def _sleep(_seconds):
+    def _sleep(seconds):
+        # The coordinator's pause between one node's HALT and the next node's
+        # TURN is part of a tick, not a tick of its own.
+        if seconds == app.TURN_GUARD_SECONDS:
+            return
         state["n"] += 1
         if state["n"] > ticks:
             raise LoopStopped
@@ -818,6 +822,37 @@ class CoordinatorTurnsTests(BrokerTestCase):
             self.assertIn("HALT\n", node["conn"].sent)
             self.assertNotIn("TURN\n", node["conn"].sent)
         self.assertIn("TURN\n", holder["conn"].sent)
+
+    def test_the_outgoing_node_is_halted_before_the_next_is_granted(self):
+        """HALT, a pause for it to take effect, then TURN: when the turn changes
+        hands the two nodes must never ping at once."""
+        log = []
+        ids = []
+        for index in range(2):
+            conn = RecordingConn(on_send=lambda c, index=index: log.append((index, c.sent[-1])))
+            node_id, _ = self.add_node(address=(f"10.0.0.{index + 1}", 1000 + index), conn=conn)
+            ids.append(node_id)
+
+        def sleep(seconds):
+            log.append(("sleep", seconds))
+            if log.count(("sleep", app.TURN_INTERVAL_SECONDS)) > 2:
+                raise LoopStopped
+
+        with mock.patch.object(app.time, "sleep", sleep):
+            with self.assertRaises(LoopStopped):
+                app.coordinator_loop()
+
+        # Tick 1 gives node 1 the turn with no one to halt; tick 2 hands it to
+        # node 0.
+        self.assertEqual(log.count(("sleep", app.TURN_GUARD_SECONDS)), 1)
+        second_tick = log[log.index(("sleep", app.TURN_INTERVAL_SECONDS), 1) + 1:]
+        halt = second_tick.index((1, "HALT\n"))
+        pause = second_tick.index(("sleep", app.TURN_GUARD_SECONDS))
+        turn = second_tick.index((0, "TURN\n"))
+        self.assertLess(halt, pause)
+        self.assertLess(pause, turn)
+        self.assertTrue(app.nodes[ids[0]]["has_turn"])
+        self.assertFalse(app.nodes[ids[1]]["has_turn"])
 
     def test_a_node_with_no_connection_is_never_given_a_turn(self):
         """Coordinator authority is only meaningful over a live socket, and a

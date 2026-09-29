@@ -66,16 +66,19 @@ bool Scanner::update() {
 
 void Scanner::setRole(NodeRole role) {
     servo_.setRole(role);
+    forgetPlayer();
     restart();
 }
 
 void Scanner::holdAt(int degrees) {
     servo_.holdAt(degrees);
+    forgetPlayer();
     restart();
 }
 
 void Scanner::resumeScanning() {
     servo_.release();
+    forgetPlayer();
     restart();
 }
 
@@ -220,9 +223,11 @@ void Scanner::move(const ScanReading& reading) {
     switch (reading.state) {
     case ScanState::Found:
         steerDir_ = 1;
+        rememberPlayer();
         break;
 
     case ScanState::HalfFound: {
+        rememberPlayer();
         // Steer towards whichever sensor has the player (left is towards the
         // larger angle): the only one in range, or the nearer one when both
         // are in range but too far apart to be the same target.
@@ -235,6 +240,7 @@ void Scanner::move(const ScanReading& reading) {
         bool rightIsTarget = UltrasonicSensor::isTarget(reading.rightCm);
         bool towardsLeft = leftIsTarget && (!rightIsTarget || reading.leftCm <= reading.rightCm);
         int step = (towardsLeft ? config::STEER_STEP_DEG : -config::STEER_STEP_DEG) * steerDir_;
+        lastSteerSign_ = towardsLeft ? 1 : -1;
         bool hitLimit = servo_.stepBy(step);
         steerDir_ = hitLimit ? -steerDir_ : 1;
         break;
@@ -242,11 +248,54 @@ void Scanner::move(const ScanReading& reading) {
 
     case ScanState::Lost:
         steerDir_ = 1;
-        if (servo_.stepBy(config::SWEEP_STEP_DEG * sweepDir_)) {
-            sweepDir_ = -sweepDir_;
-        }
+        search();
         break;
     }
+}
+
+// Lost. With no idea where the player is, sweep. Straight after losing them:
+//   1. stay put for config::LOST_GRACE_PAIRS pairs - at range one pair often
+//      misses a player who has not moved, and sweeping away then loses them
+//      for a whole sweep;
+//   2. look either side of where they were last seen, first on the side the
+//      node was steering towards, config::LOCAL_SEARCH_STEP_DEG further each
+//      time out to config::LOCAL_SEARCH_SPAN_DEG;
+//   3. sweep from wherever that leaves the servo.
+// An angle past the servo's limit is clamped to it, which only costs a step.
+void Scanner::search() {
+    lostPairs_++;
+    if (hasLastSeen_ && lostPairs_ <= config::LOST_GRACE_PAIRS) {
+        return;
+    }
+
+    if (hasLastSeen_) {
+        int offset = (searchStep_ / 2 + 1) * config::LOCAL_SEARCH_STEP_DEG;
+        if (offset <= config::LOCAL_SEARCH_SPAN_DEG) {
+            int side = searchStep_ % 2 == 0 ? lastSteerSign_ : -lastSteerSign_;
+            searchStep_++;
+            servo_.stepBy(lastSeenDeg_ + side * offset - servo_.angleDeg());
+            return;
+        }
+        forgetPlayer(); // not near where they were: sweep the whole range
+    }
+
+    if (servo_.stepBy(config::SWEEP_STEP_DEG * sweepDir_)) {
+        sweepDir_ = -sweepDir_;
+    }
+}
+
+// Found or half-found here, at the current angle.
+void Scanner::rememberPlayer() {
+    hasLastSeen_ = true;
+    lastSeenDeg_ = servo_.angleDeg();
+    lostPairs_ = 0;
+    searchStep_ = 0;
+}
+
+void Scanner::forgetPlayer() {
+    hasLastSeen_ = false;
+    lostPairs_ = 0;
+    searchStep_ = 0;
 }
 
 void Scanner::logPair(const PulsePair& pair) const {

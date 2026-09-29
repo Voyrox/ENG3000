@@ -74,7 +74,17 @@ MEDIAN_WINDOW = _DISTANCE_CHAIN.median_window
 FFT_WINDOW = _DISTANCE_CHAIN.fft_window
 FFT_MIN_SAMPLES = _DISTANCE_CHAIN.fft_min_samples
 DISTANCE_CUTOFF_HZ = _DISTANCE_CHAIN.fft_cutoff_hz
-TURN_INTERVAL_SECONDS = 1.0
+# Each node's scanning turn. Short, so that when the game pairs one node's
+# reading with the other's (trilateration), the other's is at most about a
+# turn old: with 1 s turns a walking player had moved up to 60 cm in between.
+# Long enough for three pulse pairs (about 100 ms each at the back of the play
+# area), which is what the Pulses button's 3 needs within one turn: a node
+# drops the pulses it has collected when a new turn starts.
+TURN_INTERVAL_SECONDS = 0.4
+# From HALTing one node to granting the next its TURN: time for the HALT to
+# arrive and for the halted node's last ping to die away (a 220 cm echo takes
+# 13 ms), so the two nodes never ping at once.
+TURN_GUARD_SECONDS = 0.04
 MS_PER_SECOND = 1000.0
 # Server-side filtering (filterRules.py) runs only when the SERVER_FILTERING
 # environment variable is set to 1/true/yes/on. Off by default: the browser
@@ -651,9 +661,18 @@ def coordinator_loop():
         for node_id in online_ids:
             sync_node(node_id)
 
+        # HALT everyone else first, and give the HALT TURN_GUARD_SECONDS to
+        # take effect before the next node starts, if the turn is changing hands.
         active = online_ids[sync_tick % len(online_ids)]
+        with state_lock:
+            handing_over = any(nodes[node_id]["has_turn"] for node_id in online_ids
+                               if node_id != active and node_id in nodes)
         for node_id in online_ids:
-            set_turn(node_id, node_id == active)
+            if node_id != active:
+                set_turn(node_id, False)
+        if handing_over:
+            time.sleep(TURN_GUARD_SECONDS)
+        set_turn(active, True)
 
         print(
             f"Tick {sync_tick}: scanning node {active}, "
@@ -726,7 +745,8 @@ def apply_filter_event(event):
                 server_filter.set_calibration(
                     [(c["near"], c["far"]) for c in event["perColumn"]])
             elif event.get("type") == "position:method":
-                # The game's position switch: line of sight, trilateration or both.
+                # The game's position switch: nearest node, line of sight,
+                # trilateration or average.
                 server_filter.set_position_method(event["method"])
     except (KeyError, TypeError, ValueError) as exc:
         print(f"Ignored bad {event.get('type')} message: {exc}")
