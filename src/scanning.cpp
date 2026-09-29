@@ -143,7 +143,7 @@ float ultraSonicRead(const int USS[2]){
 
   // A timeout reads as zero, which would come out as a distance of 0 cm - a
   // target pressed against the sensor. Report silence as silence instead.
-  if (duration == 0) {
+  if (duration <= 0) {
     return NO_ECHO;
   }
 
