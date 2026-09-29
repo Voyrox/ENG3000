@@ -31,8 +31,7 @@
 //     > maxCm            "come back in bounds"
 //
 // API on `window`:
-//   window.renderCalibrateCorners(ctx, canvas, reading)
-//   window.getCalibrateCornersButtonAtPoint(canvas, x, y)
+//   window.updateCalibrateCornersScreen(reading) - fill in the "calibrate_corners" section of index.html
 //   window.captureCorner(reading)          - store the active point, advance
 //   window.getCornerReading(reading, key)  - that point's owning-sensor value
 //   window.resetCornerCalibration()
@@ -308,255 +307,113 @@
     return true;
   };
 
-  // --- Layout ---------------------------------------------------------------
+  // --- Screen (the "calibrate_corners" section in index.html) ----------------
+  //
+  // Looked up on first use rather than at load: the parity and solver tests run
+  // this file with no page at all, for the rawToGrid maths alone.
+  let view = null;
 
-  window.getCalibrateCornersLayout = function getCalibrateCornersLayout(canvas) {
-    const width = canvas.clientWidth || canvas.width;
-    const height = canvas.clientHeight || canvas.height;
-    const centerX = width / 2;
-
-    const boxW = Math.min(width * 0.5, 420);
-    const boxH = Math.min(height * 0.28, 230);
-    const boxX = centerX - boxW / 2;
-    const boxY = Math.max(160, height * 0.26);
-
-    const buttonWidth = Math.min(190, Math.max(130, width * 0.16));
-    const buttonHeight = 48;
-    const gap = 14;
-    const row = [
-      { type: "capture", label: "Capture" },
-      { type: "reset", label: "Reset" },
-      { type: "start", label: "Start Game" },
-    ];
-    const rowWidth = row.length * buttonWidth + (row.length - 1) * gap;
-    const rowY = Math.min(height - buttonHeight - 24, boxY + boxH + 150);
-
-    return {
-      width,
-      height,
-      centerX,
-      boxX,
-      boxY,
-      boxW,
-      boxH,
-      backButton: { type: "back", x: 16, y: 16, width: 80, height: 36, label: "◀ Back" },
-      skipButton: { type: "skip", x: width - 96, y: 16, width: 80, height: 36, label: "Skip ▶" },
-      buttons: row.map((button, index) => ({
-        ...button,
-        x: centerX - rowWidth / 2 + index * (buttonWidth + gap),
-        y: rowY,
-        width: buttonWidth,
-        height: buttonHeight,
-      })),
-    };
-  };
-
-  function pointInRect(x, y, r) {
-    return r && x >= r.x && x <= r.x + r.width && y >= r.y && y <= r.y + r.height;
-  }
-
-  window.getCalibrateCornersButtonAtPoint = function getCalibrateCornersButtonAtPoint(canvas, x, y) {
-    const layout = window.getCalibrateCornersLayout(canvas);
-
-    if (pointInRect(x, y, layout.backButton)) return { type: "back" };
-    if (pointInRect(x, y, layout.skipButton)) return { type: "skip" };
-
-    const hit = layout.buttons.find((button) => pointInRect(x, y, button));
-    if (!hit) return null;
-    if (hit.type === "start" && !isComplete()) return null;
-    return { type: hit.type };
-  };
-
-  // Marker positions inside the preview box, in screen space (y grows down).
-  // Near edge along the bottom, far edge along the top.
-  function markerPositions(layout) {
-    const { boxX, boxY, boxW, boxH } = layout;
-    return {
-      TL: { x: boxX, y: boxY },
-      TR: { x: boxX + boxW, y: boxY },
-      BL: { x: boxX, y: boxY + boxH },
-      BR: { x: boxX + boxW, y: boxY + boxH },
+  function bindView() {
+    const root = document.getElementById("corners");
+    view = {
+      instruction: document.getElementById("cornerInstruction"),
+      hint: document.getElementById("cornerHint"),
+      sensor: document.getElementById("cornerSensor"),
+      value: document.getElementById("cornerValue"),
+      ignored: document.getElementById("cornerIgnored"),
+      bounds: document.getElementById("cornerBounds"),
+      limits: document.getElementById("cornerLimits"),
+      capture: document.getElementById("cornerCapture"),
+      start: document.getElementById("cornerStart"),
+      corners: Object.fromEntries(
+        POINT_ORDER.map((key) => [key, root.querySelector(`[data-point="${key}"]`)])
+      ),
     };
   }
 
-  window.renderCalibrateCorners = function renderCalibrateCorners(ctx, canvas, reading) {
-    const layout = window.getCalibrateCornersLayout(canvas);
-    const { width, height, centerX, boxX, boxY, boxW, boxH } = layout;
+  function sensorName(point) {
+    return point.sensor === "LEFT" ? "Left sensor" : "Right sensor";
+  }
+
+  window.updateCalibrateCornersScreen = function updateCalibrateCornersScreen(reading) {
+    if (!view) bindView();
     const key = activeKey();
     const complete = isComplete();
     const bounds = getBounds();
     const active = key ? pointFor(key) : null;
 
-    ctx.fillStyle = "#13131c";
-    ctx.fillRect(0, 0, width, height);
-
-    [layout.backButton, layout.skipButton].forEach((btn) => {
-      ctx.fillStyle = "#475569";
-      ctx.fillRect(btn.x, btn.y, btn.width, btn.height);
-      ctx.fillStyle = "#fff";
-      ctx.font = "bold 14px monospace";
-      ctx.textAlign = "center";
-      ctx.fillText(btn.label, btn.x + btn.width / 2, btn.y + 24);
-    });
-
-    // Title + instruction
-    const titleY = Math.max(46, height * 0.075);
-    ctx.textAlign = "center";
-    ctx.fillStyle = "#f4f4f5";
-    ctx.font = `bold ${Math.max(18, Math.min(30, width * 0.028))}px monospace`;
-    ctx.fillText("Play Area Calibration", centerX, titleY);
-
-    ctx.font = `${Math.max(13, Math.min(18, width * 0.016))}px monospace`;
-    ctx.fillStyle = complete ? "#22c55e" : "#f59e0b";
-    ctx.fillText(
-      complete ? "All four points captured - press Start Game" : `Stand at the ${active.label.toUpperCase()}`,
-      centerX,
-      titleY + 28
-    );
-
-    if (!complete) {
-      ctx.fillStyle = "#89b4fa";
-      ctx.font = `${Math.max(12, Math.min(16, width * 0.014))}px monospace`;
-      ctx.fillText(`measured by the ${active.sensor} sensor only`, centerX, titleY + 50);
-    }
-
-    ctx.fillStyle = "#585b70";
-    ctx.font = `${Math.max(11, Math.min(14, width * 0.012))}px monospace`;
-    ctx.fillText(`${capturedCount()} / ${POINT_ORDER.length} captured`, centerX, titleY + 72);
-
-    // Play-area preview
-    ctx.strokeStyle = "#2b2f3d";
-    ctx.lineWidth = 2;
-    ctx.setLineDash([6, 6]);
-    ctx.strokeRect(boxX, boxY, boxW, boxH);
-    ctx.setLineDash([]);
-
-    // Column dividers, to make the three lanes explicit.
-    ctx.strokeStyle = "#1f2937";
-    ctx.lineWidth = 1;
-    [boxX + boxW / 3, boxX + (boxW * 2) / 3].forEach((x) => {
-      ctx.beginPath();
-      ctx.moveTo(x, boxY);
-      ctx.lineTo(x, boxY + boxH);
-      ctx.stroke();
-    });
-
-    ctx.fillStyle = "#42425d";
-    ctx.font = `${Math.max(10, Math.min(13, width * 0.011))}px monospace`;
-    ctx.fillText("far edge", centerX, boxY - 22);
-    ctx.fillText("near edge  (screen below)", centerX, boxY + boxH + 40);
-
-    const positions = markerPositions(layout);
-    const markerRadius = Math.max(13, Math.min(20, boxW * 0.045));
-
-    POINT_ORDER.forEach((pointKey) => {
-      const pos = positions[pointKey];
-      const captured = state.points[pointKey];
-      const isActive = pointKey === key;
-      const owner = pointFor(pointKey);
-
-      ctx.beginPath();
-      ctx.arc(pos.x, pos.y, markerRadius, 0, Math.PI * 2);
-      let fill = "#313244";
-      if (captured) fill = "#22c55e";
-      else if (isActive) fill = "#f59e0b";
-      ctx.fillStyle = fill;
-      ctx.fill();
-      ctx.strokeStyle = isActive ? "#f4f4f5" : "#585b70";
-      ctx.lineWidth = isActive ? 3 : 1.5;
-      ctx.stroke();
-
-      ctx.fillStyle = captured || isActive ? "#13131c" : "#9298aa";
-      ctx.font = `bold ${Math.max(10, markerRadius * 0.62)}px monospace`;
-      ctx.textAlign = "center";
-      ctx.fillText(pointKey, pos.x, pos.y + markerRadius * 0.32);
-
-      // Value sits outside the box: above the far edge, below the near one.
-      const isFar = owner.edge === "far";
-      const outY = isFar ? pos.y - markerRadius - 8 : pos.y + markerRadius + 18;
-      ctx.fillStyle = captured ? "#9298aa" : "#42425d";
-      ctx.font = `${Math.max(10, Math.min(12, width * 0.011))}px monospace`;
-      ctx.fillText(captured ? `${captured.distanceCm.toFixed(0)}cm` : owner.sensor, pos.x, outY);
-    });
-
-    // Live reading from the owning sensor
-    const readoutY = layout.buttons[0].y - 66;
-    const liveDistance = key ? readingForPoint(reading, key) : null;
-    ctx.textAlign = "center";
-    ctx.font = `bold ${Math.max(14, Math.min(19, width * 0.016))}px monospace`;
-
     if (complete) {
-      ctx.fillStyle = "#22c55e";
-      ctx.fillText("ready", centerX, readoutY);
-    } else if (liveDistance !== null) {
-      ctx.fillStyle = "#22c55e";
-      ctx.fillText(`${active.sensor} sensor: ${liveDistance.toFixed(1)}cm`, centerX, readoutY);
+      view.instruction.textContent = `All ${POINT_ORDER.length} corners captured`;
+      view.instruction.className = "instruction";
+      view.hint.textContent = "Start the game when the player is ready.";
     } else {
-      ctx.fillStyle = "#ef4444";
-      ctx.fillText(`${active ? active.sensor : "target"} sensor: no usable reading`, centerX, readoutY);
+      view.instruction.textContent = `Stand at the ${active.label.toLowerCase()} corner`;
+      view.instruction.className = "instruction is-wait";
+      view.hint.textContent =
+        `${capturedCount()} of ${POINT_ORDER.length} captured. Only the ${active.sensor.toLowerCase()} sensor measures this corner.`;
     }
 
-    // The other sensor, greyed out, so a mis-wired rig is obvious.
+    // Captured corners show their depth; the rest name the sensor that owns them.
+    POINT_ORDER.forEach((pointKey) => {
+      const el = view.corners[pointKey];
+      const captured = state.points[pointKey];
+      el.classList.toggle("is-captured", Boolean(captured));
+      el.classList.toggle("is-active", pointKey === key);
+      el.querySelector("small").textContent = captured
+        ? `${captured.distanceCm.toFixed(0)} cm`
+        : sensorName(pointFor(pointKey));
+    });
+
+    // Live reading from the one sensor that owns the active corner.
+    const liveDistance = key ? readingForPoint(reading, key) : null;
+    if (complete) {
+      view.sensor.textContent = "Play area";
+      view.value.textContent = "Ready";
+      view.value.className = "readout-value is-ready";
+    } else if (liveDistance !== null) {
+      view.sensor.textContent = sensorName(active);
+      view.value.textContent = `${liveDistance.toFixed(1)} cm`;
+      view.value.className = "readout-value";
+    } else {
+      view.sensor.textContent = sensorName(active);
+      view.value.textContent = "No usable reading";
+      view.value.className = "readout-value is-fault";
+    }
+
+    // The other sensor, so a mis-wired rig is obvious.
+    view.ignored.textContent = "";
     if (!complete && Array.isArray(reading && reading.filtered)) {
-      ctx.fillStyle = "#42425d";
-      ctx.font = `${Math.max(10, Math.min(12, width * 0.011))}px monospace`;
-      const others = SENSOR_COLUMNS.filter((index) => index !== active.column)
+      const depths = Array.isArray(reading.depth) ? reading.depth : reading.filtered;
+      view.ignored.textContent = SENSOR_COLUMNS.filter((index) => index !== active.column)
         .map((index) => {
-          const value = (Array.isArray(reading.depth) ? reading.depth : reading.filtered)[index];
-          const shown = value === null || value === undefined ? "--" : value.toFixed(0) + "cm";
-          return `${COLUMN_NAMES[index]} ${shown}`;
+          const value = depths[index];
+          const shown = value === null || value === undefined ? "--" : `${value.toFixed(0)} cm`;
+          return `Ignored: ${COLUMN_NAMES[index].toLowerCase()} sensor ${shown}`;
         })
-        .join("   ");
-      ctx.fillText(`ignored:  ${others}`, centerX, readoutY + 20);
+        .join(" · ");
     }
 
     // Derived limits, so the operator can see what this calibration enforces.
-    ctx.font = `${Math.max(10, Math.min(13, width * 0.011))}px monospace`;
+    view.bounds.textContent = "";
+    view.bounds.className = "readout-note";
+    view.limits.textContent = "";
     if (bounds.bad) {
-      ctx.fillStyle = "#ef4444";
-      ctx.fillText("A sensor's column is too shallow - recapture with more depth", centerX, readoutY + 42);
+      view.bounds.textContent = "One sensor's column is too shallow. Start over and capture with more depth.";
+      view.bounds.className = "readout-note is-fault";
     } else if (complete) {
-      ctx.fillStyle = "#9298aa";
-      const cols = SENSOR_COLUMNS.map((i) => {
+      view.bounds.textContent = SENSOR_COLUMNS.map((i) => {
         const col = bounds.perColumn[i];
-        return `${COLUMN_NAMES[i]} ${col.near.toFixed(0)}-${col.far.toFixed(0)}`;
-      }).join("   ");
-      ctx.fillText(cols, centerX, readoutY + 42);
-      ctx.fillStyle = "#f59e0b";
-      ctx.fillText(
-        `alert below ${bounds.alertCm.toFixed(0)}cm   ·   out of bounds past ${bounds.maxCm.toFixed(0)}cm`,
-        centerX,
-        readoutY + 62
-      );
+        return `${COLUMN_NAMES[i]} ${col.near.toFixed(0)}–${col.far.toFixed(0)} cm`;
+      }).join(" · ");
+      view.limits.textContent =
+        `Too-close alert below ${bounds.alertCm.toFixed(0)} cm · out of bounds past ${bounds.maxCm.toFixed(0)} cm`;
+      view.limits.className = "readout-note is-strong";
     }
 
-    // Action buttons
-    const canCapture = !complete && liveDistance !== null;
-    layout.buttons.forEach((button) => {
-      let enabled = true;
-      if (button.type === "capture") enabled = canCapture;
-      else if (button.type === "start") enabled = complete;
-
-      let fill = "#475569";
-      if (!enabled) fill = "#313244";
-      else if (button.type === "start") fill = "#22c55e";
-      else if (button.type === "capture") fill = "#89b4fa";
-
-      ctx.fillStyle = fill;
-      ctx.beginPath();
-      ctx.roundRect(button.x, button.y, button.width, button.height, 8);
-      ctx.fill();
-
-      let labelColor = "#13131c";
-      if (!enabled) labelColor = "#585b70";
-      else if (button.type === "reset") labelColor = "#fff";
-
-      ctx.fillStyle = labelColor;
-      ctx.font = "bold 16px monospace";
-      ctx.textAlign = "center";
-      ctx.fillText(button.label, button.x + button.width / 2, button.y + button.height / 2 + 6);
-    });
-
-    ctx.textAlign = "start";
+    // Whichever action is next is where keyboard focus lands.
+    view.capture.disabled = complete || liveDistance === null;
+    view.start.disabled = !complete;
+    view.capture.toggleAttribute("data-default-focus", !complete);
+    view.start.toggleAttribute("data-default-focus", complete);
   };
 })();

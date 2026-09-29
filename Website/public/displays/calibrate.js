@@ -16,8 +16,7 @@
 //   window.getSensorAssignment()              - [leftId, null, rightId]
 //   window.isSensorAssignmentComplete()
 //   window.resetSensorAssignment()
-//   window.renderCalibrate(ctx, canvas, nodes)
-//   window.getCalibrateButtonAtPoint(canvas, x, y)
+//   window.updateCalibrateScreen(nodes)      - fill in the "calibrate" section of index.html
 
 (function () {
   // column: the slot's index in [left, centre, right]; the centre has no sensor.
@@ -171,211 +170,93 @@
     }
   };
 
-  // --- Layout ---------------------------------------------------------------
+  // --- Screen (the "calibrate" section in index.html) -----------------------
+  //
+  // Looked up on first use rather than at load, so this file still runs where
+  // there is no page at all.
+  let view = null;
 
-  window.getCalibrateLayout = function getCalibrateLayout(canvas) {
-    const width = canvas.clientWidth || canvas.width;
-    const height = canvas.clientHeight || canvas.height;
-    const centerX = width / 2;
-
-    const cardW = Math.min(210, Math.max(140, width * 0.18));
-    const cardH = 132;
-    const gap = 18;
-    const rowW = cardW * SLOTS.length + gap * (SLOTS.length - 1);
-    const cardY = Math.max(180, height * 0.28);
-
-    return {
-      width,
-      height,
-      centerX,
-      cardY,
-      cardW,
-      cardH,
-      backButton: { type: "back", x: 16, y: 16, width: 80, height: 36, label: "◀ Back" },
-      resetButton: { type: "reset", x: centerX - 50, y: 16, width: 100, height: 36, label: "Reset" },
-      skipButton: { type: "skip", x: width - 96, y: 16, width: 80, height: 36, label: "Skip ▶" },
-      cards: SLOTS.map((slot, index) => ({
-        ...slot,
-        x: centerX - rowW / 2 + index * (cardW + gap),
-        y: cardY,
-        width: cardW,
-        height: cardH,
-      })),
+  function bindView() {
+    const root = document.getElementById("calibrate");
+    view = {
+      instruction: document.getElementById("calInstruction"),
+      hint: document.getElementById("calHint"),
+      readings: document.getElementById("calReadings"),
+      slots: Object.fromEntries(
+        SLOTS.map((slot) => [slot.key, root.querySelector(`[data-slot="${slot.key}"]`)])
+      ),
     };
-  };
-
-  function pointInRect(x, y, r) {
-    return r && x >= r.x && x <= r.x + r.width && y >= r.y && y <= r.y + r.height;
   }
 
-  window.getCalibrateButtonAtPoint = function getCalibrateButtonAtPoint(canvas, x, y) {
-    const layout = window.getCalibrateLayout(canvas);
-    if (pointInRect(x, y, layout.backButton)) return { type: "back" };
-    if (pointInRect(x, y, layout.resetButton)) return { type: "reset" };
-    if (pointInRect(x, y, layout.skipButton)) return { type: "skip" };
-    return null;
-  };
-
-  // --- Render ---------------------------------------------------------------
-
-  function drawButton(ctx, btn) {
-    ctx.fillStyle = "#475569";
-    ctx.fillRect(btn.x, btn.y, btn.width, btn.height);
-    ctx.fillStyle = "#fff";
-    ctx.font = "bold 14px monospace";
-    ctx.textAlign = "center";
-    ctx.fillText(btn.label, btn.x + btn.width / 2, btn.y + 24);
+  function formatCm(distance) {
+    return distance === null ? "no echo" : `${distance.toFixed(1)} cm`;
   }
 
-  window.renderCalibrate = function renderCalibrate(ctx, canvas, nodes = []) {
-    const layout = window.getCalibrateLayout(canvas);
-    const { width, height, centerX } = layout;
+  window.updateCalibrateScreen = function updateCalibrateScreen(nodes = []) {
+    if (!view) bindView();
     const slot = activeSlot();
     const complete = isComplete();
 
-    ctx.fillStyle = "#13131c";
-    ctx.fillRect(0, 0, width, height);
-
-    [layout.backButton, layout.resetButton, layout.skipButton].forEach((btn) => drawButton(ctx, btn));
-
-    // Title + instruction
-    const titleY = Math.max(54, height * 0.09);
-    ctx.textAlign = "center";
-    ctx.fillStyle = "#f4f4f5";
-    ctx.font = `bold ${Math.max(18, Math.min(32, width * 0.03))}px monospace`;
-    ctx.fillText("Sensor Assignment", centerX, titleY);
-
-    ctx.font = `${Math.max(15, Math.min(23, width * 0.02))}px monospace`;
     if (complete) {
-      ctx.fillStyle = "#22c55e";
-      ctx.fillText("Both sensors identified", centerX, titleY + 40);
+      view.instruction.textContent = "Both sensors identified";
+      view.instruction.className = "instruction";
+      view.hint.textContent = "Moving on to the play area.";
     } else if (nodes.length === 0) {
-      ctx.fillStyle = "#ef4444";
-      ctx.fillText("Waiting for sensors to connect...", centerX, titleY + 40);
+      view.instruction.textContent = "Waiting for the sensors to connect";
+      view.instruction.className = "instruction is-fault";
+      view.hint.textContent = "Power the nodes on. They show up under Live readings as they join.";
     } else {
-      ctx.fillStyle = "#f59e0b";
-      ctx.fillText(`Hold your hand in front of the ${slot.label} sensor`, centerX, titleY + 40);
+      view.instruction.textContent = `Hold your hand in front of the ${slot.key} sensor`;
+      view.instruction.className = "instruction is-wait";
+      view.hint.textContent = "Keep it steady until the bar fills.";
     }
 
-    ctx.fillStyle = "#63736f";
-    ctx.font = `${Math.max(12, Math.min(15, width * 0.013))}px monospace`;
-    ctx.fillText(
-      complete ? "Continuing to corner calibration" : "Hold steady until the bar fills",
-      centerX,
-      titleY + 66
-    );
+    SLOTS.forEach((entry) => {
+      const el = view.slots[entry.key];
+      const assignedId = state.slots[entry.key];
+      const isActive = !complete && slot && slot.key === entry.key;
+      el.classList.toggle("is-assigned", assignedId !== null);
+      el.classList.toggle("is-active", Boolean(isActive));
 
-    // Slot cards
-    layout.cards.forEach((card) => {
-      const assignedId = state.slots[card.key];
-      const isActive = !complete && slot && slot.key === card.key;
-
-      let border = "#2b2f3d";
-      if (assignedId !== null) border = "#22c55e";
-      else if (isActive) border = "#f59e0b";
-
-      ctx.fillStyle = "#1b2523";
-      ctx.beginPath();
-      ctx.roundRect(card.x, card.y, card.width, card.height, 10);
-      ctx.fill();
-      ctx.strokeStyle = border;
-      ctx.lineWidth = isActive ? 3 : 1.5;
-      ctx.stroke();
-
-      ctx.textAlign = "center";
-      ctx.fillStyle = border;
-      ctx.font = "bold 15px monospace";
-      ctx.fillText(card.label, card.x + card.width / 2, card.y + 30);
+      const side = el.querySelector(".slot-side");
+      const value = el.querySelector(".slot-value");
+      const meta = el.querySelector(".slot-meta");
+      const label = `${entry.key === "left" ? "Left" : "Right"} sensor`;
 
       if (assignedId !== null) {
-        ctx.fillStyle = "#f4f4f5";
-        ctx.font = "bold 30px monospace";
-        ctx.fillText(`#${assignedId}`, card.x + card.width / 2, card.y + 76);
-
-        const node = nodes.find((n) => n.id === assignedId);
-        const distance = distanceFor(node);
-        ctx.fillStyle = "#9298aa";
-        ctx.font = "12px monospace";
-        ctx.fillText(
-          distance === null ? "no reading" : `${distance.toFixed(1)} cm`,
-          card.x + card.width / 2,
-          card.y + 102
-        );
-      } else if (isActive) {
-        ctx.fillStyle = "#63736f";
-        ctx.font = "13px monospace";
-        ctx.fillText("waiting for hand", card.x + card.width / 2, card.y + 70);
-
-        // Dwell progress
-        const barW = card.width - 40;
-        const barX = card.x + 20;
-        const barY = card.y + 88;
-        ctx.fillStyle = "#313244";
-        ctx.beginPath();
-        ctx.roundRect(barX, barY, barW, 10, 5);
-        ctx.fill();
-
-        if (state.dwellProgress > 0) {
-          ctx.fillStyle = "#f59e0b";
-          ctx.beginPath();
-          ctx.roundRect(barX, barY, Math.max(6, barW * state.dwellProgress), 10, 5);
-          ctx.fill();
-        }
+        side.innerHTML = `<svg class="icon"><use href="#i-check" /></svg>${label}`;
+        value.textContent = `Node ${assignedId}`;
+        meta.textContent = formatCm(distanceFor(nodes.find((n) => n.id === assignedId)));
       } else {
-        ctx.fillStyle = "#42425d";
-        ctx.font = "13px monospace";
-        ctx.fillText("not yet assigned", card.x + card.width / 2, card.y + 76);
+        side.textContent = label;
+        value.textContent = isActive ? "Waiting for a hand" : "Not assigned yet";
+        meta.textContent = "";
       }
+      el.querySelector(".meter span").style.transform =
+        `scaleX(${isActive ? state.dwellProgress : 0})`;
     });
 
-    // Live node readings, so the operator can see the rig responding
-    const listY = layout.cardY + layout.cardH + 52;
-    ctx.textAlign = "center";
-    ctx.fillStyle = "#63736f";
-    ctx.font = "bold 11px monospace";
-    ctx.fillText("LIVE READINGS", centerX, listY - 18);
-
-    const sorted = nodes.slice().sort((a, b) => a.id - b.id);
-    const rowW = Math.min(420, Math.max(280, width * 0.34));
-    const rowX = centerX - rowW / 2;
-
-    sorted.forEach((node, index) => {
-      const rowY = listY + index * 30;
-      const distance = distanceFor(node);
-      const taken = assignedIds().includes(node.id);
-      const isCandidate = state.candidateId === node.id;
-
-      ctx.fillStyle = isCandidate ? "#2a2115" : "#1b2523";
-      ctx.beginPath();
-      ctx.roundRect(rowX, rowY, rowW, 24, 5);
-      ctx.fill();
-
-      ctx.textAlign = "left";
-      ctx.font = "12px monospace";
-      ctx.fillStyle = taken ? "#22c55e" : "#f4f4f5";
-      ctx.fillText(`Node ${node.id}`, rowX + 12, rowY + 16);
-
-      ctx.fillStyle = distance === null ? "#63736f" : "#cdd6f4";
-      ctx.fillText(distance === null ? "no echo" : `${distance.toFixed(1)} cm`, rowX + 96, rowY + 16);
-
-      // Nearer readings draw a longer bar, so a hand is obvious at a glance.
-      if (distance !== null) {
-        const barMax = rowW - 200;
-        const closeness = Math.max(0, Math.min(1, 1 - distance / 100));
-        ctx.fillStyle = distance <= HAND_DISTANCE_CM ? "#f59e0b" : "#3a3f52";
-        ctx.beginPath();
-        ctx.roundRect(rowX + 184, rowY + 8, Math.max(2, barMax * closeness), 8, 4);
-        ctx.fill();
-      }
-
-      ctx.textAlign = "right";
-      ctx.fillStyle = "#63736f";
-      ctx.font = "11px monospace";
-      const label = taken ? SLOTS.find((s) => state.slots[s.key] === node.id).label : "";
-      ctx.fillText(label, rowX + rowW - 12, rowY + 16);
-    });
-
-    ctx.textAlign = "start";
+    // Live readings, so the operator can see the rig responding. Nearer
+    // readings draw a longer bar, so a hand is obvious at a glance.
+    view.readings.innerHTML = nodes.length
+      ? nodes
+          .slice()
+          .sort((a, b) => a.id - b.id)
+          .map((node) => {
+            const distance = distanceFor(node);
+            const takenBy = SLOTS.find((s) => state.slots[s.key] === node.id);
+            const closeness = distance === null ? 0 : Math.max(0, Math.min(1, 1 - distance / 100));
+            const hand = distance !== null && distance <= HAND_DISTANCE_CM;
+            const candidate = state.candidateId === node.id ? "is-candidate" : "";
+            return `<li class="${candidate}">
+                <span class="reading-id">Node ${node.id}</span>
+                <span class="reading-cm">${formatCm(distance)}</span>
+                <span class="reading-bar${hand ? " is-hand" : ""}"><span style="transform: scaleX(${closeness.toFixed(3)})"></span></span>
+                <span class="reading-slot">${takenBy ? (takenBy.key === "left" ? "Left" : "Right") : ""}</span>
+              </li>`;
+          })
+          .join("")
+      : '<li class="empty">No sensor nodes connected yet.</li>';
   };
 
   // Counts slots filled by an online node - what the auto-advance gates on.
