@@ -1,22 +1,21 @@
 #include <Arduino.h>
 #include <WiFi.h>
-#include "ultrasonicSensor.cpp"
 #include "wifi/connectionManager.h"
 #include "sync.h"
 #include "scanning.h"
 
-const int UltrasonicCount = 1;
-const int triggerPin = 33;
-const int echoPin = 32;
-Ultrasonic center(triggerPin, echoPin, "Center");
-
-void sendSensorSnapshot(float val) {
-    center.updateReading();
-
+// One reading from the scanner: the node's distance (avg, what the game and
+// server have always read), both ultrasonics, the servo angle the pair was
+// read at, and the scan state. Distances are cm, -1 when nothing was heard.
+void sendSensorSnapshot() {
     String payload = "{";
     payload += "\"nodeId\":" + String(nodeID);
     payload += ",\"mac\":\"" + WiFi.macAddress() + "\"";
-    payload += ",\"avg\":" + String(val, 2);
+    payload += ",\"avg\":" + String(getScanDistance(), 2);
+    payload += ",\"left\":" + String(getLeftCm(), 2);
+    payload += ",\"right\":" + String(getRightCm(), 2);
+    payload += ",\"angle\":" + String(getScanAngle());
+    payload += ",\"state\":" + String(getScanState());
     payload += "}";
 
     sendData(payload);
@@ -71,7 +70,6 @@ void loop() {
     pollCommands();
     bool ready = scanLoop();
     if(ready){
-        float val = (getLeftVal() + getRightVal()) / 2.0; //For now just avg, will be done more formally in the scanning code later
-        sendSensorSnapshot(val);
+        sendSensorSnapshot();
     }
 }

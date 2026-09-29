@@ -1,4 +1,5 @@
 #include "sync.h"
+#include "scanning.h"
 
 static bool synced = false;
 static bool turnGranted = false;
@@ -23,6 +24,14 @@ static void handleLine(const String& line) {
     } else if (line == "HALT") {
         turnGranted = false;
         Serial.println("Scan turn revoked by PC");
+    } else if (line.startsWith("ROLE ")) {
+        // Sent by the server once the calibration screen has identified this node.
+        String role = line.substring(5);
+        if (role == "LEFT") setScanRole(ROLE_LEFT);
+        else if (role == "RIGHT") setScanRole(ROLE_RIGHT);
+        else setScanRole(ROLE_UNKNOWN);
+        Serial.print("Scan role: ");
+        Serial.println(role);
     } else {
         Serial.print("Unhandled PC command: ");
         Serial.println(line);

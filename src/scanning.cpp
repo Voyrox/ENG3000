@@ -67,13 +67,19 @@ int dir = 1;
 
 //For the right node; maxLeft = 130 [90 + 40], maxRight = 40 [90 - 50]
 
-//Left node
-// const int maxLeft = 160;
-// const int maxRight = 40;
+// Servo limits per mount. Which node is which is decided on the game's
+// calibration screen, and the server passes it on as ROLE LEFT / ROLE RIGHT
+// (setScanRole). Until then the node sweeps only the range both mounts allow.
+struct ScanLimits {
+  int maxLeft;
+  int maxRight;
+};
+const ScanLimits LEFT_NODE_LIMITS = {160, 40};
+const ScanLimits RIGHT_NODE_LIMITS = {140, 30};
+const ScanLimits UNKNOWN_ROLE_LIMITS = {140, 40};
 
-//Right node
-const int maxLeft = 140;
-const int maxRight = 30;
+int maxLeft = UNKNOWN_ROLE_LIMITS.maxLeft;
+int maxRight = UNKNOWN_ROLE_LIMITS.maxRight;
 
 bool rotate(int amount){
   bool returnVal = false;
@@ -106,10 +112,26 @@ float ultraSonicRead(const int USS[2]){
   // Read the echoPin, returns sound wave travel time in microseconds
   unsigned long duration = pulseIn(echoPin, HIGH, 50000); //Timeout in 50ms, aka 17 metres
 
+  // No echo before the timeout. -1, not 0: a 0 reads as "touching the
+  // sensor" to anything downstream, which is what the game's too-close alert
+  // is looking for.
+  if (duration == 0) {
+    return -1;
+  }
+
   // Calculate the distance (speed of sound is 0.034 cm/us, divided by 2 for round trip)
   float distance = (duration * 0.034) / 2;
 
   return distance;
+}
+
+void setScanRole(ScanRole role) {
+  ScanLimits limits = UNKNOWN_ROLE_LIMITS;
+  if (role == ROLE_LEFT) limits = LEFT_NODE_LIMITS;
+  if (role == ROLE_RIGHT) limits = RIGHT_NODE_LIMITS;
+  maxLeft = limits.maxLeft;
+  maxRight = limits.maxRight;
+  rotate(0);  // pull the servo back inside the new limits straight away
 }
 
 int rotationWaitTrack = 0;
@@ -118,8 +140,9 @@ const int sideReadDelay = 30;
 int ultrasonicWaitTrack = 0;
 bool readLeftNext = true;
 
-float leftVal = 0;
-float rightVal = 0;
+float leftVal = -1;
+float rightVal = -1;
+int readAngle = 90;  // the servo angle the latest pair was read at
 
 bool scanLoop(){
   if ((rotationWaitTrack + rotatationWait) >= millis()){
@@ -170,6 +193,9 @@ bool scanLoop(){
   const int smallRotation = 4;
   const int largeRotation = 15;
 
+  // Both sensors were read at this angle; the servo only moves below.
+  readAngle = angle;
+
   switch (state){
     case 0:{
       break;
@@ -200,4 +226,36 @@ int getLeftVal(){
 
 int getRightVal(){
   return rightVal;
+}
+
+float getLeftCm(){
+  return leftVal;
+}
+
+float getRightCm(){
+  return rightVal;
+}
+
+int getScanAngle(){
+  return readAngle;
+}
+
+int getScanState(){
+  return state;
+}
+
+// The node's distance to the player. Only sensors reading inside the scan
+// range count: averaging in a missed echo or a wall behind the player would
+// put them somewhere they are not. With nothing in range, the nearer real
+// echo is still sent, so the game can say too close or out of bounds.
+float getScanDistance(){
+  bool leftInRange = (leftVal >= minDist && leftVal <= maxDist);
+  bool rightInRange = (rightVal >= minDist && rightVal <= maxDist);
+  if (leftInRange && rightInRange) return (leftVal + rightVal) / 2.0;
+  if (leftInRange) return leftVal;
+  if (rightInRange) return rightVal;
+  if (leftVal > 0 && rightVal > 0) return min(leftVal, rightVal);
+  if (leftVal > 0) return leftVal;
+  if (rightVal > 0) return rightVal;
+  return -1;
 }
