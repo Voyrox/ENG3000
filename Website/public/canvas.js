@@ -373,12 +373,37 @@ function startGameWithMode(mode) {
   startGameLoop();
 }
 
+// Touching the phone pad takes the cursor over from the sensors; lifting the
+// finger hands it straight back. The phone re-sends its position while a
+// finger is held, so if it goes quiet (lost release, phone locked) the
+// sensors take over again after REMOTE_IDLE_MS.
+const REMOTE_IDLE_MS = 1000;
+let remoteIdleTimer = null;
+
+function releaseRemote() {
+  window.clearTimeout(remoteIdleTimer);
+  remoteIdleTimer = null;
+  if (screen === "game" && window.getGameInputMode() === "remote") {
+    window.setGameInputMode("sensor");
+  }
+}
+
 // Commands relayed from the phone control panel (/control). The server only
 // relays these when it was started with CON=1.
 function handleRemoteCommand(command) {
   switch (command.action) {
-    case "hole":
-      window.setRemoteHole(command.hole);
+    case "point":
+      if (screen !== "game") break;
+      if (window.getGameInputMode() !== "remote") window.setGameInputMode("remote");
+      window.setRemotePoint(command.x, command.y);
+      window.clearTimeout(remoteIdleTimer);
+      remoteIdleTimer = window.setTimeout(() => {
+        releaseRemote();
+        draw();
+      }, REMOTE_IDLE_MS);
+      break;
+    case "release":
+      releaseRemote();
       break;
     case "start":
       startGameWithMode(command.mode || "remote");

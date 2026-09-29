@@ -53,7 +53,7 @@ TURN_INTERVAL_SECONDS = 1.0
 # The phone control panel (/control) only exists when explicitly switched on:
 #   CON=1 python app.py
 CONTROL_ENABLED = os.environ.get("CON") == "1"
-CONTROL_ACTIONS = {"hole", "start", "mode", "pause", "resume", "restart", "menu", "testMode"}
+CONTROL_ACTIONS = {"point", "release", "start", "mode", "pause", "resume", "restart", "menu", "testMode"}
 
 state_lock = threading.Lock()
 next_node_id = 1
@@ -453,7 +453,7 @@ async def control_handler(websocket):
                 continue
             if event.get("action") not in CONTROL_ACTIONS:
                 continue
-            if event["action"] != "hole":
+            if event["action"] not in ("point", "release"):
                 print(f"Control panel: {event}")
             command = json.dumps({**event, "type": "remote:command"})
             broadcast(BROWSER_CONNECTIONS.copy(), command)

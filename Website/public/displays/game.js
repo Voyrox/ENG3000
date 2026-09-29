@@ -27,8 +27,10 @@
 //              coordinates with (0,0) at BOTTOM-LEFT, and gridToCanvasPoint()
 //              places the cursor. Entered once all three nodes are configured.
 //   "remote" - the phone control panel (/control, only served when the server
-//              runs with CON=1) picks a hole; the HUD shows
-//              "Input: REMOTE" while it is in charge.
+//              runs with CON=1) acts as a touchpad: the finger's position on
+//              the pad maps onto the grid and the cursor eases towards it.
+//              canvas.js switches into this mode while a finger is on the
+//              pad and back to "sensor" when it lifts.
 
 (function () {
   const GAME_DURATION_MS = 60000; // overall round length shown as the countdown
@@ -47,6 +49,10 @@
   const DEFAULT_LIVES = 5;
   const DURATION_OPTIONS_MS = [30000, 60000, 90000];
   const LIVES_OPTIONS = [1, 3, 5, 7, 9];
+  // Time constant for easing the remote cursor towards the finger. Touch
+  // events arrive in uneven bursts over the network, so this smooths the jumps
+  // without making the cursor feel laggy.
+  const REMOTE_SMOOTHING_MS = 60;
 
   // --- Sensor input ----------------------------------------------------------
   // No triangulation: the three sensors sit on one line pointing straight
@@ -206,7 +212,10 @@
   const gameState = {
     status: "idle", // "idle" | "playing" | "paused" | "gameover"
     inputMode: "mouse", // "mouse" | "sensor" | "remote"
-    remoteHole: -1, // hole the phone is pointing at, remote mode only
+    remoteTarget: null, // { nx, ny } 0-1 across the grid, straight from the phone pad
+    remotePos: null, // smoothed copy of remoteTarget, eased every frame
+    remoteLastFrame: null,
+    remoteHole: -1, // hole the smoothed cursor is over, mirrored back to the phone
     sensor: emptySensorState(),
     score: 0,
     level: 1,
@@ -348,6 +357,9 @@
     gameState.inputMode = mode === "sensor" || mode === "remote" ? mode : "mouse";
     // Drop any stale cursor so the modes never inherit each other's position.
     gameState.cursor = { x: null, y: null, inBounds: true };
+    gameState.remoteTarget = null;
+    gameState.remotePos = null;
+    gameState.remoteLastFrame = null;
     gameState.remoteHole = -1;
     gameState.sensor = emptySensorState();
     resetSensorFilters();
@@ -400,7 +412,7 @@
     if (gameState.inputMode === "sensor" && canvas) {
       updateSensorCursor(canvas, orderedNodes);
     } else if (gameState.inputMode === "remote" && canvas) {
-      updateRemoteCursor(canvas);
+      updateRemoteCursor(canvas, now);
     }
 
     if (gameState.status !== "playing") return;
@@ -474,24 +486,51 @@
     gameState.cursor.inBounds = x >= 0 && x <= width && y >= 0 && y <= height;
   };
 
-  // Remote-mode input: a hole index 0-8 (row-major from the top-left, same as
-  // getGameGridLayout), or -1 to lift the cursor off the grid.
-  window.setRemoteHole = function setRemoteHole(hole) {
+  // Remote-mode input: the finger's position on the phone pad, normalised to
+  // 0-1 with (0,0) at the top-left, same orientation as the on-screen grid.
+  // Anything non-numeric lifts the cursor off the board.
+  window.setRemotePoint = function setRemotePoint(nx, ny) {
     if (gameState.inputMode !== "remote") return;
-    gameState.remoteHole = Number.isInteger(hole) && hole >= 0 && hole <= 8 ? hole : -1;
-  };
-
-  // Resolved every frame rather than stored as pixels, so a resize keeps the
-  // cursor on the right hole. Hovering scores, exactly as in sensor mode.
-  function updateRemoteCursor(canvas) {
-    if (gameState.remoteHole === -1) {
-      gameState.cursor = { x: null, y: null, inBounds: true };
+    if (!Number.isFinite(nx) || !Number.isFinite(ny)) {
+      gameState.remoteTarget = null;
       return;
     }
-    const hole = window.getGameGridLayout(canvas).holes[gameState.remoteHole];
-    const x = hole.x + hole.size / 2;
-    const y = hole.y + hole.size / 2;
+    const clamp = (v) => Math.min(1, Math.max(0, v));
+    gameState.remoteTarget = { nx: clamp(nx), ny: clamp(ny) };
+  };
+
+  // Stored normalised rather than as pixels, so a resize keeps the cursor on
+  // the same spot of the grid. Hovering scores, exactly as in sensor mode.
+  function updateRemoteCursor(canvas, now) {
+    const target = gameState.remoteTarget;
+    if (!target) {
+      gameState.cursor = { x: null, y: null, inBounds: true };
+      gameState.remotePos = null;
+      gameState.remoteLastFrame = null;
+      gameState.remoteHole = -1;
+      return;
+    }
+
+    // Frame-rate independent exponential ease; the first touch jumps straight there.
+    if (!gameState.remotePos || gameState.remoteLastFrame === null) {
+      gameState.remotePos = { ...target };
+    } else {
+      const dt = Math.min(100, Math.max(0, now - gameState.remoteLastFrame));
+      const a = 1 - Math.exp(-dt / REMOTE_SMOOTHING_MS);
+      gameState.remotePos.nx += (target.nx - gameState.remotePos.nx) * a;
+      gameState.remotePos.ny += (target.ny - gameState.remotePos.ny) * a;
+    }
+    gameState.remoteLastFrame = now;
+
+    const layout = window.getGameGridLayout(canvas);
+    const x = layout.gridLeft + gameState.remotePos.nx * layout.gridSize;
+    const y = layout.gridTop + gameState.remotePos.ny * layout.gridSize;
     gameState.cursor = { x, y, inBounds: true };
+
+    const hole = layout.holes.find(
+      (h) => x >= h.x && x <= h.x + h.size && y >= h.y && y <= h.y + h.size
+    );
+    gameState.remoteHole = hole ? hole.index : -1;
     window.handleGameHover(canvas, x, y);
   }
 
@@ -1405,21 +1444,11 @@
     map.render(ctx, 12, sensorPanelTop - MAP_GAP - map.height);
   }
 
+  // Only sensor mode has a readout; mouse and remote need no HUD box.
   function renderInputReadout(ctx, canvas) {
-    const height = canvas.clientHeight || canvas.height;
-
-    if (gameState.inputMode === "sensor") {
-      renderSensorPanel(ctx, canvas);
-      renderCoordinateMap(ctx, canvas);
-      return;
-    }
-
-    drawHudPanel(ctx, 12, height - 52, 176, 40, 10);
-    ctx.textAlign = "left";
-    ctx.font = "bold 14px monospace";
-    ctx.fillStyle = "#9298aa";
-    ctx.fillText(`Input: ${gameState.inputMode.toUpperCase()}`, 26, height - 27);
-    ctx.textAlign = "start";
+    if (gameState.inputMode !== "sensor") return;
+    renderSensorPanel(ctx, canvas);
+    renderCoordinateMap(ctx, canvas);
   }
 
   window.renderGame = function renderGame(ctx, canvas) {
