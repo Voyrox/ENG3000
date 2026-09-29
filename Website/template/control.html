@@ -77,33 +77,64 @@
             }
         }
 
-        // Dragging a finger across the pad moves between holes; lifting leaves
-        // the cursor where it is. A tap on the current hole lifts it off.
-        let dragHole = null;
-        function holeAt(x, y) {
-            const el = document.elementFromPoint(x, y);
-            return el && el.dataset.hole !== undefined ? Number(el.dataset.hole) : null;
+        // The pad is a touchpad: while a finger is down the game switches to
+        // remote input and the cursor follows it smoothly; lifting hands control
+        // back to the sensors. Positions go out at most once per animation
+        // frame so a fast drag does not flood the socket, and a still finger
+        // re-sends every HEARTBEAT_MS so the game knows it is still held.
+        const finger = document.createElement("div");
+        finger.id = "finger";
+        pad.appendChild(finger);
+
+        const HEARTBEAT_MS = 250;
+        let dragging = false;
+        let pendingPoint = null;
+        let lastPoint = null;
+        let sendQueued = false;
+        let heartbeat = null;
+
+        function queuePoint(e) {
+            const rect = pad.getBoundingClientRect();
+            const x = Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width));
+            const y = Math.min(1, Math.max(0, (e.clientY - rect.top) / rect.height));
+            finger.style.left = `${x * 100}%`;
+            finger.style.top = `${y * 100}%`;
+            pendingPoint = lastPoint = { x, y };
+            if (sendQueued) return;
+            sendQueued = true;
+            requestAnimationFrame(() => {
+                sendQueued = false;
+                if (pendingPoint) send({ action: "point", ...pendingPoint });
+                pendingPoint = null;
+            });
         }
+
         pad.addEventListener("pointerdown", (e) => {
             e.preventDefault();
             pad.setPointerCapture(e.pointerId);
-            const hole = holeAt(e.clientX, e.clientY);
-            if (hole === null) return;
-            const lift = game && game.remoteHole === hole;
-            dragHole = lift ? -1 : hole;
-            send({ action: "hole", hole: dragHole });
+            dragging = true;
+            finger.classList.add("down");
+            queuePoint(e);
+            clearInterval(heartbeat);
+            heartbeat = setInterval(() => {
+                if (lastPoint) send({ action: "point", ...lastPoint });
+            }, HEARTBEAT_MS);
         });
         pad.addEventListener("pointermove", (e) => {
-            if (dragHole === null) return;
-            const hole = holeAt(e.clientX, e.clientY);
-            if (hole !== null && hole !== dragHole) {
-                dragHole = hole;
-                send({ action: "hole", hole });
-            }
+            if (dragging) queuePoint(e);
         });
-        const endDrag = () => { dragHole = null; };
+        const endDrag = () => {
+            if (!dragging) return;
+            dragging = false;
+            finger.classList.remove("down");
+            clearInterval(heartbeat);
+            // Drop any queued frame so it cannot re-grab control after the release.
+            pendingPoint = lastPoint = null;
+            send({ action: "release" });
+        };
         pad.addEventListener("pointerup", endDrag);
         pad.addEventListener("pointercancel", endDrag);
+        pad.addEventListener("lostpointercapture", endDrag);
 
         document.querySelectorAll("[data-mode]").forEach((btn) => {
             btn.addEventListener("click", () => send({ action: "mode", mode: btn.dataset.mode }));
@@ -132,7 +163,7 @@
             document.querySelectorAll("[data-mode]").forEach((btn) => {
                 btn.classList.toggle("selected", btn.dataset.mode === game.mode);
             });
-            pad.classList.toggle("disabled", game.mode !== "remote" || game.screen !== "game");
+            pad.classList.toggle("disabled", game.screen !== "game");
             pad.querySelectorAll(".hole").forEach((cell, i) => {
                 const up = i === game.activeHole;
                 cell.classList.toggle("mole", up && game.moleType === "mole");
@@ -241,7 +272,27 @@
         gap: 10px;
         touch-action: none;
         user-select: none;
+        position: relative;
     }
+
+    .hole { pointer-events: none; }
+
+    #finger {
+        position: absolute;
+        left: 50%;
+        top: 50%;
+        width: 36px;
+        height: 36px;
+        margin: -18px 0 0 -18px;
+        border-radius: 50%;
+        border: 3px solid #facc15;
+        background: rgba(250, 204, 21, 0.25);
+        pointer-events: none;
+        opacity: 0;
+        transition: opacity 0.15s;
+    }
+
+    #finger.down { opacity: 1; }
 
     #pad.disabled { opacity: 0.4; }
 
