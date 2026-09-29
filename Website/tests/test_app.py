@@ -1297,12 +1297,12 @@ class NodeRoleTests(BrokerTestCase):
         app.assign_node_roles([1, None, None])
         conn = FakeNodeSocket(b"\r\n")
         app.handle_node_connection(conn, ("10.0.0.1", 1000))
-        self.assertEqual(conn.sent, ["1\n", "SCAN\n", "ROLE LEFT\n"])
+        self.assertEqual(conn.sent, ["1\n", "SCAN\n", "ROLE LEFT\n", "PULSES 1\n"])
 
     def test_a_node_without_a_role_is_sent_none(self):
         conn = FakeNodeSocket(b"\r\n")
         app.handle_node_connection(conn, ("10.0.0.1", 1000))
-        self.assertEqual(conn.sent, ["1\n", "SCAN\n"])
+        self.assertEqual(conn.sent, ["1\n", "SCAN\n", "PULSES 1\n"])
 
     def test_bad_slots_are_ignored(self):
         app.assign_node_roles([1, 2])
@@ -1350,20 +1350,20 @@ class NodeAimTests(BrokerTestCase):
         app.set_nodes_aim(True)
         conn = FakeNodeSocket(b"\r\n")
         app.handle_node_connection(conn, ("10.0.0.1", 1000))
-        self.assertEqual(conn.sent, ["1\n", "AIM 90\n"])
+        self.assertEqual(conn.sent, ["1\n", "AIM 90\n", "PULSES 1\n"])
 
     def test_a_node_that_connects_while_nobody_calibrates_is_told_to_scan(self):
         # It boots holding straight, so it only sweeps once told to.
         conn = FakeNodeSocket(b"\r\n")
         app.handle_node_connection(conn, ("10.0.0.1", 1000))
-        self.assertEqual(conn.sent, ["1\n", "SCAN\n"])
+        self.assertEqual(conn.sent, ["1\n", "SCAN\n", "PULSES 1\n"])
 
     def test_the_hold_is_sent_before_the_role(self):
         app.set_nodes_aim(True)
         app.assign_node_roles([1, None, None])
         conn = FakeNodeSocket(b"\r\n")
         app.handle_node_connection(conn, ("10.0.0.1", 1000))
-        self.assertEqual(conn.sent, ["1\n", "AIM 90\n", "ROLE LEFT\n"])
+        self.assertEqual(conn.sent, ["1\n", "AIM 90\n", "ROLE LEFT\n", "PULSES 1\n"])
 
     def test_another_page_off_the_calibration_screen_cannot_release_the_hold(self):
         _, node = self.add_node(conn=RecordingConn())
@@ -1403,6 +1403,55 @@ class NodeAimTests(BrokerTestCase):
         # Held while the screen was open; released when its (only) tab went.
         self.assertEqual(node["conn"].sent, ["AIM 90\n", "SCAN\n"])
         self.assertFalse(app.nodes_aim_held)
+
+
+class NodePulsesTests(BrokerTestCase):
+    """Multi-pulse: the game screen's Pulses button reaches the scanner nodes."""
+
+    def setUp(self):
+        super().setUp()
+        self._saved_pulses = app.nodes_pulse_count
+        app.nodes_pulse_count = 1
+
+    def tearDown(self):
+        app.nodes_pulse_count = self._saved_pulses
+        super().tearDown()
+
+    def test_a_new_count_reaches_every_connected_node(self):
+        _, first = self.add_node(conn=RecordingConn())
+        _, second = self.add_node(address=("10.0.0.2", 1001), conn=RecordingConn())
+        app.set_nodes_pulse_count(3)
+        app.set_nodes_pulse_count(1)
+        self.assertEqual(first["conn"].sent, ["PULSES 3\n", "PULSES 1\n"])
+        self.assertEqual(second["conn"].sent, ["PULSES 3\n", "PULSES 1\n"])
+
+    def test_a_node_without_a_connection_is_not_sent_it(self):
+        _, node = self.add_node()
+        app.set_nodes_pulse_count(2)
+        self.assertIsNone(node.get("conn"))
+        self.assertEqual(app.nodes_pulse_count, 2)
+
+    def test_a_node_that_connects_later_is_sent_the_current_count_last(self):
+        app.set_nodes_pulse_count(2)
+        conn = FakeNodeSocket(b"\r\n")
+        app.handle_node_connection(conn, ("10.0.0.1", 1000))
+        self.assertEqual(conn.sent, ["1\n", "SCAN\n", "PULSES 2\n"])
+
+    def test_a_bad_count_is_ignored(self):
+        _, node = self.add_node(conn=RecordingConn())
+        for count in (0, 4, -1, "3", 2.5, 2.0, None, True):
+            app.set_nodes_pulse_count(count)
+        self.assertEqual(app.nodes_pulse_count, 1)
+        self.assertEqual(node["conn"].sent, [])
+
+    def test_the_browser_message_reaches_the_nodes_without_server_filtering(self):
+        _, node = self.add_node(conn=RecordingConn())
+        message = json.dumps({"type": "nodes:pulses", "count": 3})
+        socket = FakeBrowserSocket(incoming=[message])
+        with mock.patch.object(app, "server_filter", None):
+            asyncio.run(app.browser_handler(socket))
+        self.assertEqual(node["conn"].sent, ["PULSES 3\n"])
+        self.assertEqual(app.nodes_pulse_count, 3)
 
 
 class ScannerAngleTests(unittest.TestCase):

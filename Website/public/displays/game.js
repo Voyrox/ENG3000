@@ -233,7 +233,15 @@
     // Test mode: no bombs spawn and lives are never lost, so a run can be used
     // to exercise the sensor pipeline without the round ending underneath you.
     testMode: false,
+    // Multi-pulse, switched with the Pulses button on the game screen: in found
+    // or half-found the scanner nodes take this many pulse pairs at one angle
+    // and average them before moving. 1 is off. canvas.js passes it on to the
+    // server (nodes:pulses), which tells the nodes (PULSES <n>).
+    pulsesPerAngle: 1,
   };
+
+  // The Pulses button steps through these: off, 2, 3.
+  const PULSE_COUNT_OPTIONS = [1, 2, 3];
 
   window.getGameSettings = function getGameSettings() {
     return { ...settings };
@@ -1765,6 +1773,30 @@
     return pointInRect(x, y, getGamePauseLayout()) ? { type: "pause" } : null;
   };
 
+  // Top-right, under the level panel (and clear of the legend below it).
+  function getPulsesButtonLayout(canvas) {
+    const width = canvas.clientWidth || canvas.width;
+    const w = 170;
+    return { x: width - 12 - w, y: 60, width: w, height: 36 };
+  }
+
+  function pulsesLabel() {
+    return settings.pulsesPerAngle > 1 ? `Pulses: ${settings.pulsesPerAngle}` : "Pulses: Off";
+  }
+
+  window.getGamePulsesButtonAtPoint = function getGamePulsesButtonAtPoint(canvas, x, y) {
+    if (gameState.status !== "playing") return null;
+    return pointInRect(x, y, getPulsesButtonLayout(canvas)) ? { type: "pulses" } : null;
+  };
+
+  // Off -> 2 -> 3 -> off.
+  window.cycleGamePulses = function cycleGamePulses() {
+    const index = PULSE_COUNT_OPTIONS.indexOf(settings.pulsesPerAngle);
+    settings.pulsesPerAngle = PULSE_COUNT_OPTIONS[(index + 1) % PULSE_COUNT_OPTIONS.length];
+    console.info(`[scan] ${pulsesLabel()}`);
+    return settings.pulsesPerAngle;
+  };
+
   function getPauseMenuLayout(canvas) {
     const width = canvas.clientWidth || canvas.width;
     const height = canvas.clientHeight || canvas.height;
@@ -2241,6 +2273,24 @@
     ctx.fillStyle = "#f4f4f5";
     ctx.font = "bold 20px monospace";
     ctx.fillText(`Level: ${gameState.level}`, levelPanel.x + levelPanel.w - 14, levelPanel.y + 27);
+
+    // Pulses button: multi-pulse on the scanner nodes, amber while on.
+    if (gameState.status === "playing") {
+      const pulses = getPulsesButtonLayout(canvas);
+      const pulsesOn = settings.pulsesPerAngle > 1;
+      if (pulsesOn) {
+        ctx.fillStyle = "#f59e0b";
+        ctx.beginPath();
+        ctx.roundRect(pulses.x, pulses.y, pulses.width, pulses.height, 10);
+        ctx.fill();
+      } else {
+        drawHudPanel(ctx, pulses.x, pulses.y, pulses.width, pulses.height, 10);
+      }
+      ctx.textAlign = "center";
+      ctx.fillStyle = pulsesOn ? "#13131c" : "#f4f4f5";
+      ctx.font = "bold 15px monospace";
+      ctx.fillText(pulsesLabel(), pulses.x + pulses.width / 2, pulses.y + pulses.height / 2 + 5);
+    }
 
     ctx.textAlign = "center";
     const secondsLeft = Math.ceil(gameState.remainingMs / 1000);

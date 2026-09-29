@@ -74,8 +74,10 @@ function draw() {
   ctx.setTransform(viewport.dpr, 0, 0, viewport.dpr, 0, 0);
 
   // Every screen change ends in a draw, so this is where the servo hold follows
-  // the screen. It only sends when the wanted state changes.
+  // the screen. It only sends when the wanted state changes. The same goes for
+  // the Pulses button.
   syncNodesAim();
+  syncNodesPulses();
 
   if (screen === "calibrate") {
     renderCalibrate(ctx, c, getSortedNodes());
@@ -315,6 +317,18 @@ function syncNodesAim() {
   if (sendToServer({ type: "nodes:aim", hold })) sentNodesAim = hold;
 }
 
+// --- Multi-pulse (the Pulses button on the game screen) ----------------------
+// The server passes the count on to every node (PULSES <n>, 1 = off). Sent when
+// it changes, and again after a reconnect, since a restarted server has
+// forgotten it.
+let sentPulsesPerAngle = null;
+
+function syncNodesPulses() {
+  const count = window.getGameSettings().pulsesPerAngle;
+  if (count === sentPulsesPerAngle) return;
+  if (sendToServer({ type: "nodes:pulses", count })) sentPulsesPerAngle = count;
+}
+
 // The loop keeps running across the game <-> alert boundary so the sensors are
 // still read while the alert is up - that is what lets it clear itself once the
 // player steps back past the threshold.
@@ -516,7 +530,9 @@ function connectSocket() {
     sentAssignmentKey = null;
     sentCalibrationKey = null;
     sentNodesAim = null;
+    sentPulsesPerAngle = null;
     syncNodesAim();
+    syncNodesPulses();
   });
 
   socket.addEventListener("message", (event) => {
@@ -644,6 +660,12 @@ c.addEventListener("click", (event) => {
     if (pauseButtonHit) {
       window.pauseGame();
       draw();
+      return;
+    }
+
+    if (window.getGamePulsesButtonAtPoint(c, point.x, point.y)) {
+      window.cycleGamePulses();
+      draw(); // draw() sends the new count on to the nodes
       return;
     }
 

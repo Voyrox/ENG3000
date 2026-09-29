@@ -1,0 +1,142 @@
+#pragma once
+
+#include <Arduino.h>
+
+// Every setting the scanner node firmware uses, in one place. Change a value
+// here, not in the class that uses it.
+
+// --- Network --------------------------------------------------------------
+// The Wi-Fi network and server are whoever's hotspot the rig is on today. Each
+// of these can be overridden without touching this file, from your own
+// (gitignored) platformio.ini:
+//
+//   build_flags =
+//       '-DNODE_WIFI_SSID="MyHotspot"'
+//       '-DNODE_WIFI_PASSWORD="secret"'
+//       '-DNODE_SERVER_IP="192.168.137.1"'
+#ifndef NODE_WIFI_SSID
+#define NODE_WIFI_SSID "Josh's S24"
+#endif
+#ifndef NODE_WIFI_PASSWORD
+#define NODE_WIFI_PASSWORD "bruh12345"
+#endif
+#ifndef NODE_SERVER_IP
+#define NODE_SERVER_IP "192.168.59.99"
+#endif
+
+namespace config {
+
+constexpr unsigned long SERIAL_BAUD = 115200;
+
+// --- Network --------------------------------------------------------------
+constexpr char WIFI_SSID[] = NODE_WIFI_SSID;
+constexpr char WIFI_PASSWORD[] = NODE_WIFI_PASSWORD;
+constexpr char SERVER_IP[] = NODE_SERVER_IP;
+constexpr uint16_t SERVER_PORT = 3000;
+
+// true: ignore SERVER_IP and search the local subnet for the server instead.
+constexpr bool AUTO_DISCOVER_SERVER = false;
+
+constexpr unsigned long WIFI_CONNECT_TIMEOUT_MS = 15000;
+constexpr unsigned long WIFI_RETRY_INTERVAL_MS = 1000;
+constexpr unsigned long SERVER_CONNECT_TIMEOUT_MS = 3000;
+constexpr unsigned long SERVER_DISCOVERY_TIMEOUT_MS = 120000;
+constexpr int32_t SERVER_PROBE_TIMEOUT_MS = 300;
+constexpr unsigned long NODE_ID_TIMEOUT_MS = 2000;
+
+// How long ONE connect attempt may block. Must be well under
+// SERVER_CONNECT_TIMEOUT_MS so that budget buys several attempts rather than one
+// long stall.
+constexpr int32_t SERVER_ATTEMPT_TIMEOUT_MS = 1000;
+
+// WiFiClient::setTimeout takes SECONDS and multiplies by 1000 internally. It also
+// doubles as the timeout for the *next* connect(), because connect(host, port)
+// forwards this same value as its connect timeout.
+constexpr uint32_t SOCKET_READ_TIMEOUT_SECONDS = 1;
+
+// --- Pins -----------------------------------------------------------------
+// Two ultrasonic sensors side by side on the servo horn.
+constexpr uint8_t LEFT_TRIG_PIN = 5;
+constexpr uint8_t LEFT_ECHO_PIN = 18;
+constexpr uint8_t RIGHT_TRIG_PIN = 16;
+constexpr uint8_t RIGHT_ECHO_PIN = 17;
+constexpr uint8_t SERVO_PIN = 32;
+
+// --- Ultrasonic sensors ---------------------------------------------------
+// Returned when no echo came back. Distinct from a reading of 0 cm, which is
+// impossible, and from a real close target: a dropped echo must not be allowed to
+// masquerade as a distance, or the scan treats silence as "nothing there" and
+// swings past a player who is standing right there.
+constexpr float NO_ECHO = -1.0f;
+
+// Speed of sound in cm/us. A reading is half the round trip.
+constexpr double SOUND_CM_PER_US = 0.034;
+
+// How long a reading may wait for its echo. Sound covers the round trip to the
+// far edge of the play area in about 8.2 ms, so anything past this is not a
+// target.
+constexpr unsigned long ECHO_TIMEOUT_US = 9000;
+
+// A reading inside this range is taken to be the player; outside it there is no
+// target.
+constexpr float MIN_TARGET_CM = 10;
+constexpr float MAX_TARGET_CM = 140;
+
+// --- Scan timing ----------------------------------------------------------
+// Quiet time after one pulse pair before the next pair starts.
+constexpr unsigned long PAIR_GAP_MS = 30;
+
+// Quiet time between the left and the right sensor of one pair, so the right
+// sensor never hears the left one's pulse.
+constexpr unsigned long SIDE_GAP_MS = 50;
+
+// How long the servo is given to actually arrive at a commanded angle before
+// anything is read through it. A reading taken while the horn is still
+// travelling describes some angle the rig was never at.
+constexpr unsigned long SERVO_SETTLE_MS = 40;
+
+// The servo is centred at boot and given this long to get there.
+constexpr unsigned long BOOT_SETTLE_MS = 5000;
+
+// --- Scan state machine ---------------------------------------------------
+// Both sensors in range and less than this far apart: the same target, found.
+constexpr float MAX_PAIR_DIFF_CM = 40;
+
+// Half-found: a small step towards the sensor that has the player.
+constexpr int STEER_STEP_DEG = 3;
+
+// Lost: a large sweep step, reversing at each servo limit.
+constexpr int SWEEP_STEP_DEG = 14;
+
+// --- Multi-pulse ----------------------------------------------------------
+// In found or half-found, take this many pulse pairs at one angle and average
+// them before reporting and moving. 1 is off (one pair per move). The server
+// sets it (PULSES <n>) from the game screen's Pulses button; a node starts at
+// the default until it is told.
+constexpr int DEFAULT_PULSES_PER_ANGLE = 1;
+constexpr int MAX_PULSES_PER_ANGLE = 5;
+
+// When the pulses are averaged, an echo further than this from their median is
+// an outlier and is left out (see Scanner::averageWithoutOutliers).
+constexpr float OUTLIER_TOLERANCE_CM = 20;
+
+// --- Servo ----------------------------------------------------------------
+// 90 points straight out into the play area; larger turns towards screen-left.
+constexpr int CENTRE_DEG = 90;
+
+// Servo limits per mount. Which node is which is decided on the game's
+// calibration screen, and the server passes it on as ROLE LEFT / ROLE RIGHT.
+// Until then the node sweeps only the range both mounts allow.
+struct ServoLimits {
+    int maxLeftDeg;
+    int maxRightDeg;
+};
+constexpr ServoLimits LEFT_NODE_LIMITS = {160, 40};
+constexpr ServoLimits RIGHT_NODE_LIMITS = {140, 30};
+constexpr ServoLimits UNKNOWN_ROLE_LIMITS = {140, 40};
+
+// --- Debug ----------------------------------------------------------------
+// Print every pulse pair to the serial monitor.
+constexpr bool LOG_EVERY_PAIR = true;
+
+} // namespace config

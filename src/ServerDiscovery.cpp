@@ -1,6 +1,6 @@
-#include "networkDiscovery.h"
+#include "ServerDiscovery.h"
 
-bool discoverServer(WiFiClient& client, String& serverIP,
+bool discoverServer(WiFiClient& client, String& serverIp,
                     uint16_t serverPort, int32_t probeTimeoutMs,
                     unsigned long discoveryTimeoutMs) {
     IPAddress localIP = WiFi.localIP();
@@ -48,9 +48,9 @@ bool discoverServer(WiFiClient& client, String& serverIP,
             Serial.print(candidate.toString());
             Serial.println();
             if (client.connect(candidate, serverPort, probeTimeoutMs)) {
-                serverIP = candidate.toString();
+                serverIp = candidate.toString();
                 Serial.print("Server found at ");
-                Serial.println(serverIP);
+                Serial.println(serverIp);
                 return true;
             }
         }

@@ -13,7 +13,7 @@ ESP32 ── Wi-Fi ──▶ gateway/server ── TCP :3000 ──▶ Python Se
 
 ### ESP32 → Server (TCP)
 
-Each ESP32 is a servo scanner (`src/scanning.cpp`): two ultrasonic sensors side by side (left: trigger/echo on GPIO 5/18, right: GPIO 16/17) on a servo (GPIO 32) that turns towards whichever sensor sees the player. Nodes scan one at a time: the server hands out turns (`TURN` / `HALT`) so their pings never overlap. It connects to the laptop hotspot, opens a persistent TCP socket on port `3000`, receives a numeric node ID, and sends a JSON line after every scan step:
+Each ESP32 is a servo scanner (`src/Scanner.cpp`; every pin and setting is in `src/Config.h`): two ultrasonic sensors side by side (left: trigger/echo on GPIO 5/18, right: GPIO 16/17) on a servo (GPIO 32) that turns towards whichever sensor sees the player. Nodes scan one at a time: the server hands out turns (`TURN` / `HALT`) so their pings never overlap. It connects to the laptop hotspot, opens a persistent TCP socket on port `3000`, receives a numeric node ID, and sends a JSON line after every scan step:
 
 ```json
 {"nodeId":1,"mac":"14:08:08:AB:F6:20","avg":82.40,"left":81.90,"right":82.90,"angle":112,"scanState":0}
@@ -24,7 +24,32 @@ Each ESP32 is a servo scanner (`src/scanning.cpp`): two ultrasonic sensors side 
 - `angle` is the servo angle the pair was read at: 90 points straight out into the play area, larger turns towards screen-left
 - `scanState` is `0` found (both readings agree), `1` half-found (one sees the player), `2` lost (sweeping)
 
-The server sends control lines back: `SYNC <tick>`, `TURN` / `HALT`, `ROLE LEFT` / `ROLE RIGHT` once the game's calibration screen has identified the node (again whenever it reconnects), which sets that mount's servo limits, and `AIM 90` / `SCAN` while the calibration screen is open / after it closes. A node boots holding its servo at 90 and sweeps only once told `SCAN`; the server sends `AIM 90` or `SCAN` the moment a node connects, so one that reboots mid-calibration never moves.
+The server sends control lines back: `SYNC <tick>`, `TURN` / `HALT`, `ROLE LEFT` / `ROLE RIGHT` once the game's calibration screen has identified the node (again whenever it reconnects), which sets that mount's servo limits, and `AIM 90` / `SCAN` while the calibration screen is open / after it closes, and `PULSES <n>` (multi-pulse, below). A node boots holding its servo at 90 and sweeps only once told `SCAN`; the server sends `AIM 90` or `SCAN` the moment a node connects, so one that reboots mid-calibration never moves.
+
+**Multi-pulse** is the `PULSES <n>` command: in found or half-found, the node takes `n` pulse pairs at one angle (1 = off, the default; at most 5), averages each sensor's readings with outliers left out, and only then reports one reading and moves. A lost pair still sweeps straight away. "Outliers" means: pulses with no echo are skipped, echoes outside the play area are skipped if any pulse saw the player inside it, then an echo more than `OUTLIER_TOLERANCE_CM` (20 cm) from the median is dropped (for two echoes that disagree, the nearer one is kept), and the rest are averaged. It is switched with the **Pulses** button on the game screen (top right: Off, 2, 3), which sends `{"type": "nodes:pulses", "count": 3}`; the server passes the count on to every node, and again to each node as it connects. With multi-pulse on, a node reports about once every `n` pairs while it has the player, instead of after every pair.
+
+#### Firmware layout (`src/`)
+
+| File | What it is |
+|------|------------|
+| `Config.h` | Every pin, range, timing, step size, servo limit, network setting and multi-pulse setting |
+| `main.cpp` | Creates the objects below; `setup()` and `loop()` |
+| `UltrasonicSensor.h/.cpp` | `UltrasonicSensor`: one sensor, a distance in cm or `-1` for no echo |
+| `ScannerServo.h/.cpp` | `ScannerServo`: the servo angle, per-role limits (`NodeRole`), the calibration hold and settle time |
+| `Scanner.h/.cpp` | `Scanner`: the found / half-found / lost state machine and multi-pulse; `ScanReading`, `ScanState` |
+| `NodeConnection.h/.cpp` | `NodeConnection`: Wi-Fi, the TCP socket, the handshake and node id, sending and reading lines |
+| `ServerDiscovery.h/.cpp` | Finds the server on the local subnet (only with `AUTO_DISCOVER_SERVER`) |
+| `CommandHandler.h/.cpp` | `CommandHandler`: carries out the server's control lines |
+| `Telemetry.h/.cpp` | The JSON line above |
+
+The Wi-Fi network and server IP default to the values in `Config.h`. To use your own without committing them, add them to your own (gitignored) `platformio.ini`:
+
+```ini
+build_flags =
+    '-DNODE_WIFI_SSID="MyHotspot"'
+    '-DNODE_WIFI_PASSWORD="secret"'
+    '-DNODE_SERVER_IP="192.168.137.1"'
+```
 
 **Calibration** is the game's sensor-assignment screen: both servos are held still at 90 degrees (`AIM 90`) for the whole screen - through both steps, LEFT then RIGHT - while the operator aims the nodes straight out into the play area by hand and identifies each node with a hand in front of it; each live-readings row shows the angle the node reports, amber if it is not 90; Start Game then lets the nodes scan again (`SCAN`). There is no play-area (corner) calibration: the game plays on the default bounds, rows between 20 and 140 cm in every column. Each game page asks for the hold with `{"type": "nodes:aim", "hold": true}` and releases it with `false`; the servos stay held while any open page is on the calibration screen, so another tab or device on a different screen cannot release them, and a page that closes stops holding.
 
@@ -64,7 +89,7 @@ With the flag off neither field is present.
 
 ### Browser → Server (WebSocket)
 
-`canvas.js` connects to `ws://<host>:8765/browser` and renders live node data on an HTML canvas. It can also send `menu:select` messages back to the server for UI interactions.
+`canvas.js` connects to `ws://<host>:8765/browser` and renders live node data on an HTML canvas. It can also send `menu:select` messages back to the server for UI interactions, `nodes:aim` from the calibration screen (above), and `{"type": "nodes:pulses", "count": 1|2|3}` from the game screen's Pulses button (multi-pulse, above; sent when it changes and after a reconnect; any other count is ignored).
 
 With server-side filtering on, the server also accepts:
 
@@ -292,7 +317,7 @@ reporting node's channel fed, which is the intended behaviour.
 
 ### Supporting the scanning rig
 
-`src/scanning.cpp` tracks the player with two sensors on a servo. Once it
+`src/Scanner.cpp` tracks the player with two sensors on a servo. Once it
 reports a position, use the existing geometry:
 
 ```python

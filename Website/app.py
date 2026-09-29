@@ -514,6 +514,42 @@ def send_node_role(node_id):
         send_command(node_id, f"ROLE {role}")
 
 
+# Multi-pulse, switched with the Pulses button on the game screen (nodes:pulses).
+# In found or half-found, each scanner node takes this many pulse pairs at one
+# angle and averages them, outliers left out, before it reports and moves; 1 is
+# off. Every node is told on arrival (a rebooted node has forgotten) and again
+# whenever the game changes it.
+PULSE_COUNT_OPTIONS = (1, 2, 3)
+nodes_pulse_count = 1
+
+
+def pulses_command():
+    return f"PULSES {nodes_pulse_count}"
+
+
+def set_nodes_pulse_count(count):
+    """Set pulses per angle on every connected node. Anything but one of
+    PULSE_COUNT_OPTIONS is ignored."""
+    global nodes_pulse_count
+    if not isinstance(count, int) or isinstance(count, bool) or count not in PULSE_COUNT_OPTIONS:
+        print(f"Ignored bad nodes:pulses count: {count!r}")
+        return
+    with state_lock:
+        nodes_pulse_count = count
+        command = pulses_command()
+        node_ids = [node_id for node_id, node in nodes.items() if node.get("conn") is not None]
+    print(f"Multi-pulse: {count} pulse pair(s) per angle")
+    for node_id in node_ids:
+        send_command(node_id, command)
+
+
+def send_node_pulses(node_id):
+    """Tell a node that has just connected how many pulses to take per angle."""
+    with state_lock:
+        command = pulses_command()
+    send_command(node_id, command)
+
+
 def sync_node(node_id):
     """Send the authoritative tick to one node (PC is source of truth)."""
     with state_lock:
@@ -593,9 +629,11 @@ def handle_node_connection(conn, address):
         print(f"ESP32 connected from {address}, {action} id {node_id}")
         conn.sendall(f"{node_id}\n".encode("utf-8"))
         # A rebooted node has forgotten whether it should be holding straight
-        # for calibration, and which mount it is; tell it again.
+        # for calibration, which mount it is and how many pulses to take; tell
+        # it again.
         send_node_aim(node_id)
         send_node_role(node_id)
+        send_node_pulses(node_id)
         if first_message is not None:
             update_node(node_id, first_message)
         with conn.makefile("r") as stream:
@@ -668,6 +706,9 @@ async def browser_handler(websocket):
             elif event.get("type") == "nodes:aim":
                 # This page arriving on (hold) or leaving the calibration screen.
                 await asyncio.to_thread(request_nodes_aim, websocket, bool(event.get("hold")))
+            elif event.get("type") == "nodes:pulses":
+                # The game screen's Pulses button: multi-pulse off (1), 2 or 3.
+                await asyncio.to_thread(set_nodes_pulse_count, event.get("count"))
             elif server_filter is not None:
                 apply_filter_event(event)
     finally:
