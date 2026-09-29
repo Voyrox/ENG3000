@@ -21,7 +21,7 @@
 //   window.setServerFilteringActive(active)     - the server has SERVER_FILTERING on
 //   window.setServerCoordinate(coordinate)      - latest filtered coordinate from the server
 //
-// Two input modes share all of the game logic. Only the cursor source differs:
+// Three input modes share all of the game logic. Only the cursor source differs:
 //   "mouse"  - canvas.js feeds raw canvas pixels straight from mousemove.
 //              Reached via Skip on the calibration screen.
 //   "sensor" - readSensorCoordinate() trilaterates the player from the LEFT
@@ -32,6 +32,9 @@
 //              When the server runs filterRules.py (SERVER_FILTERING on), its
 //              coordinate replaces readSensorCoordinate() for the cursor and
 //              alert; with the flag off (the default) nothing here changes.
+//   "remote" - the phone control panel (/control, only served when the server
+//              runs with CON=1) picks a hole; the HUD shows
+//              "Input: REMOTE" while it is in charge.
 
 (function () {
   const GAME_DURATION_MS = 60000; // overall round length shown as the countdown
@@ -220,7 +223,8 @@
 
   const gameState = {
     status: "idle", // "idle" | "playing" | "paused" | "gameover"
-    inputMode: "mouse", // "mouse" | "sensor"
+    inputMode: "mouse", // "mouse" | "sensor" | "remote"
+    remoteHole: -1, // hole the phone is pointing at, remote mode only
     sensor: emptySensorState(),
     score: 0,
     level: 1,
@@ -366,9 +370,10 @@
   };
 
   window.setGameInputMode = function setGameInputMode(mode) {
-    gameState.inputMode = mode === "sensor" ? "sensor" : "mouse";
-    // Drop any stale cursor so the two modes never inherit each other's position.
+    gameState.inputMode = mode === "sensor" || mode === "remote" ? mode : "mouse";
+    // Drop any stale cursor so the modes never inherit each other's position.
     gameState.cursor = { x: null, y: null, inBounds: true };
+    gameState.remoteHole = -1;
     gameState.sensor = emptySensorState();
     resetSensorFilters();
   };
@@ -424,6 +429,8 @@
         updateSensorCursor(canvas, orderedNodes);
       }
       recordSensorReading(now, orderedNodes);
+    } else if (gameState.inputMode === "remote" && canvas) {
+      updateRemoteCursor(canvas);
     }
 
     if (gameState.status !== "playing") return;
@@ -576,6 +583,27 @@
     gameState.cursor.y = y;
     gameState.cursor.inBounds = x >= 0 && x <= width && y >= 0 && y <= height;
   };
+
+  // Remote-mode input: a hole index 0-8 (row-major from the top-left, same as
+  // getGameGridLayout), or -1 to lift the cursor off the grid.
+  window.setRemoteHole = function setRemoteHole(hole) {
+    if (gameState.inputMode !== "remote") return;
+    gameState.remoteHole = Number.isInteger(hole) && hole >= 0 && hole <= 8 ? hole : -1;
+  };
+
+  // Resolved every frame rather than stored as pixels, so a resize keeps the
+  // cursor on the right hole. Hovering scores, exactly as in sensor mode.
+  function updateRemoteCursor(canvas) {
+    if (gameState.remoteHole === -1) {
+      gameState.cursor = { x: null, y: null, inBounds: true };
+      return;
+    }
+    const hole = window.getGameGridLayout(canvas).holes[gameState.remoteHole];
+    const x = hole.x + hole.size / 2;
+    const y = hole.y + hole.size / 2;
+    gameState.cursor = { x, y, inBounds: true };
+    window.handleGameHover(canvas, x, y);
+  }
 
   window.getGameGridLayout = function getGameGridLayout(canvas) {
     const width = canvas.clientWidth || canvas.width;
@@ -1738,7 +1766,7 @@
     }
 
     if (gameState.cursor.x === null) {
-      view.footer = "move the mouse";
+      view.footer = gameState.inputMode === "remote" ? "no hole picked" : "move the mouse";
       return view;
     }
     const fx = (gameState.cursor.x - layout.gridLeft) / layout.gridSize;
@@ -1779,7 +1807,7 @@
       ctx.textAlign = "left";
       ctx.font = "bold 14px monospace";
       ctx.fillStyle = "#9298aa";
-      ctx.fillText("Input: MOUSE", pillX + 14, height - 27);
+      ctx.fillText(`Input: ${gameState.inputMode.toUpperCase()}`, pillX + 14, height - 27);
       ctx.textAlign = "start";
     }
 

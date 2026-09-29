@@ -6,7 +6,7 @@
 // own state, so every number is exactly what was reported. Everything resets
 // at the start of each round.
 //
-//   GameStats.reset(inputMode)                  - "mouse" | "sensor"
+//   GameStats.reset(inputMode)                  - "mouse" | "sensor" | "remote"
 //   GameStats.onSpawn(type)                     - "mole" | "super" | "bomb"
 //   GameStats.onFirstHit(type, reactionMs)      - first whack on a mole or hat mole
 //   GameStats.onDefeat(type, hole)              - a mole or hat mole finished off
@@ -59,9 +59,11 @@
 
   // --- Round statistics --------------------------------------------------------
 
+  // inputMode is shown as given; only "sensor" changes what the panels draw
+  // (mouse and remote both place the cursor on a hole directly).
   function emptyState(inputMode) {
     return {
-      inputMode: inputMode === "sensor" ? "sensor" : "mouse",
+      inputMode: inputMode || "mouse",
       playMs: 0,
       blockedMs: 0,
       heldMs: 0,
@@ -350,14 +352,6 @@
     }
   }
 
-  function drawNoData(ctx, rect, text) {
-    ctx.fillStyle = INK.muted;
-    ctx.font = "11px monospace";
-    ctx.textAlign = "center";
-    ctx.fillText(text, rect.x + rect.w / 2, rect.y + rect.h / 2 + 4);
-    ctx.textAlign = "left";
-  }
-
   // --- Box plot -----------------------------------------------------------------------
   // Horizontal: one row per series, a shared axis along the bottom. Fewer than
   // five values are drawn as plain dots - a box of three points is a fiction.
@@ -614,7 +608,7 @@
 
   // rect: { x, y, w, h }. band: the calibrated play depth { from, to } in cm, if any.
   function renderCharts(ctx, rect, snap, now, band) {
-    drawPanel(ctx, rect, "LIVE DATA", snap.inputMode === "sensor" ? "sensor" : "mouse");
+    drawPanel(ctx, rect, "LIVE DATA", snap.inputMode);
 
     const inner = { x: rect.x + 12, w: rect.w - 24 };
     const available = rect.h - 30 - 12;

@@ -5,7 +5,7 @@ import os
 import socket
 import threading
 import time
-from flask import Flask, jsonify, render_template
+from flask import Flask, abort, jsonify, render_template
 from websockets.asyncio.server import broadcast, serve
 import numpy as np
 
@@ -57,12 +57,17 @@ MS_PER_SECOND = 1000.0
 # environment variable is set to 1/true/yes/on. Off by default: the browser
 # keeps filtering in game.js and the messages are exactly as before.
 SERVER_FILTERING = server_filtering_enabled(os.environ)
+# The phone control panel (/control) only exists when explicitly switched on:
+#   CON=1 python app.py
+CONTROL_ENABLED = os.environ.get("CON") == "1"
+CONTROL_ACTIONS = {"hole", "start", "mode", "pause", "resume", "restart", "menu", "testMode"}
 
 state_lock = threading.Lock()
 next_node_id = 1
 nodes = {}
 sync_tick = 0
 BROWSER_CONNECTIONS = set()
+CONTROL_CONNECTIONS = set()
 WS_LOOP = None
 # Guarded by state_lock. None when the flag is off.
 server_filter = ServerFilterStage() if SERVER_FILTERING else None
@@ -131,8 +136,9 @@ def nodes_message():
 
 async def broadcast_nodes():
     message = json.dumps(nodes_message())
-    if BROWSER_CONNECTIONS:
-        broadcast(BROWSER_CONNECTIONS.copy(), message)
+    targets = BROWSER_CONNECTIONS | CONTROL_CONNECTIONS
+    if targets:
+        broadcast(targets, message)
 
 
 def schedule_broadcast_nodes():
@@ -482,16 +488,44 @@ async def browser_handler(websocket):
                 print(f"Menu selection received: {option}")
                 status = json.dumps({"type": "menu:status", "message": f"Selected: {option}"})
                 broadcast(BROWSER_CONNECTIONS.copy(), status)
+            elif event.get("type") == "game:status":
+                # The game's state for the phone control panel; never a filter event.
+                if CONTROL_CONNECTIONS:
+                    broadcast(CONTROL_CONNECTIONS.copy(), message)
             elif server_filter is not None:
                 apply_filter_event(event)
     finally:
         BROWSER_CONNECTIONS.discard(websocket)
 
 
+async def control_handler(websocket):
+    """Phone control panel: relays commands to every game browser."""
+    CONTROL_CONNECTIONS.add(websocket)
+    print(f"Control panel connected from {websocket.remote_address}")
+    try:
+        await websocket.send(json.dumps({"type": "nodes:update", "nodes": snapshot_nodes()}))
+        async for message in websocket:
+            try:
+                event = json.loads(message)
+            except json.JSONDecodeError:
+                continue
+            if event.get("action") not in CONTROL_ACTIONS:
+                continue
+            if event["action"] != "hole":
+                print(f"Control panel: {event}")
+            command = json.dumps({**event, "type": "remote:command"})
+            broadcast(BROWSER_CONNECTIONS.copy(), command)
+    finally:
+        CONTROL_CONNECTIONS.discard(websocket)
+        print("Control panel disconnected")
+
+
 async def websocket_handler(websocket):
     match websocket.request.path:
         case "/browser":
             await browser_handler(websocket)
+        case "/control" if CONTROL_ENABLED:
+            await control_handler(websocket)
         case _:
             await websocket.close()
 
@@ -504,9 +538,28 @@ async def websocket_server():
         await asyncio.Future()
 
 
+def lan_ip():
+    """The laptop's address on the current network (no packet is sent)."""
+    probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        probe.connect(("10.255.255.255", 1))
+        return probe.getsockname()[0]
+    except OSError:
+        return "127.0.0.1"
+    finally:
+        probe.close()
+
+
 @app.route("/")
 def home():
     return render_template("index.html")
+
+
+@app.route("/control")
+def control():
+    if not CONTROL_ENABLED:
+        abort(404)
+    return render_template("control.html")
 
 
 @app.route("/api/nodes")
@@ -528,4 +581,6 @@ if __name__ == '__main__':
     threading.Thread(target=tcp_server, daemon=True).start()
     threading.Thread(target=cleanup_stale_nodes, daemon=True).start()
     threading.Thread(target=coordinator_loop, daemon=True).start()
+    if CONTROL_ENABLED:
+        print(f"Control panel enabled at http://{lan_ip()}:5000/control")
     app.run(debug=True, host="0.0.0.0", threaded=True, use_reloader=False)
