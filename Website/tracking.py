@@ -1,12 +1,20 @@
 """
-tracking.py - per-sensor constant-velocity Kalman tracker for path prediction.
+tracking.py - per-sensor constant-velocity Kalman tracker.
 
-Wired for PREDICTION ONLY (issue #18): serverFilter.py keeps one tracker per
-channel behind the SERVER_FILTERING flag and publishes the predicted distance
-alongside the coordinate. It does not replace the median: the median in
-filterRules.py remains the rule owner for filtering, and the coordinate, the
-cell vote and the proximity alert never read this module's output. Replacing
-the median would first need the NIS spike gate ported from the model.
+Used in two places:
+
+  * Filtering: the middle stage of every channel in filterRules.ChannelFilter
+    (slew gate -> median -> THIS -> FFT low-pass -> hold), and of the per-node
+    distance in app.py. It runs on the median's output, so it smooths and
+    follows the median rather than replacing it: the slew gate and the median
+    still stop spikes before they reach it. game.js's kalmanUpdate() is a
+    port of update() for the browser's copy of the chain.
+  * Path prediction (issue #18): serverFilter.py keeps one tracker per channel
+    behind the SERVER_FILTERING flag and publishes the predicted distance
+    alongside the coordinate. Predictions (predict(), predict_at()) are still
+    not read by the coordinate, the cell vote or the alert.
+
+Neither use feeds the proximity alert, which reads RAW readings.
 
 One tracker per sensor channel. State is [distance_cm, velocity_cm_s],
 updated only when that channel reports. Discrete white-noise acceleration
@@ -70,7 +78,8 @@ class ConstantVelocityTracker:
                  sigma_r_cm: float = DEFAULT_SIGMA_R_CM,        # measurement noise SD, cm
                  gap_reset_s: float = DEFAULT_GAP_RESET_S,      # drop the track after this long without a reading, s
                  v0_sigma_cm_s: float = DEFAULT_V0_SIGMA_CM_S,  # initial velocity SD of a new track, cm/s
-                 max_lead_s: float = DEFAULT_MAX_LEAD_S):       # longest extrapolation predict() makes, s
+                 max_lead_s: float = DEFAULT_MAX_LEAD_S,        # longest extrapolation predict() makes, s
+                 negative_is_missing: bool = True):             # a negative reading is a missed echo
         if sigma_a_cm_s2 <= 0 or sigma_r_cm <= 0:
             raise ValueError("noise levels must be positive")
         if gap_reset_s <= 0:
@@ -82,6 +91,10 @@ class ConstantVelocityTracker:
         self.gap_reset_s = gap_reset_s
         self.v0_sigma_cm_s = v0_sigma_cm_s
         self.max_lead_s = max_lead_s
+        # A distance is never negative, so by default a negative reading is a
+        # missed echo. A channel that can go negative (an x coordinate across
+        # the play area) turns this off and is told about misses with None.
+        self.negative_is_missing = negative_is_missing
         self.reset()
 
     # ------------------------------------------------------------------
@@ -124,10 +137,10 @@ class ConstantVelocityTracker:
         self.t_s = t_s
 
     def update(self, z_cm: Optional[float], t_s: float) -> Optional[float]:
-        """Feed one reading taken at t_s (s). None or a negative value is a
-        missing reading: the state is only predicted forward. Returns the
+        """Feed one reading taken at t_s (s). None, or a negative value
+        unless negative_is_missing is off, is a missing reading: the state is only predicted forward. Returns the
         distance estimate at t_s, or None when there is no track."""
-        if z_cm is not None and z_cm < 0:
+        if z_cm is not None and z_cm < 0 and self.negative_is_missing:
             z_cm = None
         if self.alive and t_s - self.t_reading_s > self.gap_reset_s:
             self.reset()

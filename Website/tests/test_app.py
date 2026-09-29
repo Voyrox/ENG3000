@@ -42,6 +42,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(HERE))
 
 import app  # noqa: E402
+from filterRules import fft_lowpass_last  # noqa: E402
 
 
 class LoopStopped(Exception):
@@ -244,9 +245,9 @@ class FftFilterTests(unittest.TestCase):
                                    f"{hz} Hz should pass a {app.DISTANCE_CUTOFF_HZ} Hz cut")
 
     def test_a_tone_above_the_cutoff_is_flattened_towards_the_mean(self):
-        # 64 samples at 20 Hz is a short window, so a brick-wall cut rings at
-        # the edges; the swing has to collapse, not vanish exactly.
-        for hz in (3.0, 5.0, 8.0):
+        # FFT_WINDOW samples at 20 Hz is a short window, so a brick-wall cut
+        # rings at the edges; the swing has to collapse, not vanish exactly.
+        for hz in (5.0, 8.0):
             with self.subTest(hz=hz):
                 readings = self.tone(hz)
                 filtered = app.fft_filter_ultrasonic(readings, self.RATE,
@@ -254,6 +255,25 @@ class FftFilterTests(unittest.TestCase):
                 self.assertLess(self.span(filtered), self.span(readings) / 2,
                                 f"{hz} Hz should be mostly rejected")
                 self.assertAlmostEqual(float(np.mean(filtered)), 10.0, delta=0.5)
+
+    def test_a_steady_walk_is_not_dragged_back_towards_the_oldest_reading(self):
+        # With only the mean taken out, the FFT wrapped the window round and
+        # the newest value sat far behind a walking player. The trend is now
+        # taken out first and the window mirrored, so a straight walk passes.
+        walk = [60.0 + 2.5 * i for i in range(app.FFT_WINDOW)]
+        filtered = app.fft_filter_ultrasonic(walk, self.RATE, app.DISTANCE_CUTOFF_HZ)
+        self.assertAlmostEqual(float(filtered[-1]), walk[-1], places=6)
+
+    def test_the_newest_sample_matches_the_game_chains_filter(self):
+        # filterRules.fft_lowpass_last() (and fftLowpassLast() in game.js) is
+        # this filter read at the newest sample only.
+        rng = np.random.default_rng(7)
+        for n in (2, 5, app.FFT_MIN_SAMPLES, app.FFT_WINDOW):
+            with self.subTest(n=n):
+                readings = list(100.0 + np.cumsum(rng.normal(0, 3, n)))
+                whole = app.fft_filter_ultrasonic(readings, self.RATE, app.DISTANCE_CUTOFF_HZ)
+                last = fft_lowpass_last(readings, self.RATE, app.DISTANCE_CUTOFF_HZ)
+                self.assertAlmostEqual(float(whole[-1]), last, places=9)
 
     def test_cutting_higher_rejects_more_than_cutting_lower(self):
         readings = self.tone(8.0)
@@ -439,7 +459,17 @@ class HandshakeTests(BrokerTestCase):
 
 
 class ReadingPipelineTests(BrokerTestCase):
-    """Every node message is median-smoothed, then low-pass filtered."""
+    """Every node message goes median -> Kalman -> FFT low-pass."""
+
+    STEP_S = 0.05   # 20 readings a second, as the nodes send
+
+    def feed_at(self, node, values, start_s=100.0):
+        """update_distance() with explicit reading times, STEP_S apart."""
+        t = start_s
+        for value in values:
+            app.update_distance(node, {"avg": value}, t)
+            t += self.STEP_S
+        return t
 
     def feed(self, node_id, values, key="avg"):
         for value in values:
@@ -491,25 +521,60 @@ class ReadingPipelineTests(BrokerTestCase):
         self.assertEqual(len(node["median_samples"]), app.MEDIAN_WINDOW)
         self.assertEqual(len(node["distance_samples"]), app.FFT_WINDOW)
 
-    def test_below_the_minimum_the_median_is_published_verbatim(self):
-        """Before the FFT warms up the raw median must not be smoothed twice."""
-        node_id, node = self.add_node()
-        alternating = [10 if i % 2 == 0 else 90 for i in range(app.FFT_MIN_SAMPLES - 1)]
-        self.feed(node_id, alternating)
+    def test_below_the_minimum_the_kalman_output_is_published(self):
+        """Before the FFT warms up, the median goes through the Kalman only."""
+        _, node = self.add_node()
+        readings = [40, 44, 39, 47, 42, 45, 41][:app.FFT_MIN_SAMPLES - 1]
+        tracker = app.new_distance_tracker()
+        window = []
+        t = 100.0
+        for value in readings:
+            window = (window + [value])[-app.MEDIAN_WINDOW:]
+            expected = tracker.update(float(np.median(window)), t)
+            app.update_distance(node, {"avg": value}, t)
+            t += self.STEP_S
 
-        self.assertEqual(len(node["distance_samples"]), app.FFT_MIN_SAMPLES - 1)
-        self.assertEqual(node["filtered_distance"], float(np.median(node["median_samples"])))
-        self.assertEqual(node["filtered_distance"], 10.0)
+        self.assertEqual(len(node["distance_samples"]), len(readings))
+        self.assertAlmostEqual(node["filtered_distance"], expected, places=12)
 
     def test_the_fft_takes_over_at_exactly_the_minimum_sample_count(self):
-        node_id, node = self.add_node()
-        alternating = [10 if i % 2 == 0 else 90 for i in range(app.FFT_MIN_SAMPLES)]
-        self.feed(node_id, alternating)
+        _, node = self.add_node()
+        readings = [40, 44, 39, 47, 42, 45, 41, 46, 40, 43][:app.FFT_MIN_SAMPLES]
+        self.feed_at(node, readings)
 
         self.assertEqual(len(node["distance_samples"]), app.FFT_MIN_SAMPLES)
-        # The FFT strips the alternating component and restores the window
-        # mean, so the published value jumps well away from the median.
-        self.assertNotAlmostEqual(node["filtered_distance"], 10.0, places=1)
+        expected = app.fft_filter_ultrasonic(list(node["distance_samples"]),
+                                             app.DISTANCE_SAMPLE_RATE_HZ,
+                                             app.DISTANCE_CUTOFF_HZ)[-1]
+        self.assertAlmostEqual(node["filtered_distance"], float(expected), places=12)
+        # ...which is not simply the Kalman output any more.
+        self.assertNotAlmostEqual(node["filtered_distance"], node["distance_samples"][-1], places=6)
+
+    def test_a_steady_walk_is_followed(self):
+        """50 cm/s away from the node: the published value keeps up with the
+        walk (the median's two-reading lag, and little more)."""
+        _, node = self.add_node()
+        walk = [60.0 + 2.5 * i for i in range(3 * app.FFT_WINDOW)]
+        self.feed_at(node, walk)
+        self.assertLess(abs(walk[-1] - node["filtered_distance"]), 7.0)
+
+    def test_a_no_echo_reading_leaves_the_distance_alone(self):
+        _, node = self.add_node()
+        t = self.feed_at(node, [50.0] * 3)
+        app.update_distance(node, {"avg": -1}, t)
+        self.assertEqual(node["filtered_distance"], 50.0)
+        self.assertNotIn(-1.0, node["median_samples"])
+
+    def test_a_gap_starts_the_windows_again(self):
+        """A node that waited out the other node's turn starts afresh rather
+        than blending where the player was a second ago into where they are."""
+        _, node = self.add_node()
+        t = self.feed_at(node, [100.0] * app.FFT_WINDOW)
+        gap = app.new_distance_tracker().gap_reset_s + 0.5
+        app.update_distance(node, {"avg": 60.0}, t + gap)
+        self.assertEqual(list(node["median_samples"]), [60.0])
+        self.assertEqual(len(node["distance_samples"]), 1)
+        self.assertEqual(node["filtered_distance"], 60.0)
 
     def test_the_filter_output_is_always_a_plain_float(self):
         node_id, node = self.add_node()

@@ -28,12 +28,13 @@
 //              RIGHT scanner nodes (distance + servo angle; trilateration for
 //              nodes that send no angle) as ONE continuous position in
 //              centimetres, and rawToGrid() (callibrate_corners.js) turns that
-//              into 0-2 grid coordinates with (0,0) at BOTTOM-LEFT. That cell,
+//              into 0-2 grid coordinates, gy 0 being the row nearest the
+//              screen - drawn at the TOP of the board (boardRow()). That cell,
 //              after the majority vote, is the game rule: it decides which
 //              mole is live. The continuous position is drawn as the cursor
 //              through the spring in positionSolver.js, so the player glides
 //              between holes instead of snapping to their centres. Entered
-//              once both nodes are identified and the corners calibrated.
+//              with Start Game once both nodes are identified.
 //              When the server runs filterRules.py (SERVER_FILTERING on), its
 //              coordinate replaces readSensorCoordinate() for the cursor and
 //              alert; with the flag off (the default) nothing here changes.
@@ -111,9 +112,29 @@
   // otherwise sustained noise clears the reference and is then accepted as
   // truth, which is precisely the jump we set out to reject.
   const SLEW_ANCHOR_TTL_MS = 3000;
+
+  // Smoothing after the median. Each channel runs median -> Kalman -> FFT
+  // low-pass (conditionSensor()); the numbers that can be tuned live are in
+  // `tuning` below.
+  //
+  // Kalman: a constant-velocity filter on the median's output - the same model
+  // and noise levels as ConstantVelocityTracker in tracking.py, which the
+  // Python copy of this chain (filterRules.py) uses directly. Its velocity
+  // state follows a walking player without the lag an average adds.
+  const KALMAN_GAP_RESET_S = 0.5;     // tracking.py DEFAULT_GAP_RESET_S
+  const KALMAN_V0_SIGMA_CM_S = 100;   // tracking.py DEFAULT_V0_SIGMA_CM_S
+  // FFT low-pass: the last fftWindow Kalman outputs, with their straight-line
+  // trend taken out and the window mirrored at its newest end, are cut above
+  // fftCutoffHz and the newest sample is read back (fftLowpassLast()). The
+  // trend and the mirror stop the transform treating the window as a loop:
+  // with only the mean taken out, a player walking at 50 cm/s read about 35 cm
+  // behind where they were. Readings are taken to be FFT_SAMPLE_RATE_HZ apart.
+  const FFT_SAMPLE_RATE_HZ = 20;
+  const FFT_MIN_SAMPLES = 8;          // fewer and the Kalman output passes straight through
+
   // --- Live-tunable smoothing -----------------------------------------------
   // The server broadcasts on every node message, so with two sensors at 20Hz
-  // roughly 40 readings arrive each second. All four numbers below are counted
+  // roughly 40 readings arrive each second. The window sizes below are counted
   // in readings (not render frames), so 100 readings is about 2.5 seconds.
   //
   // Adjust at runtime from the console with tuneSensor({ ... }) - no reload.
@@ -132,6 +153,17 @@
     // holdReadings at the current data rate, or it fires first and the reading
     // budget never gets a chance to matter.
     holdTimeoutMs: 5000,
+    // The smoothing after each sensor's median (see conditionSensor()).
+    // kalmanSigmaA: the player's acceleration noise, cm/s^2 - higher follows a
+    // lunge faster, lower smooths more. kalmanSigmaR: one reading's noise, cm.
+    // fftWindow: Kalman outputs in the FFT window; 0 turns the FFT stage off.
+    // fftCutoffHz: the FFT low-pass keeps what is at or below this.
+    // Changes apply from the next reading; the Python copy of this chain
+    // (filterRules.FilterConfig) has the same defaults.
+    kalmanSigmaA: 400,
+    kalmanSigmaR: 0.91,
+    fftWindow: 32,
+    fftCutoffHz: 3,
   };
 
   window.tuneSensor = function tuneSensor(partial) {
@@ -166,8 +198,8 @@
   const CURSOR_SMOOTH_TIME = 0.14; // s to close most of the gap to a new position
   const CURSOR_MAX_SPEED = 900;     // px/s ceiling, so one bad frame cannot fling it
 
-  // HUD layout (see renderHud()). Bottom-left, from the corner up: the
-  // miniature cursor, the sensor panel, then the position map.
+  // HUD layout (see renderHud()). Bottom-left: the sensor panel (sensor mode
+  // only), with LIVE STATS above it.
   const HUD_EDGE = 12;            // px from the canvas edge
   const HUD_GAP = 10;             // px between stacked panels
   const SENSOR_PANEL_W = 380;     // px
@@ -175,15 +207,6 @@
   const STATS_PANEL_W = 270;      // px; LIVE STATS, left gutter
   const STATS_PANEL_MIN_W = 190;  // px; narrower and the values collide with the labels
   const CHARTS_PANEL_MAX_H = 300; // px; LIVE DATA, under the legend
-  const MAP_AREA_WIDTH_CM = PLAY_WIDTH_CM;
-  const MAP_MIN_SIZE = 110;       // px; below this the grid stops being legible
-  const MAP_MAX_SIZE = 170;       // px
-  const MAP_GAP = 10;             // px between the map and the sensor panel
-
-  // Declared up here, not beside the render code, because resetSensorFilters()
-  // touches them and a `let` read before its line runs throws.
-  let coordinateMap = null;
-  let lastMapPoint = null;
 
   // Drawn-cursor smoothing. Created once and reset between rounds, so it is
   // declared with the rest of the module state rather than per round.
@@ -546,9 +569,10 @@
 
   // --- Live statistics feed ----------------------------------------------------
 
-  // Grid cell (gx, gy; origin bottom-left) -> hole index (0 top-left, reading order).
+  // Grid cell (gx, gy; gy 0 = the row nearest the screen) -> hole index
+  // (0 top-left, reading order).
   function holeForCell(gx, gy) {
-    return (2 - gy) * 3 + gx;
+    return boardRow(gy) * 3 + gx;
   }
 
   function holeAtPoint(layout, x, y) {
@@ -834,7 +858,150 @@
       anchorAt: -Infinity,
       rejects: [],      // recent implausible readings, kept for re-locking
       rejectCount: 0,   // total discarded, surfaced for diagnosis
+      kalman: makeKalman(),
+      smoothed: [],     // recent Kalman outputs: the FFT stage's window
     };
+  }
+
+  // The median onwards starts again from the next reading. After a re-lock, or
+  // once the hold has run out, the old track says nothing about the new one.
+  function restartSmoothing(filter) {
+    filter.samples.length = 0;
+    resetKalman(filter.kalman);
+    filter.smoothed.length = 0;
+  }
+
+  // --- Kalman stage ----------------------------------------------------------
+  // Port of ConstantVelocityTracker.update() in tracking.py, operation for
+  // operation, so filterRules.py reproduces it exactly. State [d, v] in cm and
+  // cm/s, covariance [[p00, p01], [p01, p11]], times in seconds.
+
+  function makeKalman() {
+    return { d: null, v: 0, p00: 0, p01: 0, p11: 0, t: null, tReading: null };
+  }
+
+  function resetKalman(k) {
+    k.d = null;
+    k.v = 0;
+    k.p00 = k.p01 = k.p11 = 0;
+    k.t = null;
+    k.tReading = null;
+  }
+
+  function kalmanUpdate(k, z, t) {
+    const sigmaA = tuning.kalmanSigmaA;
+    const sigmaR = tuning.kalmanSigmaR;
+    if (k.d !== null && t - k.tReading > KALMAN_GAP_RESET_S) resetKalman(k);
+
+    if (k.d === null) {
+      k.d = z;
+      k.v = 0;
+      k.p00 = sigmaR ** 2;
+      k.p01 = 0;
+      k.p11 = KALMAN_V0_SIGMA_CM_S ** 2;
+      k.t = t;
+      k.tReading = t;
+      return k.d;
+    }
+
+    // Predict: x = F x, P = F P F^T + Q (white-noise acceleration).
+    const dt = t - k.t;
+    if (dt > 0) {
+      const q = sigmaA ** 2;
+      const dt2 = dt * dt;
+      k.d += k.v * dt;
+      const p00 = k.p00 + 2 * dt * k.p01 + dt2 * k.p11 + q * dt2 * dt2 / 4;
+      const p01 = k.p01 + dt * k.p11 + q * dt2 * dt / 2;
+      const p11 = k.p11 + q * dt2;
+      k.p00 = p00;
+      k.p01 = p01;
+      k.p11 = p11;
+      k.t = t;
+    }
+
+    // Update with the reading; Joseph form for the covariance.
+    const r = sigmaR ** 2;
+    const s = k.p00 + r;
+    const nu = z - k.d;
+    const k0 = k.p00 / s;
+    const k1 = k.p01 / s;
+    k.d += k0 * nu;
+    k.v += k1 * nu;
+    const a = 1 - k0;
+    const p00 = a * a * k.p00 + k0 * k0 * r;
+    const p01 = a * (k.p01 - k1 * k.p00) + k0 * k1 * r;
+    const p11 = k.p11 - 2 * k1 * k.p01 + k1 * k1 * k.p00 + k1 * k1 * r;
+    k.p00 = p00;
+    k.p01 = p01;
+    k.p11 = p11;
+    k.tReading = t;
+    return k.d;
+  }
+
+  // --- FFT stage ---------------------------------------------------------------
+  // The low-pass read back at the newest sample. Same arithmetic as
+  // fft_lowpass_last() in filterRules.py; app.py's fft_filter_ultrasonic() is
+  // the numpy version for a whole window. Only the bins that survive the cut
+  // are transformed, which gives the same newest sample as a full FFT, a
+  // zeroed top end and an inverse FFT.
+  function fftLowpassLast(values, sampleRateHz, cutoffHz) {
+    const n = values.length;
+    if (n < 2) return values[n - 1];
+
+    // Least-squares straight line through the window.
+    const tMean = (n - 1) / 2;
+    let vMean = 0;
+    for (let i = 0; i < n; i++) vMean += values[i];
+    vMean /= n;
+    let sxx = 0;
+    let sxy = 0;
+    for (let i = 0; i < n; i++) {
+      const offset = i - tMean;
+      sxx += offset * offset;
+      sxy += offset * (values[i] - vMean);
+    }
+    const slope = sxy / sxx;
+
+    // What the line leaves, mirrored at the newest end: 2n samples that join
+    // up smoothly where the transform wraps round.
+    const m = 2 * n;
+    const mirrored = new Array(m);
+    for (let i = 0; i < n; i++) {
+      const residual = values[i] - (vMean + slope * (i - tMean));
+      mirrored[i] = residual;
+      mirrored[m - 1 - i] = residual;
+    }
+
+    // Rebuild sample n - 1 from the bins at or below the cutoff.
+    const at = n - 1;
+    let sum = 0;
+    for (let k = 0; k <= m / 2; k++) {
+      if (k * sampleRateHz / m > cutoffHz) break;
+      let re = 0;
+      let im = 0;
+      for (let j = 0; j < m; j++) {
+        const angle = (2 * Math.PI * k * j) / m;
+        re += mirrored[j] * Math.cos(angle);
+        im -= mirrored[j] * Math.sin(angle);
+      }
+      const phase = (2 * Math.PI * k * at) / m;
+      const term = re * Math.cos(phase) - im * Math.sin(phase);
+      sum += k === 0 || k === m / 2 ? term : 2 * term;
+    }
+    return vMean + slope * (at - tMean) + sum / m;
+  }
+
+  // Adds one Kalman output to the FFT window and returns the channel's value.
+  function smoothWindow(filter, tracked) {
+    const size = Math.max(0, Math.floor(tuning.fftWindow));
+    if (size === 0) {
+      filter.smoothed.length = 0;
+      return tracked;
+    }
+    filter.smoothed.push(tracked);
+    while (filter.smoothed.length > size) filter.smoothed.shift();
+    if (filter.smoothed.length < Math.min(FFT_MIN_SAMPLES, size)) return tracked;
+    return fftLowpassLast(filter.smoothed, FFT_SAMPLE_RATE_HZ, tuning.fftCutoffHz);
   }
 
   const sensorFilters = [makeFilter(), makeFilter(), makeFilter()];
@@ -885,7 +1052,7 @@
     if (filter.rejects.length >= SLEW_RELOCK_READINGS) {
       const spread = Math.max(...filter.rejects) - Math.min(...filter.rejects);
       if (spread <= SLEW_RELOCK_SPREAD_CM) {
-        filter.samples.length = 0;
+        restartSmoothing(filter);
         filter.rejects.length = 0;
         return true;
       }
@@ -895,8 +1062,11 @@
     return false;
   }
 
-  // A median rejects single-sample spikes far better than a mean, and the hold
-  // window coasts through a dropped echo instead of reporting the player gone.
+  // One new reading through the channel: slew gate, median, Kalman, FFT
+  // low-pass. The median rejects single-sample spikes far better than a mean;
+  // the Kalman follows the median without an average's lag; the FFT stage cuts
+  // what is left above tuning.fftCutoffHz. The hold coasts through a dropped
+  // echo instead of reporting the player gone.
   function conditionSensor(filter, raw, now) {
     // An impossible jump is treated exactly like a dropped echo: it never
     // enters the median window, so it cannot drag the value toward itself.
@@ -905,23 +1075,27 @@
     if (raw !== null) {
       filter.samples.push(raw);
       if (filter.samples.length > SENSOR_HISTORY) filter.samples.shift();
-      filter.value = median(filter.samples);
+      const middle = median(filter.samples);
+      const tracked = kalmanUpdate(filter.kalman, middle, now / 1000);
+      filter.value = smoothWindow(filter, tracked);
       filter.lastGoodAt = now;
-      filter.anchor = filter.value;
+      // The slew gate judges readings against the median, as it always has:
+      // the stages after it lag a little, and must not tighten the gate.
+      filter.anchor = middle;
       filter.anchorAt = now;
       return filter.value;
     }
 
     if (now - filter.lastGoodAt <= SENSOR_HOLD_MS) return filter.value;
 
-    filter.samples.length = 0;
+    restartSmoothing(filter);
     filter.value = null;
     return null;
   }
 
   function resetSensorFilters() {
     sensorFilters.forEach((filter) => {
-      filter.samples.length = 0;
+      restartSmoothing(filter);
       filter.value = null;
       filter.lastGoodAt = -Infinity;
       filter.anchor = null;
@@ -942,7 +1116,6 @@
     // the last one ended.
     cursorSmoother.reset();
     cursorLastStepAt = null;
-    resetCoordinateMap();
   }
 
   window.resetSensorFilters = resetSensorFilters;
@@ -1083,14 +1256,19 @@
     const raw = [readDistance(list[LEFT_SENSOR]), null, readDistance(list[RIGHT_SENSOR])];
     const scans = [readScan(list[LEFT_SENSOR]), NO_SCAN, readScan(list[RIGHT_SENSOR])];
     const angles = scans.map((scan) => scan.angle);
-    const filtered = raw.map((value, index) => conditionSensor(sensorFilters[index], value, now));
+
+    // Fresh data, or the same reading being polled again by the render loop?
+    // Only fresh data moves the filters: the Kalman and FFT stages count
+    // readings, and one reading polled at 60 fps is still one reading.
+    const isNewReading = sensorFrameSeq !== lastSeenFrameSeq;
+    lastSeenFrameSeq = sensorFrameSeq;
+
+    const filtered = isNewReading
+      ? raw.map((value, index) => conditionSensor(sensorFilters[index], value, now))
+      : sensorFilters.map((filter) => filter.value);
     const configured = filtered.filter((d) => d !== null).length;
     const depth = filtered.map((distance, slot) =>
       distance === null || slot === 1 ? null : scannerPoint(columnCentreCm(slot), distance, angles[slot]).y);
-
-    // Fresh data, or the same reading being polled again by the render loop?
-    const isNewReading = sensorFrameSeq !== lastSeenFrameSeq;
-    lastSeenFrameSeq = sensorFrameSeq;
 
     const base = {
       raw, filtered, depth, scans, configured, isNewReading,
@@ -1155,15 +1333,29 @@
   // physical sensor the operator is holding a hand in front of.
   window.readNodeDistance = readDistance;
 
-  // Grid coordinate (0-2, origin bottom-left) -> canvas pixels at the centre of
-  // the matching hole.
+  // --- Which way up the board is drawn ----------------------------------------
+  // The row nearest the screen is drawn at the TOP of the board, so a player
+  // who steps towards the screen sees the cursor move up - the board reads like
+  // a map held facing the screen. Only the drawing is flipped: gy 0 is still
+  // the row nearest the screen everywhere else (rawToGrid(), the cell vote,
+  // filterRules.py), and left/right is unchanged. Set to false to draw the
+  // near row at the bottom again.
+  const NEAR_ROW_AT_TOP = true;
+  const GRID_ROWS = 3;
+
+  // Grid row (gy, 0 = nearest the screen) -> board row counted from the top.
+  function boardRow(gy) {
+    return NEAR_ROW_AT_TOP ? gy : GRID_ROWS - 1 - gy;
+  }
+
+  // Grid coordinate (0-2; gy 0 = nearest the screen) -> canvas pixels at the
+  // centre of the matching hole.
   window.gridToCanvasPoint = function gridToCanvasPoint(canvas, gx, gy) {
     const layout = window.getGameGridLayout(canvas);
     const span = layout.gridSize - layout.cellSize;
     return {
       x: layout.gridLeft + (gx / 2) * span + layout.cellSize / 2,
-      // Grid y grows upward (0 = nearest the screen), canvas y grows downward.
-      y: layout.gridTop + ((2 - gy) / 2) * span + layout.cellSize / 2,
+      y: layout.gridTop + (boardRow(gy) / 2) * span + layout.cellSize / 2,
     };
   };
 
@@ -1203,8 +1395,8 @@
   //
   // Both axes are anchored on the NEAR-LEFT corner of the play area, because
   // that is the origin gridToCanvasPoint counts out from: x grows right from
-  // the first column's centre, and depth grows up from the near edge, which is
-  // canvas-down.
+  // the first column's centre, and depth grows away from the near edge, which
+  // is drawn at the top (boardRow()).
   function worldToCanvasPoint(canvas, xCm, yCm, column) {
     if (!Number.isFinite(xCm) || !Number.isFinite(yCm)) return null;
 
@@ -1218,7 +1410,7 @@
     const bounds = window.getCalibrationBounds ? window.getCalibrationBounds() : null;
     const slot = Number.isInteger(column) && column >= 0 && column < GRID_COLUMNS ? column : 1;
     const span = bounds ? bounds.perColumn[slot] : { near: 20, far: 140 };
-    const rowDepth = Math.max(1e-6, (span.far - span.near) / GRID_COLUMNS);
+    const rowDepth = Math.max(1e-6, (span.far - span.near) / GRID_ROWS);
 
     // How many hole-widths from column 0's centre, and how far through the
     // three rows, measured from the near edge. A column centre is an integer,
@@ -1226,11 +1418,13 @@
     const acrossHoles = (xCm - columnCentreCm(0)) / COLUMN_PITCH_CM;
     const depthT = (yCm - span.near) / rowDepth;
 
+    // Board rows counted from the top, continuously: the middle of grid row r
+    // lands on boardRow(r), the same hole centre gridToCanvasPoint gives.
+    const rowsFromTop = NEAR_ROW_AT_TOP ? depthT - 0.5 : GRID_ROWS - 0.5 - depthT;
+
     return {
       x: layout.gridLeft + layout.cellSize / 2 + acrossHoles * pitch,
-      // Depth grows away from the screen, canvas y grows downward, so row 0
-      // (nearest the screen) is the last pitch down.
-      y: layout.gridTop + layout.cellSize / 2 + (GRID_COLUMNS - 0.5 - depthT) * pitch,
+      y: layout.gridTop + layout.cellSize / 2 + rowsFromTop * pitch,
     };
   }
 
@@ -1923,185 +2117,23 @@
     ctx.textAlign = "start";
   }
 
-  // --- Position map ----------------------------------------------------------
-  // CoordinateMap (coordinateMap.js) takes a plain (x, y) in centimetres and
-  // knows nothing about sensors. mapCoordinateFromSensor() is the only place
-  // that translates today's fix into that form. Once filterRules.py sends the
-  // filtered coordinate from the server, pass its x and y straight to
-  // map.update() and delete mapCoordinateFromSensor().
-
-  // Created on first use so load order against coordinateMap.js cannot bite.
-  function getCoordinateMap() {
-    if (!coordinateMap && window.CoordinateMap) {
-      coordinateMap = new window.CoordinateMap({
-        widthCm: MAP_AREA_WIDTH_CM,
-        depthCm: maxCoordCm(),
-      });
-    }
-    return coordinateMap;
-  }
-
-  function resetCoordinateMap() {
-    lastMapPoint = null;
-    if (coordinateMap) coordinateMap.clear();
-  }
-
-  // The continuous play-area position, which is the same fix the cursor is
-  // drawn from, so the map and the cursor cannot disagree. While the cursor is
-  // being held through bad readings the fix belongs to the bad reading, so the
-  // last good position is shown instead.
-  function mapCoordinateFromSensor(sensor) {
-    const label = sensor.held ? "held"
-      : sensor.status === "ok" ? null
-      : String(sensor.status).replace(/-/g, " ");
-
-    if (sensor.held) {
-      return { x: lastMapPoint ? lastMapPoint.x : null,
-               y: lastMapPoint ? lastMapPoint.y : null, label };
-    }
-
-    const hasFix = Number.isFinite(sensor.xCm) && Number.isFinite(sensor.yCm);
-    if (!hasFix) return { x: null, y: null, label };
-
-    // Out-of-bounds fixes still carry a position; the map pins those to its
-    // edge in red, which shows the player which way they went.
-    const point = { x: sensor.xCm, y: sensor.yCm };
-    if (sensor.status === "ok") lastMapPoint = point;
-    return { ...point, label };
-  }
-
-  // The server's coordinate already is a plain (x, y) in cm, and while held it
-  // carries the last good position, so it passes straight through.
-  function mapCoordinateFromServer(sensor) {
-    const label = sensor.held ? "held"
-      : sensor.status === "ok" ? null
-      : String(sensor.status).replace(/-/g, " ");
-    return { x: sensor.xCm, y: sensor.yCm, label };
-  }
-
-  // Drawn with its bottom edge at `bottom`, never reaching above `minTop`.
-  // Returns the map's top edge, or `bottom` when there is no room for even the
-  // smallest legible map.
-  function renderCoordinateMap(ctx, canvas, bottom, minTop) {
-    const map = getCoordinateMap();
-    if (!map) return bottom;
-
-    // Fit the gutter left of the board, and the room above the sensor panel.
-    const gutter = window.getGameGridLayout(canvas).gridLeft;
-    map.size = Math.max(MAP_MIN_SIZE, Math.min(MAP_MAX_SIZE, gutter - 48));
-    const chrome = map.height - map.size;
-    map.size = Math.min(map.size, bottom - minTop - chrome);
-    if (map.size < MAP_MIN_SIZE) return bottom;
-    map.depthCm = maxCoordCm();
-
-    // Draw the SAME row boundaries rawToGrid() uses, and highlight the cell the
-    // game actually settled on. Letting the map derive its own cell from x and
-    // y made it disagree with the board near row edges, where hysteresis holds.
-    const bounds = window.getCalibrationBounds ? window.getCalibrationBounds() : null;
-    map.setColumns(bounds ? bounds.perColumn : null);
-
-    const sensor = gameState.sensor;
-    const { x, y, label } = serverCoordinateActive
-      ? mapCoordinateFromServer(sensor)
-      : mapCoordinateFromSensor(sensor);
-    const cell = Number.isInteger(sensor.gx) && Number.isInteger(sensor.gy)
-      ? { gx: sensor.gx, gy: sensor.gy } : null;
-    map.update(x, y, label, cell);
-
-    const top = bottom - map.height;
-    map.render(ctx, HUD_EDGE, top);
-    return top;
-  }
-
-  // --- Miniature cursor ------------------------------------------------------
-  // A small copy of the board in the bottom-left corner with the LIVE cursor on
-  // it. In sensor mode that is the trilaterated position before the cell vote,
-  // so it moves continuously while the big cursor snaps from cell to cell.
-
-  let lastMiniPoint = null;
-
-  function miniCursorView(canvas) {
-    const layout = window.getGameGridLayout(canvas);
-    const view = {
-      point: null,
-      inBounds: true,
-      cell: null,
-      activeHole: gameState.activeHole,
-      activeType: gameState.moleType,
-      footer: "",
-      label: null,
-    };
-
-    if (gameState.inputMode === "sensor") {
-      const sensor = gameState.sensor;
-      if (Number.isInteger(sensor.gx) && Number.isInteger(sensor.gy)) view.cell = holeForCell(sensor.gx, sensor.gy);
-      view.label = sensor.held ? "HELD" : null;
-
-      const live = !sensor.held && Number.isFinite(sensor.xCm) && Number.isFinite(sensor.yCm);
-      if (live) {
-        // Depth as a share of this column's calibrated play depth, the screen
-        // edge at the bottom - the same rows rawToGrid() uses.
-        const bounds = window.getCalibrationBounds ? window.getCalibrationBounds() : null;
-        const span = bounds && bounds.perColumn
-          ? bounds.perColumn[columnAtCm(sensor.xCm)]
-          : { near: 0, far: maxCoordCm() };
-        const up = (sensor.yCm - span.near) / (span.far - span.near);
-        const point = {
-          fx: sensor.xCm / PLAY_WIDTH_CM,
-          fy: 1 - up,
-          inBounds: sensor.status === "ok" && up >= 0 && up <= 1,
-          footer: `x ${sensor.xCm.toFixed(0)}  y ${sensor.yCm.toFixed(0)} cm`,
-        };
-        if (sensor.status === "ok") lastMiniPoint = point;
-        view.point = { fx: point.fx, fy: point.fy };
-        view.inBounds = point.inBounds;
-        view.footer = point.footer;
-      } else if (sensor.held && lastMiniPoint) {
-        view.point = { fx: lastMiniPoint.fx, fy: lastMiniPoint.fy };
-        view.footer = lastMiniPoint.footer;
-      } else {
-        view.footer = String(sensor.status).replace(/-/g, " ");
-      }
-      return view;
-    }
-
-    if (gameState.cursor.x === null) {
-      view.footer = gameState.inputMode === "remote" ? "no finger on the pad" : "move the mouse";
-      return view;
-    }
-    const fx = (gameState.cursor.x - layout.gridLeft) / layout.gridSize;
-    const fy = (gameState.cursor.y - layout.gridTop) / layout.gridSize;
-    const hole = holeAtPoint(layout, gameState.cursor.x, gameState.cursor.y);
-    view.point = { fx, fy };
-    view.inBounds = fx >= 0 && fx <= 1 && fy >= 0 && fy <= 1;
-    view.cell = hole ? hole.index : null;
-    if (hole) view.footer = `hole ${hole.index + 1}`;
-    else view.footer = view.inBounds ? "between holes" : "off the board";
-    return view;
-  }
-
   // --- HUD layout ------------------------------------------------------------
-  // Bottom-left, from the corner up: the miniature cursor; in sensor mode the
-  // sensor panel on it and the position map on that (mouse and remote need no
-  // input box). LIVE STATS fills the room
-  // left between that stack and the score panel, showing as many rows as fit.
-  // LIVE DATA (box plot and bar charts) sits under the How to Play legend.
+  // Bottom-left: in sensor mode the sensor panel sits in the corner (mouse and
+  // remote need no input box). LIVE STATS fills the room left between it and
+  // the score panel, showing as many rows as fit. LIVE DATA (box plot and bar
+  // charts) sits under the How to Play legend.
 
   function renderHud(ctx, canvas) {
     const height = canvas.clientHeight || canvas.height;
     const view = window.GameStatsView || null;
-    const miniSize = view ? view.MINI_CURSOR : { w: 150, h: 180 };
-    const mini = { x: HUD_EDGE, y: height - HUD_EDGE - miniSize.h, w: miniSize.w, h: miniSize.h };
-    if (view) view.renderMiniCursor(ctx, mini, miniCursorView(canvas));
 
     const score = getScorePanelRect(canvas);
     const minTop = score.y + score.h + HUD_GAP;
-    let stackTop = mini.y;
+    let stackTop = height - HUD_EDGE;
 
     if (gameState.inputMode === "sensor") {
-      stackTop -= HUD_GAP + SENSOR_PANEL_H;
+      stackTop -= SENSOR_PANEL_H;
       renderSensorPanel(ctx, HUD_EDGE, stackTop);
-      stackTop = renderCoordinateMap(ctx, canvas, stackTop - MAP_GAP, minTop);
     }
 
     const stats = roundStats();

@@ -9,31 +9,50 @@ from flask import Flask, abort, jsonify, render_template
 from websockets.asyncio.server import broadcast, serve
 import numpy as np
 
+from filterRules import FilterConfig
 from serverFilter import ServerFilterStage, server_filtering_enabled
+from tracking import ConstantVelocityTracker
 
 
 def fft_filter_ultrasonic(readings, sample_rate_hz, cutoff_hz):
+    """Low-pass a window of readings through the FFT; returns the window.
+
+    The window's least-squares straight line is taken out first and added
+    back after, and what is left is mirrored at the newest end before the
+    transform. Both stop the FFT treating the window as a loop: with only the
+    mean taken out, the oldest readings wrapped round onto the newest, and a
+    player walking at 50 cm/s read about 35 cm behind where they were.
+    filterRules.fft_lowpass_last() is the same filter read at the newest
+    sample only; the game's copy is fftLowpassLast() in game.js.
+    """
     signal = np.asarray(readings, dtype=float)
     n = len(signal)
+    if n == 0:
+        raise ValueError("fft_filter_ultrasonic needs at least one reading")
+    if n < 2:
+        return signal.copy()
 
-    # Remove DC offset before filtering
-    mean = np.mean(signal)
-    centered = signal - mean
+    # Take out the straight-line trend (it is added back at the end)
+    t = np.arange(n)
+    slope, intercept = np.polyfit(t, signal, 1)
+    trend = intercept + slope * t
+    residual = signal - trend
 
-    # FFT for real-valued signal
-    fft_signal = np.fft.rfft(centered)
+    # Mirror at the newest end, so the two ends of the transform meet smoothly
+    mirrored = np.concatenate([residual, residual[::-1]])
 
-    # Frequency bins in Hz
-    frequencies = np.fft.rfftfreq(n, d=1.0 / sample_rate_hz)
+    # FFT for real-valued signal, and its frequency bins in Hz
+    fft_signal = np.fft.rfft(mirrored)
+    frequencies = np.fft.rfftfreq(2 * n, d=1.0 / sample_rate_hz)
 
     # Remove frequency components above cutoff
     fft_signal[frequencies > cutoff_hz] = 0
 
-    # Convert back to time domain
-    clean_signal = np.fft.irfft(fft_signal, n=n)
+    # Back to the time domain: the first half is the original window
+    clean_signal = np.fft.irfft(fft_signal, n=2 * n)[:n]
 
-    # Restore original mean
-    return clean_signal + mean
+    # Restore the trend
+    return clean_signal + trend
 
 
 app = Flask(__name__, template_folder="template", static_folder="public", static_url_path="/static")
@@ -46,11 +65,15 @@ NODE_STALE_SECONDS = 5
 RPS_WINDOW_SECONDS = 1
 HANDSHAKE_READ_LIMIT = 64
 HANDSHAKE_TIMEOUT_SECONDS = 1
-MEDIAN_WINDOW = 5
-FFT_WINDOW = 64
-FFT_MIN_SAMPLES = 16
-DISTANCE_SAMPLE_RATE_HZ = 20.0
-DISTANCE_CUTOFF_HZ = 2.0
+# Each node's filtered_distance: median -> Kalman -> FFT low-pass, with the same
+# settings as the game's per-sensor chain (filterRules.FilterConfig, and the
+# tuning block in game.js). The Kalman is tracking.ConstantVelocityTracker.
+_DISTANCE_CHAIN = FilterConfig()
+MEDIAN_WINDOW = _DISTANCE_CHAIN.median_window
+FFT_WINDOW = _DISTANCE_CHAIN.fft_window
+FFT_MIN_SAMPLES = _DISTANCE_CHAIN.fft_min_samples
+DISTANCE_SAMPLE_RATE_HZ = _DISTANCE_CHAIN.fft_sample_rate_hz
+DISTANCE_CUTOFF_HZ = _DISTANCE_CHAIN.fft_cutoff_hz
 TURN_INTERVAL_SECONDS = 1.0
 MS_PER_SECOND = 1000.0
 # Server-side filtering (filterRules.py) runs only when the SERVER_FILTERING
@@ -90,6 +113,7 @@ def new_node(address, device_id=None):
         "last_seen": time.monotonic(),
         "samples": deque(),
         "median_samples": deque(maxlen=MEDIAN_WINDOW),
+        "distance_tracker": new_distance_tracker(),
         "distance_samples": deque(maxlen=FFT_WINDOW),
         "filtered_distance": None,
         "rps": 0.0,
@@ -175,6 +199,7 @@ def reuse_or_register_node(address, claimed_node_id, device_id=None, conn=None):
             node["rps"] = 0.0
             node["samples"].clear()
             node["median_samples"].clear()
+            node["distance_tracker"].reset()
             node["distance_samples"].clear()
             node["filtered_distance"] = None
             node["synced"] = False
@@ -240,21 +265,39 @@ def parse_distance_cm(payload):
     return distance
 
 
-def update_distance(node, payload):
+def new_distance_tracker():
+    return ConstantVelocityTracker(sigma_a_cm_s2=_DISTANCE_CHAIN.kalman_sigma_a_cm_s2,
+                                   sigma_r_cm=_DISTANCE_CHAIN.kalman_sigma_r_cm)
+
+
+def update_distance(node, payload, now):
+    """One reading into the node's filtered_distance: median, then Kalman,
+    then the FFT low-pass once FFT_MIN_SAMPLES Kalman outputs are in. `now` is
+    the reading's time in seconds (time.monotonic())."""
     distance = parse_distance_cm(payload)
-    if distance is None:
+    # No distance, or no echo (negative): nothing to filter, and the last value
+    # stands. A -1 in the median window would drag it towards zero.
+    if distance is None or distance < 0:
         return
 
     medians = node["median_samples"]
+    tracker = node["distance_tracker"]
+    history = node["distance_samples"]
+    # After a gap the Kalman starts a new track (a node waits out the other
+    # node's scanning turn, for one); the windows before it start again too.
+    if tracker.alive and now - tracker.t_reading_s > tracker.gap_reset_s:
+        medians.clear()
+        history.clear()
+
     medians.append(distance)
     smoothed = float(np.median(medians))
-    history = node["distance_samples"]
-    history.append(smoothed)
+    tracked = tracker.update(smoothed, now)
+    history.append(tracked)
     if len(history) >= FFT_MIN_SAMPLES:
         filtered = fft_filter_ultrasonic(history, DISTANCE_SAMPLE_RATE_HZ, DISTANCE_CUTOFF_HZ)
         node["filtered_distance"] = float(filtered[-1])
     else:
-        node["filtered_distance"] = smoothed
+        node["filtered_distance"] = float(tracked)
 
 
 def update_node(node_id, message):
@@ -274,7 +317,7 @@ def update_node(node_id, message):
         node["online"] = True
         node["last_seen"] = now
         update_rate(node, now)
-        update_distance(node, payload)
+        update_distance(node, payload, now)
         if server_filter is not None:
             # RAW distance, never node["filtered_distance"]: the chain does its
             # own filtering and the proximity guard needs unsmoothed readings.

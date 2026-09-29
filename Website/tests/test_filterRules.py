@@ -42,8 +42,10 @@ from filterRules import (  # noqa: E402
     StreakHold,
     TwoSensorGeometry,
     UltrasonicArrayGeometry,
+    fft_lowpass_last,
     scanner_point,
 )
+from tracking import ConstantVelocityTracker  # noqa: E402
 
 FIXTURE = os.path.join(HERE, "fixtures", "js_parity_trace.json")
 
@@ -108,7 +110,48 @@ class ChannelFilterRules(unittest.TestCase):
     def test_median_rejects_a_single_spike_inside_the_gate(self):
         for t, v in enumerate([70, 71, 69, 90, 70]):   # 90 passes the gate (+20)
             out = self.ch.update(v, t * 20)
-        self.assertEqual(out, 70)
+        # The median never passes the 90 on; the Kalman after it follows the
+        # median (70, 71, 70, 71, 70), so the value stays by 70.
+        self.assertAlmostEqual(out, 70, delta=1.0)
+
+    def test_a_steady_reading_comes_through_every_stage_unchanged(self):
+        for t in range(3 * self.cfg.fft_window):
+            out = self.ch.update(70.0, t * 20)
+        self.assertAlmostEqual(out, 70.0, places=9)
+
+    def test_a_steady_walk_is_followed_without_wrap_lag(self):
+        # 1 cm per reading. The median lags a ramp by two readings; the Kalman
+        # and the FFT stage (trend removed, window mirrored) add next to
+        # nothing. Taking only the mean out, as the server once did, put the
+        # value around half the FFT window behind.
+        for t in range(3 * self.cfg.fft_window):
+            out = self.ch.update(60.0 + t, t * 20)
+        truth = 60.0 + (3 * self.cfg.fft_window - 1)
+        self.assertLess(abs(truth - out), 3.0)
+
+    def test_the_kalman_takes_the_median_and_the_fft_stage_can_be_turned_off(self):
+        ch = ChannelFilter(FilterConfig(fft_window=0))
+        tracker = ConstantVelocityTracker()
+        window = []
+        for t, v in enumerate([70, 74, 69, 72, 75, 71, 73, 70, 76, 72]):
+            window = (window + [v])[-self.cfg.median_window:]
+            expected = tracker.update(sorted(window)[len(window) // 2], t * 20 / 1000.0)
+            self.assertAlmostEqual(ch.update(v, t * 20), expected, places=12)
+
+    def test_the_fft_stage_runs_once_the_window_has_enough_readings(self):
+        readings = [70, 74, 69, 72, 75, 71, 73, 70, 76, 72, 71, 74]
+        plain = ChannelFilter(FilterConfig(fft_window=0))
+        smoothed = ChannelFilter(self.cfg)
+        for t, v in enumerate(readings):
+            a = plain.update(v, t * 20)
+            b = smoothed.update(v, t * 20)
+            if t + 1 < self.cfg.fft_min_samples:
+                self.assertEqual(a, b, f"reading {t}: the FFT stage has too little to work on")
+        self.assertNotAlmostEqual(a, b, places=6)
+
+    def test_a_negative_channel_value_is_a_reading_not_a_miss(self):
+        # An x coordinate can be left of the play area.
+        self.assertEqual(self.ch.update(-40.0, 0), -40.0)
 
     def test_impossible_jump_is_discarded(self):
         self.ch.update(70, 0)
@@ -120,6 +163,15 @@ class ChannelFilterRules(unittest.TestCase):
         self.assertEqual(self.ch.update(None, self.cfg.hold_ms), 70)
         self.assertIsNone(self.ch.update(None, self.cfg.hold_ms + 1))
 
+    def test_relock_restarts_the_smoothing(self):
+        for t in range(20):
+            self.ch.update(70.0, t * 20)
+        t = 20 * 20
+        for _ in range(self.cfg.relock_readings):
+            t += 20
+            out = self.ch.update(200.0, t)
+        self.assertEqual(out, 200.0, "no Kalman or FFT memory of 70 after the re-lock")
+
     def test_relocks_when_rejects_agree_with_each_other(self):
         self.ch.update(70, 0)
         t = 0
@@ -128,6 +180,32 @@ class ChannelFilterRules(unittest.TestCase):
             t += 20
             results.append(self.ch.update(200 + (t % 3), t))
         self.assertEqual(results[-1], 200 + (t % 3), "should have moved to the new position")
+
+
+class FftLowpassLast(unittest.TestCase):
+    """fft_lowpass_last(), the FFT stage (fftLowpassLast() in game.js)."""
+
+    RATE = 20.0
+
+    def test_a_straight_line_passes_exactly(self):
+        line = [12.5 + 1.75 * i for i in range(32)]
+        self.assertAlmostEqual(fft_lowpass_last(line, self.RATE, 3.0), line[-1], places=9)
+
+    def test_a_tone_above_the_cutoff_is_removed(self):
+        tone = [100.0 + 5.0 * math.sin(2 * math.pi * 8.0 * i / self.RATE + 0.3) for i in range(32)]
+        self.assertAlmostEqual(fft_lowpass_last(tone, self.RATE, 3.0), 100.0, delta=1.0)
+
+    def test_a_slow_tone_under_the_cutoff_is_kept(self):
+        tone = [100.0 + 5.0 * math.sin(2 * math.pi * 0.5 * i / self.RATE) for i in range(32)]
+        self.assertAlmostEqual(fft_lowpass_last(tone, self.RATE, 3.0), tone[-1], delta=0.5)
+
+    def test_one_or_two_readings_come_back_as_they_are(self):
+        self.assertEqual(fft_lowpass_last([7.0], self.RATE, 3.0), 7.0)
+        self.assertAlmostEqual(fft_lowpass_last([7.0, 9.0], self.RATE, 3.0), 9.0, places=9)
+
+    def test_config_refuses_a_negative_window(self):
+        with self.assertRaises(ValueError):
+            FilterConfig(fft_window=-1)
 
 
 class ProximityGuardRules(unittest.TestCase):

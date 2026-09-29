@@ -18,8 +18,7 @@
 //
 //   GameStatsView.renderStats(ctx, rect, snap)       - the LIVE STATS list
 //   GameStatsView.renderCharts(ctx, rect, snap, now) - box plot + cycling bar chart
-//   GameStatsView.renderMiniCursor(ctx, rect, view)  - the miniature board and cursor
-//   GameStatsView.MINI_CURSOR / CHARTS_MIN_H / statsHeight(rows) - sizes for layout
+//   GameStatsView.CHARTS_MIN_H / statsHeight(rows)   - sizes for layout
 //
 // The charts sit in a game HUD, so there is no hover layer: the mouse (or the
 // player's body) is the game cursor. Values are direct-labelled instead, and
@@ -44,17 +43,6 @@
     series1: "#3987e5",
     series2: "#d95926",
     band: "rgba(255, 255, 255, 0.05)",
-  };
-
-  // Game colours for the miniature board, matching the board and legend.
-  const BOARD = {
-    cell: "#2b2118",
-    mole: "#8b5e3c",
-    super: "#eab308",
-    bomb: "#ef4444",
-    cursor: "#facc15",
-    outside: "#ef4444",
-    stable: "rgba(250, 204, 21, 0.28)",
   };
 
   // --- Round statistics --------------------------------------------------------
@@ -714,85 +702,12 @@
     return statsRows(snap).length;
   }
 
-  // --- Miniature cursor -------------------------------------------------------------
-  // A small copy of the 3x3 board with the live cursor on it.
-  //   view: {
-  //     point:      { fx, fy } across / down the board, 0-1 (fy from the TOP), or null,
-  //     inBounds:   false pins the point to the edge in red,
-  //     cell:       the hole index the game's cursor is in, or null,
-  //     activeHole: the hole with a mole up, or -1, and activeType: its type,
-  //     footer:     one short line under the board,
-  //   }
-
-  const MINI_CURSOR = { w: 150, h: 180 };
-
-  function renderMiniCursor(ctx, rect, view) {
-    drawPanel(ctx, rect, "CURSOR", view.label || null);
-    const size = rect.w - 24;
-    const bx = rect.x + 12;
-    const by = rect.y + 28;
-    const gap = 3;
-    const cellSize = (size - gap * 2) / 3;
-
-    for (let hole = 0; hole < 9; hole++) {
-      const col = hole % 3;
-      const row = Math.floor(hole / 3);
-      const x = bx + col * (cellSize + gap);
-      const y = by + row * (cellSize + gap);
-      let fill = BOARD.cell;
-      if (hole === view.activeHole) fill = BOARD[view.activeType] || BOARD.mole;
-      ctx.fillStyle = fill;
-      ctx.beginPath();
-      ctx.roundRect(x, y, cellSize, cellSize, 4);
-      ctx.fill();
-      if (hole === view.cell) {
-        ctx.fillStyle = BOARD.stable;
-        ctx.beginPath();
-        ctx.roundRect(x, y, cellSize, cellSize, 4);
-        ctx.fill();
-      }
-    }
-
-    if (view.point) {
-      const clamp = (v) => Math.max(0.03, Math.min(0.97, v));
-      const sx = bx + clamp(view.point.fx) * size;
-      const sy = by + clamp(view.point.fy) * size;
-      const colour = view.inBounds ? BOARD.cursor : BOARD.outside;
-      ctx.save();
-      ctx.shadowColor = colour;
-      ctx.shadowBlur = 8;
-      ctx.strokeStyle = colour;
-      ctx.lineWidth = 2;
-      ctx.beginPath();
-      ctx.arc(sx, sy, 6, 0, Math.PI * 2);
-      ctx.stroke();
-      ctx.restore();
-      ctx.fillStyle = colour;
-      ctx.beginPath();
-      ctx.arc(sx, sy, 2.5, 0, Math.PI * 2);
-      ctx.fill();
-    } else {
-      ctx.fillStyle = INK.muted;
-      ctx.font = "bold 10px monospace";
-      ctx.textAlign = "center";
-      ctx.fillText("NO CURSOR", bx + size / 2, by + size / 2 + 4);
-    }
-
-    ctx.font = "10px monospace";
-    ctx.textAlign = "center";
-    ctx.fillStyle = INK.secondary;
-    ctx.fillText(view.footer || "", rect.x + rect.w / 2, by + size + 16);
-    ctx.textAlign = "left";
-  }
-
   window.GameStats = GameStats;
   window.GameStatsView = {
     renderStats,
     renderCharts,
-    renderMiniCursor,
     statsHeight,
     statsRowCount,
-    MINI_CURSOR,
     CHARTS_MIN_H,
   };
 })();

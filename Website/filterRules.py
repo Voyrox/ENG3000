@@ -19,7 +19,8 @@ Pipeline, in order:
                                           │
                                           ▼
                                    ChannelFilter per channel
-                                   (slew gate -> median -> hold)
+                                   (slew gate -> median -> Kalman
+                                    -> FFT low-pass -> hold)
                                           │
                                           ▼
                                    Geometry.locate() ──► (x_cm, y_cm, column)
@@ -46,8 +47,10 @@ src/scanning.cpp once it reports a position. Everything downstream of
 Geometry is shared.
 
 Coordinates follow the project convention: x runs left to right across the
-play area, y is depth from the screen, and grid cell (0, 0) is bottom-left -
-nearest the screen, on the left - with (2, 2) top-right.
+play area, y is depth from the screen, and grid cell (0, 0) is nearest the
+screen, on the left, with (2, 2) furthest away on the right. (The game draws
+the row nearest the screen at the TOP of its board; that is only drawing -
+see boardRow() in game.js.)
 
 Standard library only. Run the tests with:
 
@@ -60,7 +63,11 @@ import math
 from abc import ABC, abstractmethod
 from collections import deque
 from dataclasses import dataclass, field
+from functools import lru_cache
 from typing import Optional, Sequence
+
+from tracking import (ConstantVelocityTracker, DEFAULT_SIGMA_A_CM_S2,
+                      DEFAULT_SIGMA_R_CM)
 
 GRID_SIZE = 3
 
@@ -90,6 +97,18 @@ class FilterConfig:
     relock_spread_cm: float = 20.0
     anchor_ttl_ms: float = 3000.0
 
+    # Smoothing after the median (tuning.kalmanSigmaA, tuning.kalmanSigmaR,
+    # tuning.fftWindow, tuning.fftCutoffHz, FFT_MIN_SAMPLES,
+    # FFT_SAMPLE_RATE_HZ). The Kalman is tracking.ConstantVelocityTracker with
+    # its default gap reset and starting velocity; fft_window 0 turns the FFT
+    # stage off.
+    kalman_sigma_a_cm_s2: float = DEFAULT_SIGMA_A_CM_S2
+    kalman_sigma_r_cm: float = DEFAULT_SIGMA_R_CM
+    fft_window: int = 32
+    fft_min_samples: int = 8
+    fft_sample_rate_hz: float = 20.0
+    fft_cutoff_hz: float = 3.0
+
     # Geometry (COLUMN_MARGIN_CM)
     column_margin_cm: float = 8.0
 
@@ -113,6 +132,10 @@ class FilterConfig:
                 f"cell_window ({self.cell_window})")
         if self.cell_votes > self.cell_window:
             raise ValueError("cell_votes cannot exceed cell_window")
+        if self.fft_window < 0:
+            raise ValueError("fft_window cannot be negative (0 turns the FFT stage off)")
+        if self.fft_sample_rate_hz <= 0 or self.fft_cutoff_hz < 0:
+            raise ValueError("the FFT stage needs a positive sample rate and a cutoff of 0 or more")
 
 
 @dataclass(frozen=True)
@@ -258,12 +281,82 @@ class Fix:
 # Stage 1 - per-channel conditioning
 # =============================================================================
 
-class ChannelFilter:
-    """Slew gate, then median, then hold - for one scalar channel.
+@lru_cache(maxsize=None)
+def _dft_rows(m: int) -> tuple:
+    """cos and sin of 2 pi k j / m for every bin k up to m // 2 and sample
+    j, worked out once per window length. The same expressions as the loop in
+    fftLowpassLast() in game.js, so the values are identical."""
+    rows = []
+    for k in range(m // 2 + 1):
+        rows.append(tuple((math.cos((2 * math.pi * k * j) / m),
+                           math.sin((2 * math.pi * k * j) / m)) for j in range(m)))
+    return tuple(rows)
 
-    Port of isPlausible() and conditionSensor() in game.js. Works on any
-    channel measured in centimetres: a sensor distance today, or an x or y
-    coordinate from a scanning rig.
+
+def fft_lowpass_last(values: Sequence[float], sample_rate_hz: float,
+                     cutoff_hz: float) -> float:
+    """The FFT low-pass of a window of readings, read back at the newest one.
+
+    Port of fftLowpassLast() in game.js. The window's least-squares straight
+    line is taken out, what is left is mirrored at the newest end (so the
+    transform does not treat the window as a loop and wrap the oldest readings
+    onto the newest), every bin above cutoff_hz is dropped, and the newest
+    sample is rebuilt from the rest with the line added back. Only the kept
+    bins are transformed, which gives the same newest sample as numpy's
+    rfft, a zeroed top end and irfft (app.fft_filter_ultrasonic() is that
+    numpy version, for a whole window). Readings are taken to be
+    1 / sample_rate_hz apart.
+    """
+    n = len(values)
+    if n < 2:
+        return values[-1]
+
+    t_mean = (n - 1) / 2
+    v_mean = 0.0
+    for value in values:
+        v_mean += value
+    v_mean /= n
+    sxx = 0.0
+    sxy = 0.0
+    for i, value in enumerate(values):
+        offset = i - t_mean
+        sxx += offset * offset
+        sxy += offset * (value - v_mean)
+    slope = sxy / sxx
+
+    m = 2 * n
+    mirrored = [0.0] * m
+    for i, value in enumerate(values):
+        residual = value - (v_mean + slope * (i - t_mean))
+        mirrored[i] = residual
+        mirrored[m - 1 - i] = residual
+
+    rows = _dft_rows(m)
+    at = n - 1
+    total = 0.0
+    for k in range(m // 2 + 1):
+        if k * sample_rate_hz / m > cutoff_hz:
+            break
+        re = 0.0
+        im = 0.0
+        for sample, (cos_kj, sin_kj) in zip(mirrored, rows[k]):
+            re += sample * cos_kj
+            im -= sample * sin_kj
+        phase = (2 * math.pi * k * at) / m
+        term = re * math.cos(phase) - im * math.sin(phase)
+        total += term if k == 0 or k == m // 2 else 2 * term
+    return v_mean + slope * (at - t_mean) + total / m
+
+
+class ChannelFilter:
+    """Slew gate, then median -> Kalman -> FFT low-pass, then hold - for one
+    scalar channel.
+
+    Port of isPlausible() and conditionSensor() in game.js. The Kalman stage
+    is tracking.ConstantVelocityTracker (game.js's kalmanUpdate() is a port of
+    it) and the FFT stage is fft_lowpass_last(). Works on any channel measured
+    in centimetres: a sensor distance today, or an x or y coordinate from a
+    scanning rig.
     """
 
     def __init__(self, config: FilterConfig):
@@ -271,8 +364,16 @@ class ChannelFilter:
         self.reset()
 
     def reset(self) -> None:
-        self._samples: deque = deque(maxlen=self._cfg.median_window)
-        self._rejects: deque = deque(maxlen=self._cfg.relock_readings)
+        cfg = self._cfg
+        self._samples: deque = deque(maxlen=cfg.median_window)
+        self._rejects: deque = deque(maxlen=cfg.relock_readings)
+        # The gate above has already turned misses into None, and a channel
+        # may legitimately go negative (an x coordinate), so a negative value
+        # is a reading here, as it is in game.js's kalmanUpdate().
+        self._tracker = ConstantVelocityTracker(sigma_a_cm_s2=cfg.kalman_sigma_a_cm_s2,
+                                                sigma_r_cm=cfg.kalman_sigma_r_cm,
+                                                negative_is_missing=False)
+        self._smoothed: deque = deque(maxlen=cfg.fft_window)
         self.value: Optional[float] = None
         self._last_good_ms = -math.inf
         self._anchor: Optional[float] = None
@@ -288,18 +389,41 @@ class ChannelFilter:
         if raw is not None:
             self._samples.append(raw)
             ordered = sorted(self._samples)
-            self.value = ordered[len(ordered) // 2]
+            middle = ordered[len(ordered) // 2]
+            tracked = self._tracker.update(middle, now_ms / 1000.0)
+            self.value = self._smooth(tracked)
             self._last_good_ms = now_ms
-            self._anchor = self.value
+            # The gate judges readings against the median, as it always has:
+            # the stages after it lag a little, and must not tighten the gate.
+            self._anchor = middle
             self._anchor_ms = now_ms
             return self.value
 
         if now_ms - self._last_good_ms <= self._cfg.hold_ms:
             return self.value                  # coast through the dropout
 
-        self._samples.clear()
+        self._restart_smoothing()
         self.value = None
         return None
+
+    def _smooth(self, tracked: float) -> float:
+        """One Kalman output into the FFT window; the channel's value."""
+        cfg = self._cfg
+        if cfg.fft_window <= 0:
+            return tracked
+        self._smoothed.append(tracked)
+        if len(self._smoothed) < min(cfg.fft_min_samples, cfg.fft_window):
+            return tracked
+        return fft_lowpass_last(list(self._smoothed), cfg.fft_sample_rate_hz,
+                                cfg.fft_cutoff_hz)
+
+    def _restart_smoothing(self) -> None:
+        """The median onwards starts again from the next reading: after a
+        re-lock, or once the hold has run out, the old track says nothing
+        about the new one."""
+        self._samples.clear()
+        self._tracker.reset()
+        self._smoothed.clear()
 
     def _plausible(self, raw: float, now_ms: float) -> bool:
         cfg = self._cfg
@@ -319,7 +443,7 @@ class ChannelFilter:
         self._rejects.append(raw)
         if (len(self._rejects) >= cfg.relock_readings
                 and max(self._rejects) - min(self._rejects) <= cfg.relock_spread_cm):
-            self._samples.clear()
+            self._restart_smoothing()
             self._rejects.clear()
             return True
 
