@@ -25,7 +25,7 @@ jobs:
           path: |
             ~/.cache/pip
             ~/.platformio/.cache
-          key: ${{ runner.os }}-platformio-${{ hashFiles('**/platformio.ini') }}
+          key: ${{ runner.os }}-platformio-${{ hashFiles('**/platformioO.ini') }}
 
       - name: Install PlatformIO CLI
         run: |
