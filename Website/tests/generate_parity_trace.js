@@ -22,6 +22,9 @@ const OUT = path.join(__dirname, "fixtures", "js_parity_trace.json");
 
 const STEP_MS = 20;          // one reading every 20 ms
 const NO_ECHO = null;
+// A node that sends nothing this step - the other node's scanning turn. Its
+// last reading stays as it was, and is not new.
+const SILENT = "silent";
 
 // --- Deterministic noise ------------------------------------------------------
 
@@ -34,6 +37,7 @@ function lcg(seed) {
 }
 
 const round2 = (v) => Math.round(v * 100) / 100;
+const round6 = (v) => Math.round(v * 1e6) / 1e6;
 
 // --- The scenario ---------------------------------------------------------------
 // Each segment exercises a different branch. Values are [left, centre, right];
@@ -93,11 +97,13 @@ function buildStream() {
   //     known blind spot, recorded so the Python port reproduces it exactly.
   for (let i = 0; i < 140; i++) push(wall(), i % 2 ? jitter(118, 2) : NO_ECHO);
 
-  // From here the nodes are servo scanners: each entry is [distance, angle],
-  // the angle the node's servo was at (90 = straight out, more = screen-left),
-  // in whole degrees as the firmware sends it.
+  // From here the nodes are servo scanners: each entry is [distance, angle,
+  // scanState], the angle the node's servo was at (90 = straight out, more =
+  // screen-left) in whole degrees as the firmware sends it, and the scan state
+  // (0 found, 1 half-found, 2 lost and sweeping).
   const aimAt = (nodeX, x, depth) => Math.round(90 + (Math.atan2(nodeX - x, depth) * 180) / Math.PI);
-  const scanned = (nodeX, x, depth) => [jitter(Math.hypot(x - nodeX, depth), 2), aimAt(nodeX, x, depth)];
+  const scanned = (nodeX, x, depth, state = 0) =>
+    [jitter(Math.hypot(x - nodeX, depth), 2), aimAt(nodeX, x, depth), state];
 
   // 11. Both scanners track a player walking diagonally across the board.
   for (let i = 0; i < 150; i++) {
@@ -110,7 +116,40 @@ function buildStream() {
   //     keeps tracking them in the centre column.
   for (let i = 0; i < 90; i++) {
     const sweep = 40 + ((i * 15) % 120);
-    push([NO_ECHO, sweep], scanned(SENSOR_X_CM[1], 80, 95));
+    push([NO_ECHO, sweep, 2], scanned(SENSOR_X_CM[1], 80, 95));
+  }
+
+  // 13. Turns: the nodes scan one at a time, 500 ms each, while the player
+  //     walks. The silent node's last reading is repeated but is not new, and
+  //     each node comes back for its turn after a silence longer than the hold.
+  //     Its servo re-aims for the first three readings (half-found), then
+  //     holds still on 3-degree steps (found), so the line of sight takes the
+  //     distance alone while the angle repeats.
+  for (let i = 0; i < 200; i++) {
+    const x = 40 + 70 * (i / 199);
+    const depth = 60 + 50 * (i / 199);
+    const leftTurn = Math.floor(i / 25) % 2 === 0;
+    const intoTurn = i % 25;
+    const reading = (nodeX) => {
+      const [distance, angle] = scanned(nodeX, x, depth);
+      return intoTurn < 3 ? [distance, angle + 6, 1] : [distance, Math.round(angle / 3) * 3, 0];
+    };
+    steps.push(leftTurn ? [reading(SENSOR_X_CM[0]), NO_ECHO, SILENT]
+      : [SILENT, NO_ECHO, reading(SENSOR_X_CM[1])]);
+  }
+
+  // 14. The left scanner is lost and sweeping, but its beam finds furniture
+  //     inside the play area (120 cm): line of sight leaves it out, while
+  //     trilateration takes the distance as the player's.
+  for (let i = 0; i < 60; i++) {
+    const sweep = 40 + ((i * 15) % 120);
+    push([jitter(120, 2), sweep, 2], scanned(SENSOR_X_CM[1], 80, 95));
+  }
+
+  // 15. The player turns up somewhere else at once, seen by both: the gates
+  //     turn the readings away, then give way to them.
+  for (let i = 0; i < 40; i++) {
+    push(scanned(SENSOR_X_CM[0], 120, 60), scanned(SENSOR_X_CM[1], 120, 60));
   }
 
   return steps;
@@ -118,7 +157,7 @@ function buildStream() {
 
 // --- Run the real JS -----------------------------------------------------------
 
-function runJs(stream, calibration) {
+function runJs(stream, calibration, method) {
   let clock = 0;
   const context = {
     console,
@@ -152,6 +191,7 @@ function runJs(stream, calibration) {
     effective = bounds.perColumn.map((col) => [col.near, col.far]);
   }
 
+  w.setPositionMethod(method);
   w.setGameInputMode("sensor");
   w.resetGame();
   const canvas = { clientWidth: 1280, clientHeight: 720, width: 1280, height: 720 };
@@ -160,15 +200,20 @@ function runJs(stream, calibration) {
   const nodes = [node(1), null, node(3)];
 
   const out = [];
+  let stamp = 0;
   stream.forEach((reading, i) => {
     clock = (i + 1) * STEP_MS;
     reading.forEach((value, s) => {
-      if (!nodes[s]) return;
-      // A scanner entry is [distance, angle]; a plain number has no angle.
-      const [distance, angle] = Array.isArray(value) ? value : [value, undefined];
+      if (!nodes[s] || value === SILENT) return;
+      // A scanner entry is [distance, angle, scanState]; a plain number has
+      // neither. Each message gets a new server stamp, as last_seen does.
+      const [distance, angle, state] = Array.isArray(value) ? value : [value, undefined, undefined];
       const payload = { avg: distance === NO_ECHO ? -1 : distance };
       if (angle !== undefined) payload.angle = angle;
+      if (state !== undefined) payload.scanState = state;
       nodes[s].latest = JSON.stringify(payload);
+      stamp += 1;
+      nodes[s].last_seen = stamp;
     });
     w.markSensorFrame();
     w.updateGame(clock, canvas, nodes);
@@ -184,12 +229,16 @@ function runJs(stream, calibration) {
       s.held ? 1 : 0,
       s.heldFor ?? 0,
       s.filtered || [null, null, null],
+      (s.fresh || [true, true, true]).map((f) => (f ? 1 : 0)),
+      s.status === "ok" ? round6(s.xCm) : null,
+      s.status === "ok" ? round6(s.yCm) : null,
     ]);
   });
   return { calibration: effective, steps: out };
 }
 
-const FIELDS = ["status", "gx", "gy", "rawGx", "rawGy", "column", "held", "heldFor", "filtered"];
+const FIELDS = ["status", "gx", "gy", "rawGx", "rawGy", "column", "held", "heldFor", "filtered",
+  "fresh", "x", "y"];
 
 const stream = buildStream();
 // [near, far] per column; the centre entry is ignored (no centre sensor to capture it).
@@ -200,9 +249,13 @@ const trace = {
   stepMs: STEP_MS,
   fields: FIELDS,
   stream,
+  // One run per position method (the game's switch), on the default bounds,
+  // plus line of sight on calibrated bounds.
   runs: {
-    default: runJs(stream, null),
-    calibrated: runJs(stream, calibrated),
+    default: { method: "los", ...runJs(stream, null, "los") },
+    calibrated: { method: "los", ...runJs(stream, calibrated, "los") },
+    trilateration: { method: "tri", ...runJs(stream, null, "tri") },
+    average: { method: "avg", ...runJs(stream, null, "avg") },
   },
 };
 

@@ -168,14 +168,32 @@ class StageTwoSensorRig(unittest.TestCase):
         self.assertAlmostEqual(result.y_cm, 100.0)
 
     def test_scanner_angles_place_the_player(self):
-        # Each node 80 cm away, turned 30 degrees in towards the centre.
+        # Each node 80 cm away and aimed at the player, who is at (75, 62.4).
+        depth = math.sqrt(80.0 ** 2 - 50.0 ** 2)
+        turn = math.degrees(math.atan2(50.0, depth))
         stage = ServerFilterStage()
         stage.assign_slots([LEFT, None, RIGHT])
-        stage.on_reading(LEFT, 80.0, STEP_MS, angle_deg=60)
-        result = stage.on_reading(RIGHT, 80.0, 2 * STEP_MS, angle_deg=120)
+        stage.on_reading(LEFT, 80.0, STEP_MS, angle_deg=90 - turn, scan_state=0)
+        result = stage.on_reading(RIGHT, 80.0, 2 * STEP_MS, angle_deg=90 + turn, scan_state=0)
         self.assertEqual(result.column, 1)
         self.assertAlmostEqual(result.x_cm, 75.0)
-        self.assertAlmostEqual(result.y_cm, 80.0 * math.cos(math.radians(30)))
+        self.assertAlmostEqual(result.y_cm, depth)
+
+    def test_a_node_that_is_sweeping_is_left_out_of_the_line_of_sight(self):
+        stage = ServerFilterStage()
+        stage.assign_slots([LEFT, None, RIGHT])
+        stage.on_reading(RIGHT, 80.0, STEP_MS, angle_deg=90, scan_state=0)
+        # The left node is lost; its beam found something at 40 cm.
+        result = stage.on_reading(LEFT, 40.0, 2 * STEP_MS, angle_deg=90, scan_state=2)
+        self.assertAlmostEqual(result.x_cm, 125.0 - 0.0, places=6)
+        self.assertAlmostEqual(result.y_cm, 80.0, places=6)
+
+    def test_the_position_method_can_be_switched(self):
+        stage = ServerFilterStage()
+        stage.set_position_method("tri")
+        self.assertEqual(stage.pipeline.geometry.method, "tri")
+        with self.assertRaises(ValueError):
+            stage.set_position_method("guess")
 
     def test_a_node_going_offline_forgets_its_angle(self):
         stage = ServerFilterStage()
@@ -382,6 +400,25 @@ class AppWiring(unittest.TestCase):
         self.assertEqual(message["nodes"], app.snapshot_nodes())
         self.assertEqual(message["coordinate"]["status"], STATUS_OK)
         self.assertEqual(message["coordinate"]["column"], 0)
+
+    def test_the_position_switch_reaches_the_chain(self):
+        app.server_filter = ServerFilterStage()
+        app.apply_filter_event({"type": "position:method", "method": "avg"})
+        self.assertEqual(app.server_filter.pipeline.geometry.method, "avg")
+        with mock.patch("builtins.print"):       # a bad method is reported, not raised
+            app.apply_filter_event({"type": "position:method", "method": "guess"})
+        self.assertEqual(app.server_filter.pipeline.geometry.method, "avg")
+
+    def test_the_scan_state_reaches_the_chain(self):
+        app.server_filter = ServerFilterStage()
+        app.server_filter.assign_slots([LEFT, CENTRE, RIGHT])
+        app.update_node(RIGHT, json.dumps({"avg": 80.0, "angle": 90, "scanState": 0}))
+        result = app.server_filter.latest
+        app.update_node(LEFT, json.dumps({"avg": 40.0, "angle": 90, "scanState": 2}))
+        result = app.server_filter.latest
+        # The lost left node is not in the line of sight: the right one places the player.
+        self.assertAlmostEqual(result.x_cm, 125.0, places=6)
+        self.assertAlmostEqual(result.y_cm, 80.0, places=6)
 
     def test_flag_on_feeds_raw_not_filtered_distance(self):
         pipeline = RecordingPipeline()

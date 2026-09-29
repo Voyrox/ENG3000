@@ -164,6 +164,16 @@
     kalmanSigmaR: 0.91,
     fftWindow: 32,
     fftCutoffHz: 3,
+    // The line-of-sight tracker (see stepLosTrack()). losAccelCmS2: how hard
+    // the player can change pace - higher follows a dash faster, lower keeps
+    // what the other node saw on its last turn for longer. losBearing*Deg:
+    // how far off its aim a node may be when both of its sensors see the
+    // player (found), one does (half-found), or it does not say. Python:
+    // FilterConfig los_*.
+    losAccelCmS2: 150,
+    losBearingFoundDeg: 4,
+    losBearingHalfDeg: 15,
+    losBearingUnknownDeg: 7,
   };
 
   window.tuneSensor = function tuneSensor(partial) {
@@ -203,7 +213,8 @@
   const HUD_EDGE = 12;            // px from the canvas edge
   const HUD_GAP = 10;             // px between stacked panels
   const SENSOR_PANEL_W = 380;     // px
-  const SENSOR_PANEL_H = 132;     // px
+  const SENSOR_PANEL_H = 150;     // px
+  const POSITION_SWITCH_H = 28;   // px; the method buttons above the sensor panel
   const STATS_PANEL_W = 270;      // px; LIVE STATS, left gutter
   const STATS_PANEL_MIN_W = 190;  // px; narrower and the values collide with the labels
   const CHARTS_PANEL_MAX_H = 300; // px; LIVE DATA, under the legend
@@ -868,7 +879,20 @@
       rejectCount: 0,   // total discarded, surfaced for diagnosis
       kalman: makeKalman(),
       smoothed: [],     // recent Kalman outputs: the FFT stage's window
+      steppedAt: -Infinity, // ms of the last reading (or dropout) through this channel
     };
+  }
+
+  // The whole channel starts again from the next reading: nothing it
+  // remembers - the windows, the Kalman, the gate's anchor - still describes
+  // where the player is.
+  function restartChannel(filter) {
+    restartSmoothing(filter);
+    filter.value = null;
+    filter.lastGoodAt = -Infinity;
+    filter.anchor = null;
+    filter.anchorAt = -Infinity;
+    filter.rejects.length = 0;
   }
 
   // The median onwards starts again from the next reading. After a re-lock, or
@@ -1076,6 +1100,13 @@
   // what is left above tuning.fftCutoffHz. The hold coasts through a dropped
   // echo instead of reporting the player gone.
   function conditionSensor(filter, raw, now) {
+    // Back after a silence - the other node's scanning turn, as a rule. What
+    // the channel remembers is where the player was a turn ago, so it starts
+    // again from this reading rather than letting the median and the gate hold
+    // the new readings back.
+    if (now - filter.steppedAt > SENSOR_HOLD_MS) restartChannel(filter);
+    filter.steppedAt = now;
+
     // An impossible jump is treated exactly like a dropped echo: it never
     // enters the median window, so it cannot drag the value toward itself.
     if (raw !== null && !isPlausible(filter, raw, now)) raw = null;
@@ -1103,14 +1134,13 @@
 
   function resetSensorFilters() {
     sensorFilters.forEach((filter) => {
-      restartSmoothing(filter);
-      filter.value = null;
-      filter.lastGoodAt = -Infinity;
-      filter.anchor = null;
-      filter.anchorAt = -Infinity;
-      filter.rejects.length = 0;
+      restartChannel(filter);
       filter.rejectCount = 0;
+      filter.steppedAt = -Infinity;
     });
+    resetLosTrack();
+    lastSeenStamp.fill(null);
+    heardAt.fill(-Infinity);
     closeStreak = 0;
     lastColumn = null;
     lastSeenFrameSeq = sensorFrameSeq;
@@ -1136,11 +1166,29 @@
   // --- Placing the player ----------------------------------------------------
   // The two nodes sit on the screen line at the centres of the outer columns.
   // Each is a servo scanner that reports its distance to the player and the
-  // angle it was read at, which puts the player at a point (locateNodes()).
-  // A node that reports no angle falls back to basic trilateration. x picks
-  // the column (the centre one included) and y, the depth from the screen,
-  // picks the row. filterRules.py (TwoSensorGeometry) is the parity-tested
-  // Python port.
+  // servo angle it read at. Three ways to turn that into a position, switched
+  // with the buttons above the sensor panel (positioning.method):
+  //
+  //   "los" - line of sight, the default. Each node's reading is a point along
+  //           its line of sight (its distance along its servo angle), with an
+  //           uncertainty that is small along the line - the distance is good
+  //           - and grows across it with the distance and with how sure the
+  //           node is of its aim (found / half-found). Those points feed a 2D
+  //           constant-velocity Kalman filter (losTrack) one reading at a time,
+  //           as they arrive. The nodes take turns to scan, so they are never
+  //           read at the same moment: each reading is used once, when it
+  //           arrives, and a node that is sweeping for the player (lost) is not
+  //           used at all - what its beam hits is not the player.
+  //   "tri" - trilateration of the two distances alone (trilaterate()), the
+  //           earlier method, kept to compare against. It pairs each node's
+  //           distance with the other node's latest one, however old, and
+  //           whatever that node was looking at.
+  //   "avg" - the midpoint of the two.
+  //
+  // All three are worked out on every update, so the board can show them side
+  // by side (Compare). x picks the column (the centre one included) and y, the
+  // depth from the screen, picks the row. filterRules.py (TwoSensorGeometry)
+  // is the parity-tested Python port.
 
   function columnCentreCm(column) {
     return ((column + 0.5) * PLAY_WIDTH_CM) / 3;
@@ -1206,41 +1254,287 @@
     return { x: nodeX - distance * Math.sin(phi), y: distance * Math.cos(phi) };
   }
 
-  // Both nodes in bounds: the midpoint of their two points. One: that point.
-  // None: the nearer reading, which still carries a position for the
-  // out-of-bounds message. Left wins a tie. Pure, like trilaterate().
-  function fromScanners(filtered, angles) {
-    const points = [];
-    [LEFT_SENSOR, RIGHT_SENSOR].forEach((slot) => {
-      const distance = filtered[slot];
-      if (distance === null) return;
-      const point = scannerPoint(columnCentreCm(slot), distance, angles[slot]);
-      const column = columnAtCm(Math.max(0, Math.min(PLAY_WIDTH_CM, point.x)));
-      points.push({
-        ...point,
-        distance,
-        inside: isInPlay(column, point.y),
-        source: slot === LEFT_SENSOR ? "left" : "right",
-      });
-    });
+  // --- Line of sight: a 2D Kalman filter ---------------------------------------
+  // State [x, y, vx, vy] in cm and cm/s, constant velocity with white-noise
+  // acceleration, like tracking.py's 1D tracker but on the board. The player's
+  // acceleration and how far off its aim a node may be are in `tuning`; all
+  // the numbers match the FilterConfig los_* defaults in filterRules.py.
+  const LOS_RANGE_SIGMA_CM = 3;           // a filtered distance, along the line of sight
+  const LOS_V0_SIGMA_CM_S = 100;          // a new track's velocity uncertainty
+  const LOS_GATE_NIS = 13.8;              // chi-square, 2 dof, 99.9 %: further off is an outlier
+  const RANGE_GATE_NIS = 10.83;           // chi-square, 1 dof, 99.9 %: the same, for a distance alone
+  const LOS_RELOCK_READINGS = 6;          // outliers in a row that move the track instead
+  const LOS_TRACK_TIMEOUT_MS = 1500;      // no usable reading for this long: no position
+  const LOS_BOTH_WINDOW_MS = 2500;        // both nodes fed the track within this: source "both"
+  const SCAN_LOST = 2;                    // scanState: sweeping, the player is not in sight
 
-    const inBounds = points.filter((point) => point.inside);
-    if (inBounds.length === 2) {
-      const [a, b] = inBounds;
-      return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2, source: "both" };
+  // Small dense matrices as arrays of rows, multiplied in a fixed order so the
+  // Python port gets the same numbers.
+  function matMul(a, b) {
+    const out = [];
+    for (let i = 0; i < a.length; i++) {
+      const row = [];
+      for (let j = 0; j < b[0].length; j++) {
+        let sum = 0;
+        for (let k = 0; k < b.length; k++) sum += a[i][k] * b[k][j];
+        row.push(sum);
+      }
+      out.push(row);
     }
-    const pool = inBounds.length > 0 ? inBounds : points;
-    let best = null;
-    pool.forEach((point) => {
-      if (best === null || point.distance < best.distance) best = point;
-    });
-    return best === null ? null : { x: best.x, y: best.y, source: best.source };
+    return out;
   }
 
-  // Scanner angles when either node sends one; trilateration when neither does.
-  function locateNodes(filtered, angles) {
-    if (angles[LEFT_SENSOR] === null && angles[RIGHT_SENSOR] === null) return trilaterate(filtered);
-    return fromScanners(filtered, angles);
+  function matTranspose(a) {
+    return a[0].map((_, j) => a.map((row) => row[j]));
+  }
+
+  function matAdd(a, b) {
+    return a.map((row, i) => row.map((value, j) => value + b[i][j]));
+  }
+
+  // One node's reading as a measurement: the point along its line of sight,
+  // and that point's covariance (2x2, cm^2) - LOS_RANGE_SIGMA_CM along the
+  // line, the distance times the bearing uncertainty across it.
+  function lineOfSight(nodeX, distance, angle, state) {
+    const phi = (angle - 90) * Math.PI / 180;
+    const along = [-Math.sin(phi), Math.cos(phi)];
+    const across = [Math.cos(phi), Math.sin(phi)];
+    const bearingDeg = state === 0 ? tuning.losBearingFoundDeg
+      : state === 1 ? tuning.losBearingHalfDeg : tuning.losBearingUnknownDeg;
+    const radial = LOS_RANGE_SIGMA_CM * LOS_RANGE_SIGMA_CM;
+    const sideways = distance * bearingDeg * Math.PI / 180;
+    const tangential = sideways * sideways;
+    const cov = [[0, 0], [0, 0]];
+    for (let i = 0; i < 2; i++) {
+      for (let j = 0; j < 2; j++) {
+        cov[i][j] = radial * along[i] * along[j] + tangential * across[i] * across[j];
+      }
+    }
+    return { x: nodeX - distance * Math.sin(phi), y: distance * Math.cos(phi), cov };
+  }
+
+  function makeLosTrack() {
+    return {
+      x: null,                              // [x, y, vx, vy]
+      P: null,                              // 4x4 covariance
+      t: 0,                                 // time of x, s
+      updatedAt: -Infinity,                 // ms of the last reading the track took
+      fedAt: [-Infinity, -Infinity, -Infinity], // ms each slot last fed it
+      aimedAt: [null, null, null],          // the servo angle each slot's aim was last taken at
+      lastSlot: null,
+      outliers: 0,                          // readings in a row that failed the gate
+    };
+  }
+
+  const losTrack = makeLosTrack();
+
+  function resetLosTrack() {
+    Object.assign(losTrack, makeLosTrack());
+  }
+
+  function losTook(slot, now) {
+    losTrack.updatedAt = now;
+    losTrack.fedAt[slot] = now;
+    losTrack.lastSlot = slot;
+  }
+
+  // A new track at this reading, still, as uncertain as the reading itself.
+  function losStart(m, slot, now) {
+    const v0 = LOS_V0_SIGMA_CM_S * LOS_V0_SIGMA_CM_S;
+    losTrack.x = [m.x, m.y, 0, 0];
+    losTrack.P = [
+      [m.cov[0][0], m.cov[0][1], 0, 0],
+      [m.cov[1][0], m.cov[1][1], 0, 0],
+      [0, 0, v0, 0],
+      [0, 0, 0, v0],
+    ];
+    losTrack.t = now / 1000;
+    losTrack.outliers = 0;
+    losTook(slot, now);
+  }
+
+  // x = F x, P = F P F^T + Q, to time t (s).
+  function losPredict(t) {
+    const dt = t - losTrack.t;
+    if (dt <= 0) return;
+    const q = tuning.losAccelCmS2 * tuning.losAccelCmS2;
+    const dt2 = dt * dt;
+    const a = q * dt2 * dt2 / 4;
+    const b = q * dt2 * dt / 2;
+    const c = q * dt2;
+    const F = [[1, 0, dt, 0], [0, 1, 0, dt], [0, 0, 1, 0], [0, 0, 0, 1]];
+    const Q = [[a, 0, b, 0], [0, a, 0, b], [b, 0, c, 0], [0, b, 0, c]];
+    const x = losTrack.x;
+    losTrack.x = [x[0] + x[2] * dt, x[1] + x[3] * dt, x[2], x[3]];
+    losTrack.P = matAdd(matMul(matMul(F, losTrack.P), matTranspose(F)), Q);
+    losTrack.t = t;
+  }
+
+  // A reading the gate turned away. LOS_RELOCK_READINGS of those in a row mean
+  // the player is somewhere else, and the track restarts at this reading.
+  // Returns whether it did.
+  function losOutlier(m, slot, now) {
+    losTrack.outliers += 1;
+    if (losTrack.outliers < LOS_RELOCK_READINGS) return false;
+    losStart(m, slot, now);
+    return true;
+  }
+
+  // The rest of a Kalman update once the gain K (4 x n) is known: x += K nu and
+  // the Joseph-form covariance (I - K H) P (I - K H)^T + K R K^T, for the
+  // measurement matrix H (n x 4) and its noise R (n x n).
+  function losApply(K, nu, H, R, slot, now) {
+    const P = losTrack.P;
+    losTrack.x = losTrack.x.map((value, i) => value + K[i].reduce((sum, k, j) => sum + k * nu[j], 0));
+    const KH = matMul(K, H);
+    const A = KH.map((row, i) => row.map((value, j) => (i === j ? 1 : 0) - value));
+    losTrack.P = matAdd(matMul(matMul(A, P), matTranspose(A)), matMul(matMul(K, R), matTranspose(K)));
+    losTrack.outliers = 0;
+    losTook(slot, now);
+  }
+
+  // One node's distance alone, as a range from the node to the player (an
+  // extended Kalman update: the range is linearised about the track). Used
+  // while the node's servo holds still: its aim then repeats the same small
+  // error on every reading, and feeding that in again and again would drown
+  // the other node's distance, which is what pins the player down. Returns
+  // whether the track took the reading's aim (only when it restarted there).
+  function losObserveRange(nodeX, distance, m, slot, now) {
+    losPredict(now / 1000);
+    const dx = losTrack.x[0] - nodeX;
+    const dy = losTrack.x[1];
+    const expected = Math.sqrt(dx * dx + dy * dy);
+    if (!(expected > 1e-6)) return false;
+    const H = [[dx / expected, dy / expected, 0, 0]];
+    const P = losTrack.P;
+    const PHt = P.map((row) => [row[0] * H[0][0] + row[1] * H[0][1]]);
+    const r = LOS_RANGE_SIGMA_CM * LOS_RANGE_SIGMA_CM;
+    const sVar = H[0][0] * PHt[0][0] + H[0][1] * PHt[1][0] + r;
+    const nu = [distance - expected];
+    if (!(sVar > 0)) return false;
+    if ((nu[0] * nu[0]) / sVar > RANGE_GATE_NIS) return losOutlier(m, slot, now);
+    losApply(PHt.map((row) => [row[0] / sVar]), nu, H, [[r]], slot, now);
+    return false;
+  }
+
+  // One node's line of sight into the track: distance and aim together. A
+  // reading too far from where the track expects the player (the gate) is
+  // left out. Returns whether the track took the reading.
+  function losObserve(m, slot, now) {
+    if (losTrack.x === null) {
+      losStart(m, slot, now);
+      return true;
+    }
+    losPredict(now / 1000);
+
+    const P = losTrack.P;
+    const nu = [m.x - losTrack.x[0], m.y - losTrack.x[1]];
+    const s00 = P[0][0] + m.cov[0][0];
+    const s01 = P[0][1] + m.cov[0][1];
+    const s10 = P[1][0] + m.cov[1][0];
+    const s11 = P[1][1] + m.cov[1][1];
+    const det = s00 * s11 - s01 * s10;
+    if (!(det > 0)) return false;
+    const Si = [[s11 / det, -s01 / det], [-s10 / det, s00 / det]];
+    const nis = nu[0] * (Si[0][0] * nu[0] + Si[0][1] * nu[1]) +
+      nu[1] * (Si[1][0] * nu[0] + Si[1][1] * nu[1]);
+    if (nis > LOS_GATE_NIS) return losOutlier(m, slot, now);
+
+    // K = P H^T S^-1; H picks x and y, so P H^T is P's first two columns.
+    const K = matMul(P.map((row) => [row[0], row[1]]), Si);
+    losApply(K, nu, [[1, 0, 0, 0], [0, 1, 0, 0]], m.cov, slot, now);
+    return true;
+  }
+
+  // Feeds the track every node reading that has the player in its line of
+  // sight: new in this update (a reading is used once, when it arrives), with
+  // a distance and a servo angle, from a node that is not sweeping. The aim is
+  // used when it is new - the servo has moved, or the node has just come back
+  // for its turn - and the distance alone while the servo holds still.
+  function stepLosTrack(filtered, scans, fresh, now) {
+    [LEFT_SENSOR, RIGHT_SENSOR].forEach((slot) => {
+      const scan = scans[slot];
+      if (!fresh[slot] || filtered[slot] === null || scan.angle === null || scan.state === SCAN_LOST) return;
+      const nodeX = columnCentreCm(slot);
+      const m = lineOfSight(nodeX, filtered[slot], scan.angle, scan.state);
+      const newAim = losTrack.x === null || scan.angle !== losTrack.aimedAt[slot] ||
+        now - losTrack.fedAt[slot] > SENSOR_HOLD_MS;
+      const tookAim = newAim
+        ? losObserve(m, slot, now)
+        : losObserveRange(nodeX, filtered[slot], m, slot, now);
+      if (tookAim) losTrack.aimedAt[slot] = scan.angle;
+    });
+    if (losTrack.x !== null && now - losTrack.updatedAt > LOS_TRACK_TIMEOUT_MS) resetLosTrack();
+  }
+
+  // The track's position, or null when it has had nothing usable for too long.
+  function losFix(now) {
+    if (losTrack.x === null || now - losTrack.updatedAt > LOS_TRACK_TIMEOUT_MS) return null;
+    const recent = (slot) => now - losTrack.fedAt[slot] <= LOS_BOTH_WINDOW_MS;
+    const source = recent(LEFT_SENSOR) && recent(RIGHT_SENSOR) ? "both"
+      : losTrack.lastSlot === LEFT_SENSOR ? "left" : "right";
+    return { x: losTrack.x[0], y: losTrack.x[1], source };
+  }
+
+  // All three positions for this update, { los, tri, avg }, each { x, y,
+  // source } or null. Pure apart from reading the track. With no servo angle
+  // from either node there is no line of sight, and every method is
+  // trilateration, as it always was for that firmware.
+  function solvePositions(filtered, angles, now) {
+    const tri = trilaterate(filtered);
+    if (angles[LEFT_SENSOR] === null && angles[RIGHT_SENSOR] === null) {
+      return { los: tri, tri, avg: tri };
+    }
+    const los = losFix(now);
+    let avg = los || tri;
+    if (los && tri) {
+      avg = {
+        x: (los.x + tri.x) / 2,
+        y: (los.y + tri.y) / 2,
+        source: los.source === tri.source ? los.source : "both",
+      };
+    }
+    return { los, tri, avg };
+  }
+
+  // --- Which method places the player ----------------------------------------
+  const POSITION_METHODS = ["los", "tri", "avg"];
+  const positioning = {
+    method: "los",   // what drives the cursor and the game
+    compare: true,   // draw all three on the board
+  };
+
+  window.getPositionMethod = function getPositionMethod() {
+    return positioning.method;
+  };
+
+  window.setPositionMethod = function setPositionMethod(method) {
+    if (POSITION_METHODS.includes(method)) {
+      positioning.method = method;
+      console.info(`[position] ${method}`);
+    }
+    return positioning.method;
+  };
+
+  // Which slots carry a reading not seen before. The server stamps each node's
+  // latest message (last_seen), and only one node scans at a time, so between
+  // its turns a node's last reading is repeated in every update. A slot with
+  // no reading counts as new, so its hold runs out as it always did; a node
+  // with no stamp (the parity trace) is new on every update. Mirrors the
+  // `fresh` mask serverFilter.py hands filterRules.py.
+  const lastSeenStamp = [null, null, null];
+  const heardAt = [-Infinity, -Infinity, -Infinity];   // ms, a slot's last new reading
+
+  function freshSlots(list, raw, isNewReading, now) {
+    return raw.map((value, slot) => {
+      if (!isNewReading) return false;
+      const node = list[slot];
+      const stamp = node && node.last_seen !== undefined ? node.last_seen : null;
+      const isNew = value === null || stamp === null || stamp !== lastSeenStamp[slot];
+      lastSeenStamp[slot] = stamp;
+      if (isNew && value !== null) heardAt[slot] = now;
+      return isNew;
+    });
   }
 
   // Input:  [left, centre, right] node records, nulls allowed (calibration order).
@@ -1251,7 +1545,11 @@
   //   distanceCm: the player's depth from the screen (y),
   //   xCm, yCm:   the player's position in cm, source: "both" | "left" | "right",
   //   raw:        [l, c, r] node distances straight off the wire, for debugging,
-  //   filtered:   [l, c, r] after median + hold,
+  //   filtered:   [l, c, r] after median, Kalman, FFT and hold,
+  //   fresh:      [l, c, r] whether each slot brought a new reading this update,
+  //   heardMsAgo: [l, c, r] ms since each node's last new reading,
+  //   fixes:      { los, tri, avg } - every method's position, see solvePositions(),
+  //   method:     the method the position above came from,
   //   depth:      [l, c, r] each node's own depth reading (filtered distance
   //               turned by its servo angle) - what corner calibration captures,
   //   scans:      [l, c, r] each node's scanner fields, see readScan(),
@@ -1266,20 +1564,26 @@
     const angles = scans.map((scan) => scan.angle);
 
     // Fresh data, or the same reading being polled again by the render loop?
-    // Only fresh data moves the filters: the Kalman and FFT stages count
-    // readings, and one reading polled at 60 fps is still one reading.
+    // Only a node's new reading moves its filters and the track: the Kalman
+    // and FFT stages count readings, and one reading polled at 60 fps - or
+    // repeated in every update while the other node takes its scanning turn -
+    // is still one reading.
     const isNewReading = sensorFrameSeq !== lastSeenFrameSeq;
     lastSeenFrameSeq = sensorFrameSeq;
+    const fresh = freshSlots(list, raw, isNewReading, now);
 
-    const filtered = isNewReading
-      ? raw.map((value, index) => conditionSensor(sensorFilters[index], value, now))
-      : sensorFilters.map((filter) => filter.value);
+    const filtered = raw.map((value, slot) =>
+      fresh[slot] ? conditionSensor(sensorFilters[slot], value, now) : sensorFilters[slot].value);
+    if (isNewReading) stepLosTrack(filtered, scans, fresh, now);
+    const fixes = solvePositions(filtered, angles, now);
     const configured = filtered.filter((d) => d !== null).length;
     const depth = filtered.map((distance, slot) =>
       distance === null || slot === 1 ? null : scannerPoint(columnCentreCm(slot), distance, angles[slot]).y);
+    const heardMsAgo = heardAt.map((at) => now - at);
 
     const base = {
-      raw, filtered, depth, scans, configured, isNewReading,
+      raw, filtered, depth, scans, configured, isNewReading, fresh, heardMsAgo,
+      fixes, method: positioning.method,
       column: null, distanceCm: null, xCm: null, yCm: null, source: null,
     };
 
@@ -1298,7 +1602,7 @@
     }
     const tooClose = closeStreak >= TOO_CLOSE_FRAMES;
 
-    const position = locateNodes(filtered, angles);
+    const position = fixes[positioning.method];
     const x = position ? Math.max(0, Math.min(PLAY_WIDTH_CM, position.x)) : null;
 
     // Safety outranks every other state, including loss of signal. The column
@@ -2007,6 +2311,12 @@
     { index: RIGHT_SENSOR, label: "R", source: "right" },
   ];
   const SOURCE_LABELS = { both: "L+R", left: "L only", right: "R only" };
+  // The three ways of placing the player, as the switch and the board show them.
+  const METHOD_STYLES = {
+    los: { label: "Line of sight", short: "LOS", colour: "#22d3ee" },
+    tri: { label: "Trilateration", short: "TRI", colour: "#e879f9" },
+    avg: { label: "Average", short: "AVG", colour: "#f8fafc" },
+  };
   // The scanner's state (src/scanning.cpp): both sensors agree, one sees the
   // player, or it is sweeping for them.
   const SCAN_STATE_NAMES = { 0: "found", 1: "half", 2: "lost" };
@@ -2061,9 +2371,12 @@
       const live = filtered[i] !== null && filtered[i] !== undefined;
       const echoing = raw[i] !== null && raw[i] !== undefined;
 
-      // Green = echoing now, amber = coasting on a held value, red = nothing.
+      // Green = echoing now, amber = coasting on a held value, blue = waiting
+      // for its scanning turn (its last reading is old), red = nothing.
+      const sinceHeard = sensor.heardMsAgo ? sensor.heardMsAgo[i] : 0;
       let dot = "#ef4444";
-      if (echoing) dot = "#22c55e";
+      if (echoing && sinceHeard > SENSOR_HOLD_MS) dot = "#60a5fa";
+      else if (echoing) dot = "#22c55e";
       else if (live) dot = "#f59e0b";
       ctx.fillStyle = dot;
       ctx.beginPath();
@@ -2120,6 +2433,19 @@
       ctx.fillText("x --  y -- cm", x + 16, posY);
     }
 
+    // Every method's position side by side; the one in use is bold.
+    const compareY = posY + 18;
+    const fixes = sensor.fixes || {};
+    POSITION_METHODS.forEach((method, k) => {
+      const style = METHOD_STYLES[method];
+      const fix = fixes[method];
+      const inUse = method === positioning.method;
+      ctx.font = `${inUse ? "bold " : ""}11px monospace`;
+      ctx.fillStyle = fix ? style.colour : "#63736f";
+      const where = fix ? `${fix.x.toFixed(0)},${fix.y.toFixed(0)}` : "--";
+      ctx.fillText(`${style.short} ${where}`, x + 16 + k * 118, compareY);
+    });
+
     // Resolved fix
     const fixY = y + panelH - 12;
     const status = sensor.status;
@@ -2149,11 +2475,92 @@
     ctx.textAlign = "start";
   }
 
+  // --- Position switch ---------------------------------------------------------
+  // Sensor mode only: three buttons above the sensor panel pick the method that
+  // places the player, and Compare shows all three on the board.
+
+  function getPositionSwitchLayout(canvas) {
+    const height = canvas.clientHeight || canvas.height;
+    const y = height - HUD_EDGE - SENSOR_PANEL_H - HUD_GAP - POSITION_SWITCH_H;
+    const buttons = [];
+    let x = HUD_EDGE;
+    POSITION_METHODS.forEach((method) => {
+      buttons.push({ kind: "method", method, x, y, width: 100, height: POSITION_SWITCH_H });
+      x += 104;
+    });
+    buttons.push({ kind: "compare", x, y, width: HUD_EDGE + SENSOR_PANEL_W - x, height: POSITION_SWITCH_H });
+    return { top: y, buttons };
+  }
+
+  // The button under (x, y), while a sensor-mode round is playing, or null.
+  window.getPositionSwitchAtPoint = function getPositionSwitchAtPoint(canvas, x, y) {
+    if (gameState.inputMode !== "sensor" || gameState.status !== "playing") return null;
+    return getPositionSwitchLayout(canvas).buttons.find((b) => pointInRect(x, y, b)) || null;
+  };
+
+  window.applyPositionSwitch = function applyPositionSwitch(button) {
+    if (!button) return;
+    if (button.kind === "method") window.setPositionMethod(button.method);
+    else if (button.kind === "compare") positioning.compare = !positioning.compare;
+  };
+
+  function renderPositionSwitch(ctx, canvas) {
+    getPositionSwitchLayout(canvas).buttons.forEach((b) => {
+      const on = b.kind === "method" ? b.method === positioning.method : positioning.compare;
+      const colour = b.kind === "method" ? METHOD_STYLES[b.method].colour : "#f8fafc";
+      if (on) {
+        ctx.fillStyle = colour;
+        ctx.beginPath();
+        ctx.roundRect(b.x, b.y, b.width, b.height, 8);
+        ctx.fill();
+      } else {
+        drawHudPanel(ctx, b.x, b.y, b.width, b.height, 8);
+      }
+      ctx.textAlign = "center";
+      ctx.font = "bold 11px monospace";
+      ctx.fillStyle = on ? "#13131c" : colour;
+      const label = b.kind === "method" ? METHOD_STYLES[b.method].label : "Compare";
+      ctx.fillText(label, b.x + b.width / 2, b.y + b.height / 2 + 4);
+    });
+    ctx.textAlign = "start";
+  }
+
+  // Compare: each method's position as a small labelled ring on the board. The
+  // big cursor is the method in use, eased by the spring; these are where each
+  // method puts the player right now.
+  const MARKER_LABEL_OFFSET = { los: [0, -13], tri: [0, 22], avg: [16, 4] };
+
+  function renderPositionMarkers(ctx, canvas) {
+    const fixes = gameState.sensor && gameState.sensor.fixes;
+    if (!positioning.compare || !fixes) return;
+    POSITION_METHODS.forEach((method) => {
+      const fix = fixes[method];
+      if (!fix) return;
+      const x = Math.max(0, Math.min(PLAY_WIDTH_CM, fix.x));
+      const point = worldToCanvasPoint(canvas, x, fix.y, columnAtCm(x));
+      if (!point) return;
+      const style = METHOD_STYLES[method];
+      ctx.save();
+      ctx.strokeStyle = style.colour;
+      ctx.lineWidth = method === positioning.method ? 3 : 2;
+      ctx.beginPath();
+      ctx.arc(point.x, point.y, 7, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.fillStyle = style.colour;
+      ctx.font = "bold 10px monospace";
+      ctx.textAlign = method === "avg" ? "left" : "center";
+      const [dx, dy] = MARKER_LABEL_OFFSET[method];
+      ctx.fillText(style.short, point.x + dx, point.y + dy);
+      ctx.restore();
+    });
+  }
+
   // --- HUD layout ------------------------------------------------------------
-  // Bottom-left: in sensor mode the sensor panel sits in the corner (mouse and
-  // remote need no input box). LIVE STATS fills the room left between it and
-  // the score panel, showing as many rows as fit. LIVE DATA (box plot and bar
-  // charts) sits under the How to Play legend.
+  // Bottom-left: in sensor mode the sensor panel sits in the corner with the
+  // position switch above it (mouse and remote need no input box). LIVE STATS
+  // fills the room left between that and the score panel, showing as many
+  // rows as fit. LIVE DATA (box plot and bar charts) sits under the How to
+  // Play legend.
 
   function renderHud(ctx, canvas) {
     const height = canvas.clientHeight || canvas.height;
@@ -2164,8 +2571,11 @@
     let stackTop = height - HUD_EDGE;
 
     if (gameState.inputMode === "sensor") {
+      if (!serverCoordinateActive) renderPositionMarkers(ctx, canvas);
       stackTop -= SENSOR_PANEL_H;
       renderSensorPanel(ctx, HUD_EDGE, stackTop);
+      renderPositionSwitch(ctx, canvas);
+      stackTop = getPositionSwitchLayout(canvas).top;
     }
 
     const stats = roundStats();

@@ -1454,6 +1454,23 @@ class NodePulsesTests(BrokerTestCase):
         self.assertEqual(app.nodes_pulse_count, 3)
 
 
+class ScanStateTests(unittest.TestCase):
+    """What a scanner node's scan made of a reading, from its message."""
+
+    def test_the_three_states_are_read(self):
+        for state in (0, 1, 2):
+            self.assertEqual(app.parse_scan_state({"scanState": state}), state)
+        self.assertEqual(app.parse_scan_state({"scanState": "1"}), 1)
+
+    def test_older_firmware_sent_state(self):
+        self.assertEqual(app.parse_scan_state({"state": 2}), 2)
+
+    def test_anything_else_is_none(self):
+        for payload in ({}, {"scanState": None}, {"scanState": 7}, {"scanState": "lost"},
+                        {"scanState": True}):
+            self.assertIsNone(app.parse_scan_state(payload), payload)
+
+
 class ScannerAngleTests(unittest.TestCase):
     """The servo angle a scanner node sends alongside its distance."""
 

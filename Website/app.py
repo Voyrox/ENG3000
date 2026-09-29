@@ -252,6 +252,19 @@ def parse_angle_deg(payload):
     return angle if np.isfinite(angle) else None
 
 
+def parse_scan_state(payload):
+    """What a scanner node's scan made of its reading: 0 found, 1 half-found,
+    2 lost (sweeping). None for firmware that does not say."""
+    state = payload.get("scanState", payload.get("state"))
+    if isinstance(state, bool):
+        return None
+    try:
+        state = int(state)
+    except (TypeError, ValueError):
+        return None
+    return state if state in (0, 1, 2) else None
+
+
 def parse_distance_cm(payload):
     """The raw distance in a node message, as sent: negative means no echo."""
     distance = payload.get("distance")
@@ -324,7 +337,8 @@ def update_node(node_id, message):
             raw_cm = parse_distance_cm(payload)
             if raw_cm is not None:
                 server_filter.on_reading(node_id, raw_cm, now * MS_PER_SECOND,
-                                         angle_deg=parse_angle_deg(payload))
+                                         angle_deg=parse_angle_deg(payload),
+                                         scan_state=parse_scan_state(payload))
     schedule_broadcast_nodes()
 
 
@@ -674,6 +688,9 @@ def apply_filter_event(event):
             elif event.get("type") == "calibration:update":
                 server_filter.set_calibration(
                     [(c["near"], c["far"]) for c in event["perColumn"]])
+            elif event.get("type") == "position:method":
+                # The game's position switch: line of sight, trilateration or both.
+                server_filter.set_position_method(event["method"])
     except (KeyError, TypeError, ValueError) as exc:
         print(f"Ignored bad {event.get('type')} message: {exc}")
 
