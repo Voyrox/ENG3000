@@ -83,15 +83,15 @@ float ultraSonicRead(const int USS[2]){
   // Clear the trigPin
   digitalWrite(trigPin, LOW);
   delayMicroseconds(2);
-  
+
   // Set the trigPin HIGH for 10 microseconds
   digitalWrite(trigPin, HIGH);
   delayMicroseconds(10);
   digitalWrite(trigPin, LOW);
-  
+
   // Read the echoPin, returns sound wave travel time in microseconds
   unsigned long duration = pulseIn(echoPin, HIGH, 50000); //Timeout in 50ms, aka 17 metres
-  
+
   // Calculate the distance (speed of sound is 0.034 cm/us, divided by 2 for round trip)
   float distance = (duration * 0.034) / 2;
 
@@ -99,7 +99,7 @@ float ultraSonicRead(const int USS[2]){
 }
 
 int rotationWaitTrack = 0;
-const int rotatationWait = 20;
+const int rotatationWait = 50;
 bool readLeftNext = true;
 
 float leftVal = 0;
@@ -128,7 +128,7 @@ bool scanLoop(){
     if(diff < 20){
       state = 0;
     }
-  } 
+  }
   else if (leftInRange){
     state = 1;
   }
@@ -157,14 +157,13 @@ bool scanLoop(){
       break;
     }
     case 2:{
-      bool flip = rotate(20 * dir);
+      bool flip = rotate(16 * dir);
       if(flip){
         dir = -dir;
       }
       break;
     }
   }
-
   rotationWaitTrack = millis();
   return true;
 }

@@ -63,10 +63,10 @@ void loop() {
         return;
     }
 
-    if (awaitingTurn()) {
-        pollCommands();
-        return;
-    }
+    // if (awaitingTurn()) {
+    //     pollCommands();
+    //     return;
+    // }
 
     pollCommands();
     bool ready = scanLoop();

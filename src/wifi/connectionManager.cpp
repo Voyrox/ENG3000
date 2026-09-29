@@ -4,7 +4,7 @@
 constexpr char WIFI_SSID[] = "Josh's S24";
 constexpr char WIFI_PASSWORD[] = "bruh12345";
 constexpr bool AUTO_DISCOVER_SERVER = false;
-constexpr char SERVER_IP[] = "192.168.1.204";
+constexpr char SERVER_IP[] = "192.168.59.151";
 constexpr uint16_t SERVER_PORT = 3000;
 constexpr unsigned long SERVER_CONNECT_TIMEOUT_MS = 3000;
 constexpr unsigned long SERVER_DISCOVERY_TIMEOUT_MS = 120000;

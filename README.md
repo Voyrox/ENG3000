@@ -90,6 +90,13 @@ filtering rule in `game.js` before integration, regenerate the recording:
 node Website/tests/generate_parity_trace.js
 ```
 
+`test_app.py` covers the broker and coordinator in `app.py`: the FFT filter,
+node identity and MAC de-duplication, the ESP32 handshake, the median/FFT
+reading pipeline, the stale-node reaper, the HTTP and `/browser` endpoints, and
+the scan-turn arbitration. The sockets are faked and the `while True` workers
+are stepped by stubbing `time.sleep`, so it binds no port and finishes in about
+a tenth of a second.
+
 ### Integrating into `app.py`
 
 **1. Create one pipeline** at module level, next to the other shared state:
