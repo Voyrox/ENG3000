@@ -128,7 +128,6 @@ def find_known_node(claimed_node_id, device_id):
 def reuse_or_register_node(address, claimed_node_id, device_id=None):
     with state_lock:
         node = find_known_node(claimed_node_id, device_id)
-
         if node is not None:
             reused_existing = True
             node["address"] = f"{address[0]}:{address[1]}"

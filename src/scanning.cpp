@@ -37,8 +37,8 @@ void scanSetup(){
   // Servo setup
   theServo.attach(servoPin);
 
-  // theServo.write(90);
-  // delay(5000);
+  theServo.write(90);
+  delay(5000);
 }
 
 //If both sensors see the person, state = Found, state 0
@@ -61,15 +61,29 @@ int state = 0;
 int angle = 90;
 int dir = 1;
 
+//USB 0001 is the left one, 1320 is the right one
+
+//For the left node; maxLeft = 150 [90 + 60], maxRight = 50 [90 - 40]
+
+//For the right node; maxLeft = 130 [90 + 40], maxRight = 40 [90 - 50]
+
+//Left node
+// const int maxLeft = 160;
+// const int maxRight = 40;
+
+//Right node
+const int maxLeft = 140;
+const int maxRight = 30;
+
 bool rotate(int amount){
   bool returnVal = false;
   angle = angle + amount;
-  if (angle > 150){
-    angle = 150;
+  if (angle > maxLeft){
+    angle = maxLeft;
     returnVal = true;
   }
-  if (angle < 30){
-    angle = 30;
+  if (angle < maxRight){
+    angle = maxRight;
     returnVal = true;
   }
   theServo.write(angle);
@@ -99,7 +113,9 @@ float ultraSonicRead(const int USS[2]){
 }
 
 int rotationWaitTrack = 0;
-const int rotatationWait = 50;
+const int rotatationWait = 30;
+const int sideReadDelay = 30;
+int ultrasonicWaitTrack = 0;
 bool readLeftNext = true;
 
 float leftVal = 0;
@@ -112,20 +128,27 @@ bool scanLoop(){
 
   if(readLeftNext){
     leftVal = ultraSonicRead(leftUSS);
+    ultrasonicWaitTrack = millis();
     readLeftNext = false;
-    return false;
   }
 
-
-  rightVal = ultraSonicRead(rightUSS);
-  readLeftNext = true;
+  if((ultrasonicWaitTrack + sideReadDelay) < millis()){
+    rightVal = ultraSonicRead(rightUSS);
+    readLeftNext = true;
+  } else{
+    // Serial.print(millis());
+    // Serial.println(" waiting");
+    return false;
+  }
 
   bool leftInRange = (leftVal >= minDist && leftVal <= maxDist);
   bool rightInRange = (rightVal >= minDist && rightVal <= maxDist);
 
+  const int maxDiff = 30;
+
   if (leftInRange && rightInRange){
     float diff = abs((leftVal - rightVal));
-    if(diff < 20){
+    if(diff < maxDiff){
       state = 0;
     }
   }
@@ -144,20 +167,23 @@ bool scanLoop(){
   Serial.println(state);
   Serial.println();
 
+  const int smallRotation = 4;
+  const int largeRotation = 15;
+
   switch (state){
     case 0:{
       break;
     }
     case 1:{
       if(leftInRange){
-        rotate(5);
+        rotate(smallRotation);
       } else {
-        rotate(-5);
+        rotate(-smallRotation);
       }
       break;
     }
     case 2:{
-      bool flip = rotate(16 * dir);
+      bool flip = rotate(largeRotation * dir);
       if(flip){
         dir = -dir;
       }
