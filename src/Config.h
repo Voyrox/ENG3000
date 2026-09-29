@@ -80,7 +80,7 @@ constexpr unsigned long ECHO_TIMEOUT_US = 9000;
 // A reading inside this range is taken to be the player; outside it there is no
 // target.
 constexpr float MIN_TARGET_CM = 10;
-constexpr float MAX_TARGET_CM = 140;
+constexpr float MAX_TARGET_CM = 180;
 
 // --- Scan timing ----------------------------------------------------------
 // Quiet time after one pulse pair before the next pair starts.
