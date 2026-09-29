@@ -397,3 +397,53 @@ result = pipeline.update((x_cm, y_cm), now_ms)
 If it reports angle and distance instead, add a `Geometry` subclass that
 converts them to `(x, y)` in `channels()` / `locate()`. Nothing downstream
 needs to change.
+
+## Measuring sensor noise
+
+Before changing the hardware, the firmware or the filters, measure. Start the
+server with the raw-reading recorder on:
+
+```
+REC=1 python Website/app.py
+```
+
+Every JSON line a node sends is written, unfiltered, to
+`logs/raw-YYYYmmdd-HHMMSS.csv` at the repository root (`/logs` is gitignored;
+the MAC is never written). Columns: `t_s` (server receive time from the start),
+`label`, `node_id`, `role`, `has_turn`, `ms_since_turn`, `pulses`, `left_cm`,
+`right_cm`, `avg_cm`, `angle_deg`, `scan_state`; `-1` is a no echo, and a field
+the node did not send is empty.
+
+With both nodes scanning, and the game page closed or at least off the
+calibration screen (the calibration hold stops the servos, and multi-pulse does
+nothing while they are held), run the bench test. It asks you to put a target
+at each distance, for each Pulses setting, and labels those readings
+(`p3-60cm`); the time spent moving the target is not labelled:
+
+```
+python Website/tools/bench_noise.py capture --distances 30 60 90 120 --pulses 1 3 --seconds 20
+python Website/tools/bench_noise.py report logs/raw-YYYYmmdd-HHMMSS.csv
+```
+
+The report gives, per step, node and sensor (`left`, `right`, `avg`):
+
+| Column | Meaning |
+|--------|---------|
+| `n` | readings |
+| `no-echo%` | readings with no echo at all |
+| `median` / `bias` | the middle reading, and how far it is from the distance in the label |
+| `sigma` | 1.4826 x the median absolute deviation: the noise, ignoring outliers |
+| `std` | standard deviation: the noise including outliers |
+| `outlier%` | echoes more than 10 cm (`--outlier-cm`) from the step's median |
+| `found%` | readings where both sensors agreed (`scanState` 0) |
+
+A second table shows, per node, readings received without the scan turn, and
+the outlier and no-echo rates in the first 150 ms after the node was given the
+turn against the rest: if the early rate is clearly worse, the two nodes are
+hearing each other at the hand-over. `--csv FILE` also writes the first table
+out.
+
+The bench test sets Pulses itself through `POST /api/pulses`
+(`{"count": 1|2|3}`) and the labels through `POST /api/recording/label`
+(`{"label": "..."}`, 404 when the server is not recording), and turns Pulses
+back off at the end.

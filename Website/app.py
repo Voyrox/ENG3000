@@ -5,12 +5,13 @@ import os
 import socket
 import threading
 import time
-from flask import Flask, abort, jsonify, render_template
+from flask import Flask, abort, jsonify, render_template, request
 from websockets.asyncio.server import broadcast, serve
 import numpy as np
 
 from filterRules import FilterConfig
 from serverFilter import ServerFilterStage, server_filtering_enabled
+from sessionRecorder import SessionRecorder
 from tracking import ConstantVelocityTracker
 
 
@@ -83,6 +84,9 @@ SERVER_FILTERING = server_filtering_enabled(os.environ)
 #   CON=1 python app.py
 CONTROL_ENABLED = os.environ.get("CON") == "1"
 CONTROL_ACTIONS = {"point", "release", "start", "mode", "pause", "resume", "restart", "menu", "testMode"}
+# Every raw node reading to logs/raw-*.csv, for the bench noise test
+# (tools/bench_noise.py). Off unless started with REC=1; see sessionRecorder.py.
+recorder = SessionRecorder.from_env(os.environ)
 
 state_lock = threading.Lock()
 next_node_id = 1
@@ -121,6 +125,7 @@ def new_node(address, device_id=None):
         "conn_lock": threading.Lock(),
         "synced": False,
         "has_turn": False,
+        "turn_since": None,     # time.monotonic() when the current turn was granted
     }
 
 
@@ -325,6 +330,14 @@ def update_distance(node, payload, now):
         node["filtered_distance"] = float(tracked)
 
 
+def ms_since_turn(node, now):
+    """How long the node has held its scan turn, in ms; None without one."""
+    since = node.get("turn_since")
+    if not node["has_turn"] or since is None:
+        return None
+    return (now - since) * MS_PER_SECOND
+
+
 def update_node(node_id, message):
     with state_lock:
         node = nodes.get(node_id)
@@ -343,6 +356,11 @@ def update_node(node_id, message):
         node["last_seen"] = now
         update_rate(node, now)
         update_distance(node, payload, now)
+        if recorder is not None:
+            recorder.record(node_id, payload, role=node_roles.get(node_id),
+                            has_turn=node["has_turn"], ms_since_turn=ms_since_turn(node, now),
+                            pulses=nodes_pulse_count, received_at=now)
+
         if server_filter is not None:
             # RAW distance, never node["filtered_distance"]: the chain does its
             # own filtering and the proximity guard needs unsmoothed readings.
@@ -555,11 +573,11 @@ def pulses_command():
 
 def set_nodes_pulse_count(count):
     """Set pulses per angle on every connected node. Anything but one of
-    PULSE_COUNT_OPTIONS is ignored."""
+    PULSE_COUNT_OPTIONS is ignored. Returns whether the count was taken."""
     global nodes_pulse_count
     if not isinstance(count, int) or isinstance(count, bool) or count not in PULSE_COUNT_OPTIONS:
         print(f"Ignored bad nodes:pulses count: {count!r}")
-        return
+        return False
     with state_lock:
         nodes_pulse_count = count
         command = pulses_command()
@@ -567,6 +585,7 @@ def set_nodes_pulse_count(count):
     print(f"Multi-pulse: {count} pulse pair(s) per angle")
     for node_id in node_ids:
         send_command(node_id, command)
+    return True
 
 
 def send_node_pulses(node_id):
@@ -593,6 +612,10 @@ def set_turn(node_id, granted):
         node = nodes.get(node_id)
         if node is None:
             return
+        if granted and not node["has_turn"]:
+            node["turn_since"] = time.monotonic()
+        elif not granted:
+            node["turn_since"] = None
         node["has_turn"] = granted
     send_command(node_id, "TURN" if granted else "HALT")
     schedule_broadcast_nodes()
@@ -825,6 +848,29 @@ def api_node(node_id):
         return jsonify(serialize_node(node))
 
 
+# The bench noise test (tools/bench_noise.py) drives these two.
+
+@app.route("/api/recording/label", methods=["POST"])
+def api_recording_label():
+    """Label the raw readings recorded from now on, e.g. {"label": "p3-60cm"};
+    an empty label marks readings that belong to no bench step."""
+    if recorder is None:
+        return jsonify({"error": "not recording: start the server with REC=1"}), 404
+    body = request.get_json(silent=True) or {}
+    label = recorder.set_label(body.get("label", ""))
+    return jsonify({"label": label, "file": recorder.path.name})
+
+
+@app.route("/api/pulses", methods=["POST"])
+def api_pulses():
+    """Multi-pulse without the game page: {"count": 1|2|3}, 1 = off."""
+    body = request.get_json(silent=True) or {}
+    count = body.get("count")
+    if not set_nodes_pulse_count(count):
+        return jsonify({"error": f"count must be one of {list(PULSE_COUNT_OPTIONS)}"}), 400
+    return jsonify({"count": count})
+
+
 if __name__ == '__main__':
     threading.Thread(target=lambda: asyncio.run(websocket_server()), daemon=True).start()
     threading.Thread(target=tcp_server, daemon=True).start()
@@ -832,6 +878,8 @@ if __name__ == '__main__':
     threading.Thread(target=coordinator_loop, daemon=True).start()
     if CONTROL_ENABLED:
         print(f"Control panel enabled at http://{lan_ip()}:5000/control")
+    if recorder is not None:
+        print(f"Recording raw readings to {recorder.path}")
     # debug=False, deliberately. The Werkzeug debugger is a remote shell on the
     # machine running the rig, and this listens on 0.0.0.0 so every device on the
     # network can reach it. Anything that trips an exception while the rig is in
