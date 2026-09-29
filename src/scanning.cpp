@@ -3,10 +3,10 @@
 #include <cmath>
 #include "scanning.h"
 
-//Trigger pin, Echo Pin
-int leftUSS[2] = {33, 32};
-int rightUSS[2] = {33, 32};
-int servoPin = 15;
+//Trigger pin, Echo Pin - two sensors side by side on the servo horn
+int leftUSS[2] = {5, 18};
+int rightUSS[2] = {16, 17};
+int servoPin = 32;
 
 //Notes
   //Refactor ultrasonics into seperate class later
@@ -235,14 +235,19 @@ bool scanLoop(){
       break;
     }
     case 1:{
-      // Steer toward whichever sensor has the player. If that runs the servo into
-      // its own stop it is no longer chasing anything - it is grinding against
-      // the limit - and without this it would sit there pinned until the player
-      // happened to walk away. Reverse, so the rig sweeps back to find them.
-      bool flip = rotate(smallRotation * steerDir);
-      if(flip){
-        steerDir = -steerDir;
-      }
+      // Steer toward whichever sensor has the player (left is towards max,
+      // right towards min): the only one in range, or the nearer one when both
+      // are in range but too far apart to be the same target.
+      //
+      // If that runs the servo into its own stop it is no longer chasing
+      // anything - it is grinding against the limit - and without this it would
+      // sit there pinned until the player happened to walk away. steerDir
+      // reverses the next step, so the rig backs off the stop, and the step
+      // after that steers toward the player again.
+      bool towardLeft = leftInRange && (!rightInRange || leftVal <= rightVal);
+      int step = (towardLeft ? smallRotation : -smallRotation) * steerDir;
+      bool flip = rotate(step);
+      steerDir = flip ? -steerDir : 1;
       break;
     }
     case 2:{
