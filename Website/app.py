@@ -307,6 +307,11 @@ def cleanup_stale_nodes():
                     node["rps"] = 0.0
                     node["samples"].clear()
                     stale_ids.append(node_id)
+                    # `conn` is deliberately left alone. Holding a live socket is
+                    # what keeps this node in the coordinator's turn rotation, and
+                    # clearing it here would take a merely quiet node out of the
+                    # schedule for good. The socket's own handler retires the node
+                    # via mark_node_offline when the connection really ends.
 
         for node_id in stale_ids:
             print(f"Node {node_id} timed out")
@@ -360,9 +365,17 @@ def coordinator_loop():
         time.sleep(TURN_INTERVAL_SECONDS)
         sync_tick += 1
         with state_lock:
+            # A live socket is the proof of life, not the `online` flag. Those
+            # two used to be conflated here, which is a one-way ratchet now that
+            # the firmware obeys HALT: a node only reports while it holds the
+            # turn, so a node that goes quiet for NODE_STALE_SECONDS is marked
+            # offline by cleanup_stale_nodes, which then drops it from this list,
+            # so it is never granted a turn again, so it never reports again --
+            # stuck offline for good behind a perfectly healthy connection.
+            # Trust the connection and let staleness stay a display concern.
             online_ids = sorted(
                 node_id for node_id, node in nodes.items()
-                if node.get("online") and node.get("conn") is not None
+                if node.get("conn") is not None
             )
         if not online_ids:
             continue
