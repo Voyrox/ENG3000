@@ -1,22 +1,27 @@
 // callibrate_corners.js - Play-area calibration + raw -> grid coordinate mapping.
 //
-// No triangulation. The three ultrasonic sensors sit on one line, all pointing
-// straight forward, so each sensor owns one COLUMN of the 3x3 board:
+// No triangulation. The rig has two ultrasonic sensors now, LEFT and RIGHT, on
+// one line and pointing straight forward; there is no centre sensor. Each owns
+// an outer COLUMN of the 3x3 board:
 //
-//        left sensor      centre sensor     right sensor
-//            |                  |                 |
+//        left sensor                        right sensor
+//            |                                   |
 //        column 0           column 1          column 2
+//                        (no sensor)
 //
 // Whichever sensor sees the player decides the column; that sensor's distance
-// reading decides the row. 3 columns x 3 distance bands = the 9 grid cells.
+// reading decides the row.
 //
-// Calibration walks SIX points - the near and far edge of every column - so
-// each sensor gets its own bounds. Sensors are rarely mounted at exactly the
-// same depth, and one shared bound smears that error across the whole board.
+// Calibration walks FOUR points - the near and far edge of the left and right
+// columns - so each sensor gets its own bounds. Sensors are rarely mounted at
+// exactly the same depth, and one shared bound smears that error across the
+// whole board. The centre column has no sensor to measure it: its bounds are
+// the mean of its two neighbours, so the board still draws three even lanes.
 //
 // Every point is measured by exactly ONE sensor: the left-hand points only by
-// the left sensor, and so on. Reading a right-hand point off the centre sensor
-// would measure a diagonal rather than that column's depth.
+// the left sensor, the right-hand ones only by the right. Reading a right-hand
+// point off the left sensor would measure a diagonal rather than that column's
+// depth.
 //
 // The captured bounds also define the play area's limits, which is what the
 // alert and out-of-bounds messages key off:
@@ -41,15 +46,16 @@
   // edge, so the operator never crosses the play area mid-sequence.
   const POINTS = [
     { key: "BL", label: "Bottom-Left", column: 0, sensor: "LEFT", edge: "near" },
-    { key: "BC", label: "Bottom-Centre", column: 1, sensor: "CENTRE", edge: "near" },
     { key: "BR", label: "Bottom-Right", column: 2, sensor: "RIGHT", edge: "near" },
     { key: "TR", label: "Top-Right", column: 2, sensor: "RIGHT", edge: "far" },
-    { key: "TC", label: "Top-Centre", column: 1, sensor: "CENTRE", edge: "far" },
     { key: "TL", label: "Top-Left", column: 0, sensor: "LEFT", edge: "far" },
   ];
 
   const POINT_ORDER = POINTS.map((point) => point.key);
   const COLUMN_NAMES = ["Left", "Centre", "Right"];
+  // The columns with a sensor of their own; the centre (1) has none.
+  const SENSOR_COLUMNS = [0, 2];
+  const CENTRE_COLUMN = 1;
 
   // Used when sensor mode starts without a completed calibration, so the game
   // still responds instead of going dead.
@@ -105,7 +111,7 @@
 
   // The conditioned reading from the one sensor this point is allowed to use.
   // Returns null when that sensor has nothing usable, regardless of what the
-  // other two are reporting.
+  // other one is reporting.
   function readingForPoint(reading, key) {
     const point = pointFor(key);
     if (!point || !reading || !Array.isArray(reading.filtered)) return null;
@@ -132,13 +138,14 @@
     };
   }
 
-  // Derives the usable calibration. Each column keeps its own near/far; the
-  // alert and out-of-bounds limits come from the extremes across all three, so
-  // no column gets clipped by another column's geometry.
+  // Derives the usable calibration. The left and right columns keep their own
+  // near/far; the centre column, which has no sensor, takes the mean of the
+  // two. The alert and out-of-bounds limits come from the extremes across the
+  // measured columns, so no column gets clipped by another column's geometry.
   function getBounds() {
     if (!isComplete()) return defaultBounds();
 
-    const perColumn = [0, 1, 2].map((column) => {
+    const measured = SENSOR_COLUMNS.map((column) => {
       const near = POINTS.find((p) => p.column === column && p.edge === "near");
       const far = POINTS.find((p) => p.column === column && p.edge === "far");
       return {
@@ -147,11 +154,17 @@
       };
     });
 
-    const shallow = perColumn.some((col) => !(col.far - col.near >= MIN_PLAY_DEPTH_CM));
+    const shallow = measured.some((col) => !(col.far - col.near >= MIN_PLAY_DEPTH_CM));
     if (shallow) return defaultBounds({ bad: true });
 
-    const nearCm = Math.min(...perColumn.map((col) => col.near));
-    const farCm = Math.max(...perColumn.map((col) => col.far));
+    const [left, right] = measured;
+    const perColumn = [];
+    perColumn[SENSOR_COLUMNS[0]] = left;
+    perColumn[SENSOR_COLUMNS[1]] = right;
+    perColumn[CENTRE_COLUMN] = { near: (left.near + right.near) / 2, far: (left.far + right.far) / 2 };
+
+    const nearCm = Math.min(...measured.map((col) => col.near));
+    const farCm = Math.max(...measured.map((col) => col.far));
 
     return {
       nearCm,
@@ -189,7 +202,7 @@
   }
 
   // Raw fix -> play-area grid coordinate.
-  //   column     - which sensor saw the player (0 left, 1 centre, 2 right)
+  //   column     - which sensor saw the player (0 left, 2 right; 1 has no sensor)
   //   distanceCm - that sensor's distance reading
   //   previous   - the last grid result, used for row hysteresis (optional)
   window.rawToGrid = function rawToGrid(column, distanceCm, previous) {
@@ -321,14 +334,11 @@
   // Near edge along the bottom, far edge along the top.
   function markerPositions(layout) {
     const { boxX, boxY, boxW, boxH } = layout;
-    const cols = [boxX, boxX + boxW / 2, boxX + boxW];
     return {
-      TL: { x: cols[0], y: boxY },
-      TC: { x: cols[1], y: boxY },
-      TR: { x: cols[2], y: boxY },
-      BL: { x: cols[0], y: boxY + boxH },
-      BC: { x: cols[1], y: boxY + boxH },
-      BR: { x: cols[2], y: boxY + boxH },
+      TL: { x: boxX, y: boxY },
+      TR: { x: boxX + boxW, y: boxY },
+      BL: { x: boxX, y: boxY + boxH },
+      BR: { x: boxX + boxW, y: boxY + boxH },
     };
   }
 
@@ -362,7 +372,7 @@
     ctx.font = `${Math.max(13, Math.min(18, width * 0.016))}px monospace`;
     ctx.fillStyle = complete ? "#22c55e" : "#f59e0b";
     ctx.fillText(
-      complete ? "All six points captured - press Start Game" : `Stand at the ${active.label.toUpperCase()}`,
+      complete ? "All four points captured - press Start Game" : `Stand at the ${active.label.toUpperCase()}`,
       centerX,
       titleY + 28
     );
@@ -449,17 +459,16 @@
       ctx.fillText(`${active ? active.sensor : "target"} sensor: no usable reading`, centerX, readoutY);
     }
 
-    // The other two, greyed out, so a mis-wired rig is obvious.
+    // The other sensor, greyed out, so a mis-wired rig is obvious.
     if (!complete && Array.isArray(reading && reading.filtered)) {
       ctx.fillStyle = "#42425d";
       ctx.font = `${Math.max(10, Math.min(12, width * 0.011))}px monospace`;
-      const others = reading.filtered
-        .map((value, index) => {
-          if (index === active.column) return null;
+      const others = SENSOR_COLUMNS.filter((index) => index !== active.column)
+        .map((index) => {
+          const value = reading.filtered[index];
           const shown = value === null || value === undefined ? "--" : value.toFixed(0) + "cm";
           return `${COLUMN_NAMES[index]} ${shown}`;
         })
-        .filter(Boolean)
         .join("   ");
       ctx.fillText(`ignored:  ${others}`, centerX, readoutY + 20);
     }
@@ -468,12 +477,13 @@
     ctx.font = `${Math.max(10, Math.min(13, width * 0.011))}px monospace`;
     if (bounds.bad) {
       ctx.fillStyle = "#ef4444";
-      ctx.fillText("A column is too shallow - recapture with more depth", centerX, readoutY + 42);
+      ctx.fillText("A sensor's column is too shallow - recapture with more depth", centerX, readoutY + 42);
     } else if (complete) {
       ctx.fillStyle = "#9298aa";
-      const cols = bounds.perColumn
-        .map((col, i) => `${COLUMN_NAMES[i]} ${col.near.toFixed(0)}-${col.far.toFixed(0)}`)
-        .join("   ");
+      const cols = SENSOR_COLUMNS.map((i) => {
+        const col = bounds.perColumn[i];
+        return `${COLUMN_NAMES[i]} ${col.near.toFixed(0)}-${col.far.toFixed(0)}`;
+      }).join("   ");
       ctx.fillText(cols, centerX, readoutY + 42);
       ctx.fillStyle = "#f59e0b";
       ctx.fillText(

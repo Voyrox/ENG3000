@@ -5,24 +5,27 @@
 // mapping directly: the operator holds a hand in front of each sensor in turn,
 // and whichever node's distance collapses is assigned to that slot.
 //
-// The result is the [left, centre, right] ordering everything downstream relies
-// on - readSensorCoordinate() turns a slot index straight into a grid column,
-// so if this mapping is wrong the whole board is mirrored or scrambled.
+// The rig has two sensors now, LEFT and RIGHT; there is no centre sensor, so only
+// those two are identified. The result keeps the [left, centre, right] ordering
+// everything downstream relies on, with the centre slot always empty -
+// readSensorCoordinate() turns a slot index straight into a grid column, so if
+// this mapping is wrong the whole board is mirrored or scrambled.
 //
 // API on `window`:
 //   window.updateSensorAssignment(nodes, now) - run detection, call on each update
-//   window.getSensorAssignment()              - [leftId, centreId, rightId]
+//   window.getSensorAssignment()              - [leftId, null, rightId]
 //   window.isSensorAssignmentComplete()
 //   window.resetSensorAssignment()
 //   window.renderCalibrate(ctx, canvas, nodes)
 //   window.getCalibrateButtonAtPoint(canvas, x, y)
 
 (function () {
+  // column: the slot's index in [left, centre, right]; the centre has no sensor.
   const SLOTS = [
-    { key: "left", label: "LEFT" },
-    { key: "centre", label: "CENTRE" },
-    { key: "right", label: "RIGHT" },
+    { key: "left", label: "LEFT", column: 0 },
+    { key: "right", label: "RIGHT", column: 2 },
   ];
+  const COLUMN_COUNT = 3;
 
   // A hand held deliberately in front of a sensor reads much closer than the
   // room behind it.
@@ -34,10 +37,10 @@
   // assign a slot, short enough not to be tiring.
   const HAND_DWELL_MS = 700;
 
-  window.CALIBRATE_AUTO_CONTINUE_NODES = 3;
+  window.CALIBRATE_AUTO_CONTINUE_NODES = SLOTS.length;
 
   const state = {
-    slots: { left: null, centre: null, right: null },
+    slots: { left: null, right: null },
     activeIndex: 0,
     candidateId: null,
     dwellStartedAt: 0,
@@ -62,8 +65,14 @@
     state.dwellProgress = 0;
   }
 
+  // By column: [leftId, null, rightId]. The centre stays null - there is no
+  // centre sensor - so a slot index is still the grid column downstream.
   window.getSensorAssignment = function getSensorAssignment() {
-    return assignedIds();
+    const byColumn = new Array(COLUMN_COUNT).fill(null);
+    SLOTS.forEach((slot) => {
+      byColumn[slot.column] = state.slots[slot.key];
+    });
+    return byColumn;
   };
 
   window.isSensorAssignmentComplete = isComplete;
@@ -172,7 +181,7 @@
     const cardW = Math.min(210, Math.max(140, width * 0.18));
     const cardH = 132;
     const gap = 18;
-    const rowW = cardW * 3 + gap * 2;
+    const rowW = cardW * SLOTS.length + gap * (SLOTS.length - 1);
     const cardY = Math.max(180, height * 0.28);
 
     return {
@@ -239,7 +248,7 @@
     ctx.font = `${Math.max(15, Math.min(23, width * 0.02))}px monospace`;
     if (complete) {
       ctx.fillStyle = "#22c55e";
-      ctx.fillText("All three sensors identified", centerX, titleY + 40);
+      ctx.fillText("Both sensors identified", centerX, titleY + 40);
     } else if (nodes.length === 0) {
       ctx.fillStyle = "#ef4444";
       ctx.fillText("Waiting for sensors to connect...", centerX, titleY + 40);

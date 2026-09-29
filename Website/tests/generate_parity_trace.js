@@ -103,15 +103,22 @@ function runJs(stream, calibration) {
   }
   const w = context;
 
+  // What the JS ended up calibrated with, per column [near, far]: the two sensor
+  // columns as captured, the centre (no sensor) derived from them. The Python
+  // side is built from this, so both calibrate identically.
+  let effective = null;
   if (calibration) {
-    // Capture order is BL, BC, BR, TR, TC, TL; each reads filtered[column].
-    const order = [[0, "near"], [1, "near"], [2, "near"], [2, "far"], [1, "far"], [0, "far"]];
+    // Two sensors, LEFT and RIGHT: capture order is BL, BR, TR, TL; each reads
+    // filtered[column]. The centre column has no sensor and is not captured.
+    const order = [[0, "near"], [2, "near"], [2, "far"], [0, "far"]];
     for (const [column, edge] of order) {
       const filtered = [null, null, null];
       filtered[column] = calibration[column][edge === "near" ? 0 : 1];
       if (!w.captureCorner({ filtered })) throw new Error(`capture failed ${column} ${edge}`);
     }
-    if (!w.getCalibrationBounds().calibrated) throw new Error("calibration did not take");
+    const bounds = w.getCalibrationBounds();
+    if (!bounds.calibrated) throw new Error("calibration did not take");
+    effective = bounds.perColumn.map((col) => [col.near, col.far]);
   }
 
   w.setGameInputMode("sensor");
@@ -142,12 +149,13 @@ function runJs(stream, calibration) {
       s.filtered || [null, null, null],
     ]);
   });
-  return out;
+  return { calibration: effective, steps: out };
 }
 
 const FIELDS = ["status", "gx", "gy", "rawGx", "rawGy", "column", "held", "heldFor", "filtered"];
 
 const stream = buildStream();
+// [near, far] per column; the centre entry is ignored (no centre sensor to capture it).
 const calibrated = [[28.47, 140.68], [20.44, 138.26], [10.89, 145.81]];
 
 const trace = {
@@ -156,8 +164,8 @@ const trace = {
   fields: FIELDS,
   stream,
   runs: {
-    default: { calibration: null, steps: runJs(stream, null) },
-    calibrated: { calibration: calibrated, steps: runJs(stream, calibrated) },
+    default: runJs(stream, null),
+    calibrated: runJs(stream, calibrated),
   },
 };
 
