@@ -28,7 +28,7 @@ from filterRules import (
     CoordinatePipeline,
     FilteredCoordinate,
     PlayArea,
-    UltrasonicArrayGeometry,
+    TwoSensorGeometry,
 )
 from tracking import PathPredictor
 
@@ -54,7 +54,8 @@ def server_filtering_enabled(environ) -> bool:
 
 
 class ServerFilterStage:
-    """One pipeline, fed from up to three nodes mapped to left/centre/right.
+    """One pipeline, fed from the LEFT and RIGHT nodes (the centre slot stays
+    empty: the rig has two sensors) and placed by TwoSensorGeometry.
 
     Plain data in: a node id, a distance in cm (or None) and a time in ms.
     Knows nothing about sockets or the node dicts in app.py.
@@ -63,7 +64,7 @@ class ServerFilterStage:
     def __init__(self, pipeline: Optional[CoordinatePipeline] = None,
                  predictor: Optional[PathPredictor] = None,
                  prediction_lead_s: float = PREDICTION_LEAD_S):
-        self.pipeline = pipeline or CoordinatePipeline(UltrasonicArrayGeometry())
+        self.pipeline = pipeline or CoordinatePipeline(TwoSensorGeometry())
         self.predictor = predictor or PathPredictor(GRID_SIZE)
         self.prediction_lead_s = prediction_lead_s
         self.sensor_slots: list = [None] * GRID_SIZE      # node id per L, C, R
@@ -72,7 +73,8 @@ class ServerFilterStage:
         self.predicted_cm: list = [None] * GRID_SIZE      # L, C, R; cm or None
 
     def assign_slots(self, slots: Sequence) -> None:
-        """Set which node id is left, centre and right. Resets the pipeline
+        """Set which node id is left, centre and right ([left, None, right]
+        for the two-sensor rig). Resets the pipeline
         and the trackers, since history from a different mapping is
         meaningless."""
         slots = list(slots)
@@ -85,7 +87,8 @@ class ServerFilterStage:
         self.predicted_cm = [None] * GRID_SIZE
 
     def set_calibration(self, per_column: Sequence[tuple]) -> None:
-        """Apply the six calibrated points as (near_cm, far_cm) per column."""
+        """Apply the calibration as (near_cm, far_cm) per column: the left and
+        right as captured, the centre derived by the browser."""
         self.pipeline.set_area(PlayArea.calibrated(per_column))
 
     def on_missing(self, node_id) -> None:

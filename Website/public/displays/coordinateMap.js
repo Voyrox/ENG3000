@@ -2,7 +2,7 @@
 //
 // Deliberately knows nothing about sensors. It takes a position in
 // centimetres and draws it, so it keeps working unchanged when the
-// three-sensor rig is replaced by the servo scanner, or when the filtered
+// two-sensor rig is replaced by the servo scanner, or when the filtered
 // coordinate starts arriving from filterRules.py on the server.
 //
 //   const map = new CoordinateMap({ widthCm: 150, depthCm: 150 });

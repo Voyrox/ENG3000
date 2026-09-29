@@ -123,7 +123,8 @@ sample ──► Geometry ──► ProximityGuard (RAW) ──► ChannelFilter
 | `ChannelFilter` | Slew gate → median → hold, for one channel in cm |
 | `ProximityGuard` | Too-close on **raw** readings, confirmed over N frames |
 | `Geometry` | Abstract: sensor data in, position out — the swappable part |
-| `UltrasonicArrayGeometry` | Today's rig: three sensors, one column each |
+| `TwoSensorGeometry` | Today's rig: LEFT and RIGHT sensors, placed by basic trilateration |
+| `UltrasonicArrayGeometry` | The earlier three-sensor rig, one column each (replays V1 logs) |
 | `CartesianGeometry` | A rig that reports `(x, y)` itself, e.g. the servo scanner |
 | `CellStabiliser` | Majority vote over recent cells |
 | `HoldPolicy` | Abstract: when to ride out bad readings |

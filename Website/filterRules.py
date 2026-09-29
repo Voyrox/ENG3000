@@ -36,10 +36,13 @@ Pipeline, in order:
                                           ▼
                                    FilteredCoordinate
 
-Geometry is the swappable part. UltrasonicArrayGeometry reproduces today's
-three-sensor rig; CartesianGeometry accepts an (x, y) position directly, which
-is the entry point for the servo scanning rig in src/scanning.cpp once it
-reports a position. Everything downstream of Geometry is shared.
+Geometry is the swappable part. TwoSensorGeometry is today's rig: two
+sensors, LEFT and RIGHT, placed by basic trilateration. UltrasonicArrayGeometry
+is the earlier three-sensor rig, kept so logged V1 sessions still replay
+(tools/chain_replay.py). CartesianGeometry accepts an (x, y) position
+directly, which is the entry point for the servo scanning rig in
+src/scanning.cpp once it reports a position. Everything downstream of
+Geometry is shared.
 
 Coordinates follow the project convention: x runs left to right across the
 play area, y is depth from the screen, and grid cell (0, 0) is bottom-left -
@@ -135,7 +138,7 @@ class PlayArea:
 
     @classmethod
     def calibrated(cls, per_column: Sequence[tuple], width_cm: float = 150.0) -> "PlayArea":
-        """Build from six captured points. Falls back to defaults if any column
+        """Build from (near, far) per column. Falls back to defaults if any column
         is shallower than MIN_PLAY_DEPTH_CM, exactly as getBounds() does."""
         columns = tuple((float(n), float(f)) for n, f in per_column)
         if len(columns) != GRID_SIZE:
@@ -389,7 +392,7 @@ class Geometry(ABC):
 
 
 class UltrasonicArrayGeometry(Geometry):
-    """Three forward-facing sensors on one line, one column each.
+    """Three forward-facing sensors on one line, one column each (the V1 rig).
 
     Port of the column selection in readSensorCoordinate(): the nearest
     in-bounds sensor owns the column, a rival must be clearly nearer to steal
@@ -454,6 +457,106 @@ class UltrasonicArrayGeometry(Geometry):
         self._last_column = column
         return Fix(STATUS_OK, x_cm=area.column_centre_cm(column), y_cm=best,
                    column=column, distance_cm=best)
+
+
+class TwoSensorGeometry(Geometry):
+    """Two forward-facing sensors, LEFT and RIGHT, placed by basic trilateration.
+
+    Port of trilaterate() and readSensorCoordinate() in game.js. The sensors
+    sit on the screen line at the centres of the outer columns. Each distance
+    is a circle around its sensor, and where the two circles cross is the
+    player: x picks the column (the centre one included) and y, the depth,
+    picks the row. Deliberately basic - how the two sensors should really
+    detect a player is being worked on separately.
+
+    A reading only counts toward the crossing if it is inside its own
+    column's play area. When only one does, or the circles miss each other
+    (one sensor is seeing something else), the nearer sensor places the
+    player straight in front of itself.
+
+    Sample: [left_cm, centre_cm, right_cm], None where a sensor had no echo.
+    The centre is ignored: there is no centre sensor. Three slots are kept so
+    the browser's [left, centre, right] assignment carries over unchanged.
+    """
+
+    LEFT = 0
+    RIGHT = 2
+
+    def __init__(self):
+        self._last_column: Optional[int] = None
+
+    @property
+    def channel_count(self) -> int:
+        return GRID_SIZE
+
+    def reset(self) -> None:
+        self._last_column = None
+
+    def channels(self, sample) -> list:
+        values = list(sample) + [None] * GRID_SIZE
+        out = [None] * GRID_SIZE
+        out[self.LEFT] = _valid_cm(values[self.LEFT])
+        out[self.RIGHT] = _valid_cm(values[self.RIGHT])
+        return out
+
+    def nearest_raw_cm(self, raw_channels) -> Optional[float]:
+        present = [v for v in raw_channels if v is not None]
+        return min(present) if present else None
+
+    def position(self, filtered, area) -> Optional[tuple]:
+        """(x_cm, y_cm) from the filtered distances, or None with no reading.
+        Pure: touches no state. x is not yet clamped to the board."""
+        d_left, d_right = filtered[self.LEFT], filtered[self.RIGHT]
+        in_left = d_left is not None and area.contains(self.LEFT, d_left)
+        in_right = d_right is not None and area.contains(self.RIGHT, d_right)
+
+        if in_left and in_right:
+            x_left = area.column_centre_cm(self.LEFT)
+            base = area.column_centre_cm(self.RIGHT) - x_left
+            along = (d_left * d_left - d_right * d_right + base * base) / (2 * base)
+            h2 = d_left * d_left - along * along
+            if h2 >= 0:
+                return x_left + along, math.sqrt(h2)
+
+        # One sensor on its own: the nearer in-bounds reading, or failing that
+        # the nearer reading of any kind. Left wins a tie, as in the JS.
+        candidates = [(self.LEFT, d_left, in_left), (self.RIGHT, d_right, in_right)]
+        candidates = [c for c in candidates if c[1] is not None]
+        pool = [c for c in candidates if c[2]] or candidates
+        if not pool:
+            return None
+        column, distance, _ = min(pool, key=lambda c: c[1])
+        return area.column_centre_cm(column), distance
+
+    def nearest_column(self, filtered, area) -> Optional[int]:
+        where = self.position(filtered, area)
+        if where is None:
+            return None
+        return area.column_at(_clamp(where[0], 0.0, area.width_cm))
+
+    def locate(self, filtered, area, config) -> Fix:
+        where = self.position(filtered, area)
+        if where is None:
+            self._last_column = None
+            return Fix(STATUS_NO_SIGNAL)
+
+        x = _clamp(where[0], 0.0, area.width_cm)
+        y = where[1]
+        column = area.column_at(x)
+
+        # Column hysteresis: next to a column boundary the previous column
+        # holds, so noise does not flick the cursor between neighbours.
+        last = self._last_column
+        if last is not None and abs(column - last) == 1:
+            boundary = (area.width_cm / GRID_SIZE) * max(column, last)
+            if abs(x - boundary) < config.column_margin_cm:
+                column = last
+
+        if y > area.max_cm:
+            return Fix(STATUS_OUT_OF_BOUNDS, x_cm=x, y_cm=y, column=column, distance_cm=y)
+
+        self._last_column = column
+        return Fix(STATUS_OK, x_cm=x, y_cm=y, column=column, distance_cm=y)
 
 
 class CartesianGeometry(Geometry):

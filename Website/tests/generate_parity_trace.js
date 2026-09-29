@@ -36,51 +36,62 @@ function lcg(seed) {
 const round2 = (v) => Math.round(v * 100) / 100;
 
 // --- The scenario ---------------------------------------------------------------
-// Each segment exercises a different branch. Values are [left, centre, right].
+// Each segment exercises a different branch. Values are [left, centre, right];
+// the rig has two sensors, so the centre is always NO_ECHO. A simulated player
+// at (x, depth) cm is seen by a sensor only inside its beam; outside it the
+// sensor sees the back wall.
+
+const SENSOR_X_CM = [25, 125];                    // centres of the outer columns
+const beamHalfWidthCm = (depth) => 15 + depth * 0.36;
 
 function buildStream() {
-  const rand = lcg(20260913);
+  const rand = lcg(20260929);
   const jitter = (cm, spread) => round2(cm + (rand() * 2 - 1) * spread);
   const maybe = (value, dropRate) => (rand() < dropRate ? NO_ECHO : value);
   const wall = () => maybe(jitter(235, 6), 0.25);
+  const sees = (sensorX, x, depth) =>
+    Math.abs(x - sensorX) <= beamHalfWidthCm(depth) ? jitter(Math.hypot(x - sensorX, depth), 2) : wall();
   const steps = [];
-  const push = (l, c, r) => steps.push([l, c, r]);
+  const push = (l, r) => steps.push([l, NO_ECHO, r]);
+  const at = (x, depth) => push(sees(SENSOR_X_CM[0], x, depth), sees(SENSOR_X_CM[1], x, depth));
 
-  // 1. Standing in the centre column: lock on, cell settles.
-  for (let i = 0; i < 120; i++) push(wall(), jitter(70, 2), wall());
+  // 1. Standing in the centre column, seen by both: trilaterated lock-on.
+  for (let i = 0; i < 120; i++) at(75, 100);
 
-  // 2. Same spot with spikes and dropouts: slew gate and hold.
+  // 2. Same spot with spikes and dropouts on the left: slew gate and hold.
   for (let i = 0; i < 70; i++) {
     const roll = rand();
-    const centre = roll < 0.12 ? round2(190 + rand() * 20)
-      : roll < 0.22 ? NO_ECHO : jitter(70, 2);
-    push(wall(), centre, wall());
+    const left = roll < 0.12 ? round2(190 + rand() * 20)
+      : roll < 0.22 ? NO_ECHO : sees(SENSOR_X_CM[0], 75, 100);
+    push(left, sees(SENSOR_X_CM[1], 75, 100));
   }
 
-  // 3. Drift into the left column: column hysteresis.
-  for (let i = 0; i < 120; i++) {
-    const k = i / 119;
-    push(jitter(230 - 170 * k, 2), jitter(70 + 110 * k, 2), wall());
-  }
+  // 3. Drift into the left column: the right sensor loses the player, and x
+  //    crosses a column boundary (column hysteresis).
+  for (let i = 0; i < 120; i++) at(75 - 50 * (i / 119), 100);
 
   // 4. Walk toward the screen in the left column: too-close on raw readings.
-  for (let i = 0; i < 80; i++) push(jitter(60 - 57 * (i / 79), 1.5), wall(), wall());
+  for (let i = 0; i < 80; i++) push(jitter(60 - 57 * (i / 79), 1.5), wall());
 
   // 5. Back out.
-  for (let i = 0; i < 40; i++) push(jitter(90, 2), wall(), wall());
+  for (let i = 0; i < 40; i++) at(25, 90);
 
   // 6. Nobody there: exceed the hold budget.
-  for (let i = 0; i < 130; i++) push(maybe(jitter(260, 5), 0.5), NO_ECHO, maybe(jitter(260, 5), 0.5));
+  for (let i = 0; i < 130; i++) push(maybe(jitter(260, 5), 0.5), maybe(jitter(260, 5), 0.5));
 
   // 7. Reappear in the right column: relock after the anchor has expired.
-  for (let i = 0; i < 90; i++) push(wall(), wall(), jitter(120, 2));
+  for (let i = 0; i < 90; i++) at(125, 120);
 
   // 8. Dither across a row boundary: band hysteresis.
-  for (let i = 0; i < 100; i++) push(wall(), wall(), jitter(100, 5));
+  for (let i = 0; i < 100; i++) at(125, 100 + (rand() * 2 - 1) * 5);
 
-  // 9. Intermittent fault, good and bad alternating: the streak policy's
-  //    known blind spot, recorded so the Python port reproduces it exactly.
-  for (let i = 0; i < 140; i++) push(wall(), wall(), i % 2 ? jitter(118, 2) : NO_ECHO);
+  // 9. Walk from the right column into the centre, both sensors seeing the
+  //    player for most of it: x crosses the right-hand column boundary.
+  for (let i = 0; i < 120; i++) at(125 - 50 * (i / 119), 110);
+
+  // 10. Intermittent fault, good and bad alternating: the streak policy's
+  //     known blind spot, recorded so the Python port reproduces it exactly.
+  for (let i = 0; i < 140; i++) push(wall(), i % 2 ? jitter(118, 2) : NO_ECHO);
 
   return steps;
 }
@@ -125,12 +136,14 @@ function runJs(stream, calibration) {
   w.resetGame();
   const canvas = { clientWidth: 1280, clientHeight: 720, width: 1280, height: 720 };
   const node = (id) => ({ id, online: true, latest: null });
-  const nodes = [node(1), node(2), node(3)];
+  // [left, centre, right] as the game receives them: no centre sensor.
+  const nodes = [node(1), null, node(3)];
 
   const out = [];
   stream.forEach((reading, i) => {
     clock = (i + 1) * STEP_MS;
     reading.forEach((value, s) => {
+      if (!nodes[s]) return;
       nodes[s].latest = JSON.stringify({ avg: value === NO_ECHO ? -1 : value });
     });
     w.markSensorFrame();

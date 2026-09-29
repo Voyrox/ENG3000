@@ -12,6 +12,7 @@ Tests for server-side filtering behind the SERVER_FILTERING flag.
 import asyncio
 import importlib
 import json
+import math
 import os
 import sys
 import unittest
@@ -150,6 +151,21 @@ class StageOncePerReading(unittest.TestCase):
     def test_assign_slots_needs_three(self):
         with self.assertRaises(ValueError):
             self.stage.assign_slots([LEFT, CENTRE])
+
+
+class StageTwoSensorRig(unittest.TestCase):
+    """The default stage: LEFT and RIGHT only, placed by trilateration."""
+
+    def test_centre_player_is_placed_from_left_and_right(self):
+        stage = ServerFilterStage()
+        stage.assign_slots([LEFT, None, RIGHT])
+        distance = math.hypot(50.0, 100.0)          # player at x 75, depth 100
+        stage.on_reading(LEFT, distance, STEP_MS)
+        result = stage.on_reading(RIGHT, distance, 2 * STEP_MS)
+        self.assertEqual(result.status, STATUS_OK)
+        self.assertEqual(result.column, 1)
+        self.assertAlmostEqual(result.x_cm, 75.0)
+        self.assertAlmostEqual(result.y_cm, 100.0)
 
 
 class StagePathPrediction(unittest.TestCase):

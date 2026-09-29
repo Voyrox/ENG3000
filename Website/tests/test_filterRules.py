@@ -18,6 +18,7 @@ Standard library only:
 """
 
 import json
+import math
 import os
 import sys
 import unittest
@@ -39,6 +40,7 @@ from filterRules import (  # noqa: E402
     PlayArea,
     ProximityGuard,
     StreakHold,
+    TwoSensorGeometry,
     UltrasonicArrayGeometry,
 )
 
@@ -58,7 +60,7 @@ class ParityWithGameJs(unittest.TestCase):
         fields = self.trace["fields"]
         area = (PlayArea.calibrated(run["calibration"]) if run["calibration"]
                 else PlayArea.default())
-        pipeline = CoordinatePipeline(UltrasonicArrayGeometry(), area=area)
+        pipeline = CoordinatePipeline(TwoSensorGeometry(), area=area)
 
         for i, (reading, expected_row) in enumerate(zip(self.trace["stream"], run["steps"])):
             expected = dict(zip(fields, expected_row))
@@ -245,6 +247,61 @@ class PipelineBehaviour(unittest.TestCase):
         pipe.update([None, 70, None], 0)
         pipe.reset()
         self.assertEqual(pipe.update([None, None, None], 20).status, STATUS_NO_SIGNAL)
+
+
+def two_sensor_sample(x_cm, depth_cm):
+    """[left, centre, right] distances a player at (x, depth) would produce,
+    with the sensors at the centres of the outer columns (25 and 125 cm)."""
+    return [math.hypot(x_cm - 25.0, depth_cm), None, math.hypot(x_cm - 125.0, depth_cm)]
+
+
+class TwoSensorGeometryBehaviour(unittest.TestCase):
+    """Today's rig: LEFT and RIGHT sensors, basic trilateration."""
+
+    def setUp(self):
+        self.geometry = TwoSensorGeometry()
+        self.area = PlayArea.default()
+        self.config = FilterConfig()
+
+    def locate(self, sample):
+        return self.geometry.locate(sample, self.area, self.config)
+
+    def test_both_sensors_place_the_player_in_the_centre_column(self):
+        fix = self.locate(two_sensor_sample(75.0, 100.0))
+        self.assertEqual(fix.status, STATUS_OK)
+        self.assertAlmostEqual(fix.x_cm, 75.0)
+        self.assertAlmostEqual(fix.y_cm, 100.0)
+        self.assertEqual(fix.column, 1)
+
+    def test_crossing_recovers_an_off_axis_position(self):
+        fix = self.locate(two_sensor_sample(60.0, 80.0))
+        self.assertAlmostEqual(fix.x_cm, 60.0)
+        self.assertAlmostEqual(fix.y_cm, 80.0)
+        self.assertEqual(fix.distance_cm, fix.y_cm)
+
+    def test_a_wall_reading_falls_back_to_the_other_sensor(self):
+        fix = self.locate([70.0, None, 235.0])
+        self.assertEqual((fix.x_cm, fix.y_cm, fix.column), (25.0, 70.0, 0))
+
+    def test_circles_that_miss_fall_back_to_the_nearer_sensor(self):
+        # 30 + 40 < the 100 cm between the sensors: no crossing exists.
+        fix = self.locate([30.0, None, 40.0])
+        self.assertEqual((fix.x_cm, fix.y_cm, fix.column), (25.0, 30.0, 0))
+
+    def test_the_centre_channel_is_ignored(self):
+        self.assertEqual(self.geometry.channels([None, 70.0, None]), [None, None, None])
+        pipe = CoordinatePipeline(TwoSensorGeometry(), config=FilterConfig(hold_readings=0))
+        self.assertEqual(pipe.update([None, 70.0, None], 0).status, STATUS_NO_SIGNAL)
+
+    def test_column_holds_next_to_a_boundary(self):
+        self.assertEqual(self.locate(two_sensor_sample(45.0, 90.0)).column, 0)
+        # 52 cm is past the 50 cm boundary but inside the 8 cm margin.
+        self.assertEqual(self.locate(two_sensor_sample(52.0, 90.0)).column, 0)
+        self.assertEqual(self.locate(two_sensor_sample(60.0, 90.0)).column, 1)
+
+    def test_beyond_the_far_limit_is_out_of_bounds(self):
+        fix = self.locate([None, None, 170.0])
+        self.assertEqual(fix.status, STATUS_OUT_OF_BOUNDS)
 
 
 class CartesianGeometryBehaviour(unittest.TestCase):

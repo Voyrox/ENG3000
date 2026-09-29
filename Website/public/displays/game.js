@@ -24,10 +24,11 @@
 // Two input modes share all of the game logic. Only the cursor source differs:
 //   "mouse"  - canvas.js feeds raw canvas pixels straight from mousemove.
 //              Reached via Skip on the calibration screen.
-//   "sensor" - readSensorCoordinate() picks the sensor that sees the player,
-//              rawToGrid() (callibrate_corners.js) turns that into 0-2 grid
-//              coordinates with (0,0) at BOTTOM-LEFT, and gridToCanvasPoint()
-//              places the cursor. Entered once all three nodes are configured.
+//   "sensor" - readSensorCoordinate() trilaterates the player from the LEFT
+//              and RIGHT sensors, rawToGrid() (callibrate_corners.js) turns
+//              that into 0-2 grid coordinates with (0,0) at BOTTOM-LEFT, and
+//              gridToCanvasPoint() places the cursor. Entered once both
+//              sensors are identified and the corners calibrated.
 //              When the server runs filterRules.py (SERVER_FILTERING on), its
 //              coordinate replaces readSensorCoordinate() for the cursor and
 //              alert; with the flag off (the default) nothing here changes.
@@ -51,9 +52,14 @@
   const LIVES_OPTIONS = [1, 3, 5, 7, 9];
 
   // --- Sensor input ----------------------------------------------------------
-  // No triangulation: the three sensors sit on one line pointing straight
-  // forward, so each owns one column of the board and its distance reading
-  // picks the row. See callibrate_corners.js for the grid mapping.
+  // Two sensors, LEFT and RIGHT, on the screen line pointing straight forward
+  // at the centres of the outer columns. There is no centre sensor: the slot
+  // order stays [left, centre, right] with the centre always empty, so a slot
+  // index is still a grid column. Basic trilateration places the player (see
+  // trilaterate()); callibrate_corners.js maps the depth onto a row.
+  const LEFT_SENSOR = 0;
+  const RIGHT_SENSOR = 2;
+  const PLAY_WIDTH_CM = 150; // matches PlayArea.width_cm in filterRules.py
   const MAX_COORD_CM = 150; // hard ceiling before any calibration exists
 
   // Once the play area is calibrated, the far edge decides what counts as out
@@ -92,14 +98,14 @@
   // truth, which is precisely the jump we set out to reject.
   const SLEW_ANCHOR_TTL_MS = 3000;
   // --- Live-tunable smoothing -----------------------------------------------
-  // The server broadcasts on every node message, so with three sensors at 20Hz
-  // roughly 60 readings arrive each second. All four numbers below are counted
-  // in readings (not render frames), so 100 readings is about 1.7 seconds.
+  // The server broadcasts on every node message, so with two sensors at 20Hz
+  // roughly 40 readings arrive each second. All four numbers below are counted
+  // in readings (not render frames), so 100 readings is about 2.5 seconds.
   //
   // Adjust at runtime from the console with tuneSensor({ ... }) - no reload.
   const tuning = {
     // Votes held in the cell window. Bigger = steadier cursor, slower to follow
-    // a real move. At ~60 readings/sec, 25 is roughly 0.4s of history.
+    // a real move. At ~40 readings/sec, 25 is roughly 0.6s of history.
     cellWindow: 25,
     // Votes a rival cell needs to take over. Must stay above half of
     // cellWindow, otherwise two cells can trade the lead and the cursor flips.
@@ -123,12 +129,19 @@
     }
     return { ...tuning };
   };
-  const COLUMN_MARGIN_CM = 8;     // a rival sensor must beat this to steal the column
+  const COLUMN_MARGIN_CM = 8;     // x must clear a column boundary by this to change column
   const TOO_CLOSE_FRAMES = 2;     // consecutive raw frames needed to raise the alert
 
-  // Bottom-left HUD. The position map sits directly above the sensor panel.
+  // HUD layout (see renderHud()). Bottom-left, from the corner up: the
+  // miniature cursor, the sensor panel, then the position map.
+  const HUD_EDGE = 12;            // px from the canvas edge
+  const HUD_GAP = 10;             // px between stacked panels
+  const SENSOR_PANEL_W = 322;     // px
   const SENSOR_PANEL_H = 132;     // px
-  const MAP_AREA_WIDTH_CM = 150;  // matches PlayArea.width_cm in filterRules.py
+  const STATS_PANEL_W = 270;      // px; LIVE STATS, left gutter
+  const STATS_PANEL_MIN_W = 190;  // px; narrower and the values collide with the labels
+  const CHARTS_PANEL_MAX_H = 300; // px; LIVE DATA, under the legend
+  const MAP_AREA_WIDTH_CM = PLAY_WIDTH_CM;
   const MAP_MIN_SIZE = 110;       // px; below this the grid stops being legible
   const MAP_MAX_SIZE = 170;       // px
   const MAP_GAP = 10;             // px between the map and the sensor panel
@@ -339,7 +352,14 @@
     gameState.cursor = { x: null, y: null, inBounds: true };
     gameState.sensor = emptySensorState();
     resetSensorFilters();
+    roundStats()?.reset(gameState.inputMode);
   };
+
+  // The live statistics (gameStats.js). Optional: the headless parity run loads
+  // game.js without it, so every report goes through this and may be skipped.
+  function roundStats() {
+    return window.GameStats || null;
+  }
 
   window.getGameState = function getGameState() {
     return gameState;
@@ -403,6 +423,7 @@
       } else {
         updateSensorCursor(canvas, orderedNodes);
       }
+      recordSensorReading(now, orderedNodes);
     }
 
     if (gameState.status !== "playing") return;
@@ -414,6 +435,7 @@
 
     const elapsed = now - gameState.lastTickTime;
     gameState.lastTickTime = now;
+    roundStats()?.onTick(elapsed, statsFrame(canvas));
 
     // Hold the round while the player is too close, out of bounds, or invisible
     // to the sensors. Advancing lastTickTime above keeps the clock from jumping
@@ -439,6 +461,7 @@
     // Mole timed out without being hit -> remove it and schedule the next one.
     if (gameState.activeHole !== -1 && now - gameState.moleSpawnedAt >= gameState.moleDurationMs) {
       const missedMole = gameState.moleType !== "bomb"; // letting a bomb expire is fine, missing a mole costs a life
+      roundStats()?.onExpire(gameState.moleType);
       gameState.activeHole = -1;
       gameState.moleWounded = false;
       gameState.nextSpawnAt = now + randomBetween(MIN_SPAWN_DELAY_MS, MAX_SPAWN_DELAY_MS);
@@ -462,8 +485,86 @@
       gameState.moleSpawnedAt = now;
       gameState.moleType = pickRandomMoleType();
       gameState.moleWounded = false;
+      roundStats()?.onSpawn(gameState.moleType);
     }
   };
+
+  // --- Live statistics feed ----------------------------------------------------
+
+  // Grid cell (gx, gy; origin bottom-left) -> hole index (0 top-left, reading order).
+  function holeForCell(gx, gy) {
+    return (2 - gy) * 3 + gx;
+  }
+
+  function holeAtPoint(layout, x, y) {
+    return layout.holes.find((h) => x >= h.x && x <= h.x + h.size && y >= h.y && y <= h.y + h.size) || null;
+  }
+
+  // What GameStats.onTick() needs about this frame. positionCm puts both input
+  // modes on one centimetre scale (the board is PLAY_WIDTH_CM across), so
+  // cursor travel means the same thing in either.
+  function statsFrame(canvas) {
+    const sensor = gameState.sensor;
+    const sensorMode = gameState.inputMode === "sensor";
+    let cell = null;
+    let positionCm = null;
+    let onBoard = false;
+
+    if (sensorMode) {
+      if (Number.isInteger(sensor.gx) && Number.isInteger(sensor.gy)) cell = holeForCell(sensor.gx, sensor.gy);
+      const live = sensor.status === "ok" && !sensor.held;
+      if (live && Number.isFinite(sensor.xCm) && Number.isFinite(sensor.yCm)) {
+        positionCm = { x: sensor.xCm, y: sensor.yCm };
+      }
+      onBoard = sensor.status === "ok";
+    } else if (canvas && gameState.cursor.x !== null) {
+      const layout = window.getGameGridLayout(canvas);
+      const hole = holeAtPoint(layout, gameState.cursor.x, gameState.cursor.y);
+      cell = hole ? hole.index : null;
+      const scale = PLAY_WIDTH_CM / layout.gridSize;
+      positionCm = {
+        x: (gameState.cursor.x - layout.gridLeft) * scale,
+        y: (layout.gridTop + layout.gridSize - gameState.cursor.y) * scale,
+      };
+      onBoard = positionCm.x >= 0 && positionCm.x <= PLAY_WIDTH_CM
+        && positionCm.y >= 0 && positionCm.y <= PLAY_WIDTH_CM;
+    }
+
+    return {
+      blocked: isSensorBlocked(),
+      held: sensorMode && Boolean(sensor.held),
+      sensorStatus: sensorMode ? sensor.status : "ok",
+      cell,
+      onBoard,
+      positionCm,
+      score: gameState.score,
+      level: gameState.level,
+      lives: settings.testMode ? null : gameState.lives,
+    };
+  }
+
+  // One stats sample per NEW sensor reading (canvas.js bumps sensorFrameSeq on
+  // every nodes:update), from whichever path - browser or server - produced
+  // gameState.sensor this frame. Only while a round is actually playing.
+  let statsFrameSeq = -1;
+
+  function recordSensorReading(now, orderedNodes) {
+    if (sensorFrameSeq === statsFrameSeq) return;
+    statsFrameSeq = sensorFrameSeq;
+    if (gameState.status !== "playing") return;
+
+    const sensor = gameState.sensor;
+    const raw = sensor.raw || [null, null, null];
+    const list = Array.isArray(orderedNodes) ? orderedNodes : [];
+    const rateOf = (node) => (node && Number.isFinite(node.rps) ? node.rps : null);
+    const usable = sensor.status === "ok" && !sensor.held;
+    roundStats()?.onSensorReading(now, {
+      raw: [raw[LEFT_SENSOR], raw[RIGHT_SENSOR]],
+      source: usable ? sensor.source || null : null,
+      rejects: [sensorFilters[LEFT_SENSOR].rejectCount, sensorFilters[RIGHT_SENSOR].rejectCount],
+      rate: [rateOf(list[LEFT_SENSOR]), rateOf(list[RIGHT_SENSOR])],
+    });
+  }
 
   // Mouse-mode coordinate input. Ignored in sensor mode so a stray mouse
   // movement cannot fight the sensors for control of the cursor.
@@ -506,10 +607,14 @@
 
     const now = performance.now();
     const hitType = gameState.moleType;
+    // Pauses and sensor holds already shift moleSpawnedAt, so this is time the
+    // mole was actually up. Measured to the FIRST hit, before a wound resets it.
+    const reactionMs = now - gameState.moleSpawnedAt;
 
     // Hat (super) moles take two hits to defeat. The first hit just wounds it and
     // refreshes its timer for the finishing blow - no score/life change yet.
     if (hitType === "super" && !gameState.moleWounded) {
+      roundStats()?.onFirstHit("super", reactionMs);
       gameState.moleWounded = true;
       gameState.moleSpawnedAt = now;
       gameState.hitFlash = { hole: holeIndex, until: now + HIT_FEEDBACK_MS, type: "wounded" };
@@ -519,8 +624,11 @@
     if (hitType === "bomb") {
       gameState.score = Math.max(0, gameState.score - BOMB_PENALTY);
       loseLife();
+      roundStats()?.onBombHit();
     } else {
       gameState.score += hitType === "super" ? SUPER_MOLE_POINTS : 1;
+      if (hitType === "mole") roundStats()?.onFirstHit("mole", reactionMs);
+      roundStats()?.onDefeat(hitType, holeIndex);
     }
 
     gameState.hitFlash = { hole: holeIndex, until: now + HIT_FEEDBACK_MS, type: hitType };
@@ -705,11 +813,76 @@
   let lastColumn = null;
   let closeStreak = 0;
 
-  // Input:  [left, centre, right] node records, nulls allowed (calibration order)
+  // --- Two-sensor trilateration ----------------------------------------------
+  // The sensors sit on the screen line at the centres of the outer columns.
+  // Each distance is a circle around its sensor; where the two circles cross
+  // is the player. x picks the column (the centre one included) and y, the
+  // depth from the screen, picks the row. Deliberately basic - how the two
+  // sensors should really detect a player is being worked on separately.
+  // filterRules.py (TwoSensorGeometry) is the parity-tested Python port.
+
+  function columnCentreCm(column) {
+    return ((column + 0.5) * PLAY_WIDTH_CM) / 3;
+  }
+
+  function columnAtCm(x) {
+    return Math.max(0, Math.min(2, Math.floor(x / (PLAY_WIDTH_CM / 3))));
+  }
+
+  function isInPlay(column, distance) {
+    return window.isWithinPlayArea ? window.isWithinPlayArea(column, distance) : true;
+  }
+
+  // Where the player is, from the filtered [left, centre, right] distances.
+  // Returns { x, y, source } in cm, or null when neither sensor has a reading.
+  // source is "both" for a trilaterated fix, else the one sensor used. Pure:
+  // no hysteresis state is touched, and x is not yet clamped to the board.
+  //
+  // A reading only counts toward the crossing if it is inside its own
+  // column's play area. When only one does, or the circles miss each other
+  // (one sensor is seeing something else), the nearer sensor places the
+  // player straight in front of itself.
+  function trilaterate(filtered) {
+    const dL = filtered[LEFT_SENSOR];
+    const dR = filtered[RIGHT_SENSOR];
+    const inL = dL !== null && isInPlay(LEFT_SENSOR, dL);
+    const inR = dR !== null && isInPlay(RIGHT_SENSOR, dR);
+
+    if (inL && inR) {
+      const xLeft = columnCentreCm(LEFT_SENSOR);
+      const base = columnCentreCm(RIGHT_SENSOR) - xLeft;
+      const along = (dL * dL - dR * dR + base * base) / (2 * base);
+      const h2 = dL * dL - along * along;
+      if (h2 >= 0) return { x: xLeft + along, y: Math.sqrt(h2), source: "both" };
+    }
+
+    // One sensor on its own: the nearer in-bounds reading, or failing that the
+    // nearer reading of any kind. Left wins a tie.
+    const candidates = [];
+    if (dL !== null) candidates.push({ column: LEFT_SENSOR, distance: dL, inBounds: inL });
+    if (dR !== null) candidates.push({ column: RIGHT_SENSOR, distance: dR, inBounds: inR });
+    const inBounds = candidates.filter((candidate) => candidate.inBounds);
+    const pool = inBounds.length > 0 ? inBounds : candidates;
+
+    let best = null;
+    pool.forEach((candidate) => {
+      if (best === null || candidate.distance < best.distance) best = candidate;
+    });
+    if (best === null) return null;
+    return {
+      x: columnCentreCm(best.column),
+      y: best.distance,
+      source: best.column === LEFT_SENSOR ? "left" : "right",
+    };
+  }
+
+  // Input:  [left, centre, right] node records, nulls allowed (calibration order).
+  //         The centre is ignored: the rig has no centre sensor.
   // Output: {
   //   status:     "ok" | "too-close" | "no-signal" | "out-of-bounds",
-  //   column:     which sensor saw the player - 0 left, 1 centre, 2 right,
-  //   distanceCm: that sensor's conditioned reading,
+  //   column:     the column the player is in - 0 left, 1 centre, 2 right,
+  //   distanceCm: the player's depth from the screen (y),
+  //   xCm, yCm:   the trilaterated position in cm, source: see trilaterate(),
   //   raw:        [l, c, r] straight off the wire, for debugging,
   //   filtered:   [l, c, r] after median + hold,
   //   configured: how many sensors currently have a usable value
@@ -718,7 +891,7 @@
     const list = Array.isArray(orderedNodes) ? orderedNodes : [];
     const now = performance.now();
 
-    const raw = [readDistance(list[0]), readDistance(list[1]), readDistance(list[2])];
+    const raw = [readDistance(list[LEFT_SENSOR]), null, readDistance(list[RIGHT_SENSOR])];
     const filtered = raw.map((value, index) => conditionSensor(sensorFilters[index], value, now));
     const configured = filtered.filter((d) => d !== null).length;
 
@@ -726,12 +899,15 @@
     const isNewReading = sensorFrameSeq !== lastSeenFrameSeq;
     lastSeenFrameSeq = sensorFrameSeq;
 
-    const base = { raw, filtered, configured, isNewReading, column: null, distanceCm: null };
+    const base = {
+      raw, filtered, configured, isNewReading,
+      column: null, distanceCm: null, xCm: null, yCm: null, source: null,
+    };
 
     // Safety runs on the RAW readings, never the filtered ones: a median window
     // full of safe distances would smooth away the very spike the alert exists
     // to catch. Two consecutive frames (100 ms at 20 Hz) are required so that
-    // crosstalk between the three sensors cannot raise a false alarm.
+    // crosstalk between the two sensors cannot raise a false alarm.
     const rawMin = raw.reduce(
       (min, value) => (value === null ? min : min === null || value < min ? value : min),
       null
@@ -743,69 +919,38 @@
     }
     const tooClose = closeStreak >= TOO_CLOSE_FRAMES;
 
-    // The player stands in front of one column at a time, so the nearest
-    // reading identifies which. Anything further away is a wall or a side lobe.
-    //
-    // A sensor reporting a distance inside its own play area always beats one
-    // reporting a distance outside it, however near that is: a sensor staring
-    // past the board is not seeing the player, and letting it win the column on
-    // proximity alone is how the cursor ends up in the wrong place.
-    const candidates = [];
-    filtered.forEach((distance, index) => {
-      if (distance === null) return;
-      candidates.push({
-        index,
-        distance,
-        inBounds: window.isWithinPlayArea ? window.isWithinPlayArea(index, distance) : true,
-      });
-    });
+    const position = trilaterate(filtered);
+    const x = position ? Math.max(0, Math.min(PLAY_WIDTH_CM, position.x)) : null;
 
-    const inBounds = candidates.filter((candidate) => candidate.inBounds);
-    const pool = inBounds.length > 0 ? inBounds : candidates;
-
-    let column = null;
-    let best = null;
-    pool.forEach((candidate) => {
-      if (best === null || candidate.distance < best) {
-        best = candidate.distance;
-        column = candidate.index;
-      }
-    });
-
-    // Safety outranks every other state, including loss of signal.
+    // Safety outranks every other state, including loss of signal. The column
+    // is reported without advancing the hysteresis below.
     if (tooClose) {
+      const column = position ? columnAtCm(x) : null;
       return { ...base, column, distanceCm: rawMin, status: "too-close" };
     }
 
-    if (best === null) {
+    if (position === null) {
       lastColumn = null;
       return { ...base, status: "no-signal" };
     }
 
-    // Column hysteresis: a rival sensor must be clearly nearer before it steals
-    // the column, otherwise noise flicks the cursor between adjacent columns.
-    if (lastColumn !== null && column !== lastColumn && filtered[lastColumn] !== null) {
-      const incumbentInBounds = window.isWithinPlayArea
-        ? window.isWithinPlayArea(lastColumn, filtered[lastColumn])
-        : true;
-      const challengerInBounds = pool === inBounds;
+    const y = position.y;
+    let column = columnAtCm(x);
 
-      // Only let the incumbent hold on if it is still a legitimate candidate.
-      // An out-of-bounds incumbent must never block an in-bounds challenger.
-      const incumbentStillValid = incumbentInBounds || !challengerInBounds;
-
-      if (incumbentStillValid && best > filtered[lastColumn] - COLUMN_MARGIN_CM) {
-        column = lastColumn;
-        best = filtered[lastColumn];
-      }
+    // Column hysteresis: next to a column boundary the previous column holds,
+    // so noise does not flick the cursor between neighbours.
+    if (lastColumn !== null && Math.abs(column - lastColumn) === 1) {
+      const boundary = (PLAY_WIDTH_CM / 3) * Math.max(column, lastColumn);
+      if (Math.abs(x - boundary) < COLUMN_MARGIN_CM) column = lastColumn;
     }
 
-    if (best > maxCoordCm()) {
-      return { ...base, column, distanceCm: best, status: "out-of-bounds" };
+    const fix = { ...base, column, distanceCm: y, xCm: x, yCm: y, source: position.source };
+    if (y > maxCoordCm()) {
+      return { ...fix, status: "out-of-bounds" };
     }
 
     lastColumn = column;
-    return { ...base, column, distanceCm: best, status: "ok" };
+    return { ...fix, status: "ok" };
   }
 
   window.readSensorCoordinate = readSensorCoordinate;
@@ -1085,6 +1230,40 @@
     return { x: 12, y: 12, width: 44, height: 44 };
   }
 
+  // Score + lives, right of the pause icon. The font sizes come with it
+  // because the panel's height is built from them.
+  function getScorePanelRect(canvas) {
+    const width = canvas.clientWidth || canvas.width;
+    const pauseLayout = getGamePauseLayout();
+    const scoreFontSize = Math.max(22, Math.min(30, width * 0.024));
+    const livesFontSize = Math.max(32, Math.min(46, width * 0.036));
+    return {
+      x: pauseLayout.x + pauseLayout.width + 10,
+      y: pauseLayout.y,
+      w: Math.max(190, Math.min(260, width * 0.2)),
+      h: scoreFontSize + livesFontSize + 40,
+      scoreFontSize,
+      livesFontSize,
+    };
+  }
+
+  // The How to Play legend, right-hand side: a header and three entries.
+  const LEGEND_HEADER_H = 40;
+  const LEGEND_ENTRY_H = 82;
+  const LEGEND_ENTRIES = 3;
+
+  function getLegendRect(canvas) {
+    const width = canvas.clientWidth || canvas.width;
+    const height = canvas.clientHeight || canvas.height;
+    const w = Math.max(220, Math.min(300, width * 0.22));
+    return {
+      x: width - 12 - w,
+      y: Math.max(140, height * 0.22),
+      w,
+      h: LEGEND_HEADER_H + LEGEND_ENTRIES * LEGEND_ENTRY_H + 14,
+    };
+  }
+
   window.getGamePauseButtonAtPoint = function getGamePauseButtonAtPoint(canvas, x, y) {
     if (gameState.status !== "playing") return null;
     return pointInRect(x, y, getGamePauseLayout()) ? { type: "pause" } : null;
@@ -1295,20 +1474,28 @@
   // Always-on sensor readout. Shows every sensor's raw and conditioned value at
   // once so the rig can be diagnosed mid-round without opening the console.
   // The same data is available as getSensorDebug() from the browser console.
-  const SENSOR_ROW_LABELS = ["L", "C", "R"];
+  const SENSOR_ROWS = [
+    { index: LEFT_SENSOR, label: "L", source: "left" },
+    { index: RIGHT_SENSOR, label: "R", source: "right" },
+  ];
+  const SOURCE_LABELS = { both: "L+R", left: "L only", right: "R only" };
 
   function formatCm(value) {
     return value === null || value === undefined ? "--" : value.toFixed(1);
   }
 
-  function renderSensorPanel(ctx, canvas) {
-    const height = canvas.clientHeight || canvas.height;
+  // Was this sensor part of the fix? The browser path says which sensors the
+  // trilateration used; the server path does not, so fall back to the column.
+  function sensorUsed(sensor, row) {
+    if (sensor.source) return sensor.source === "both" || sensor.source === row.source;
+    return sensor.column === row.index;
+  }
+
+  function renderSensorPanel(ctx, x, y) {
     const sensor = gameState.sensor;
 
-    const panelW = 322;
+    const panelW = SENSOR_PANEL_W;
     const panelH = SENSOR_PANEL_H;
-    const x = 12;
-    const y = height - panelH - 12;
     const rowH = 20;
 
     drawHudPanel(ctx, x, y, panelW, panelH, 12);
@@ -1331,8 +1518,9 @@
     const raw = sensor.raw || [null, null, null];
     const filtered = sensor.filtered || [null, null, null];
 
-    for (let i = 0; i < 3; i++) {
-      const rowY = y + 27 + rowH * (i + 1);
+    SENSOR_ROWS.forEach((row, k) => {
+      const i = row.index;
+      const rowY = y + 27 + rowH * (k + 1);
       const live = filtered[i] !== null && filtered[i] !== undefined;
       const echoing = raw[i] !== null && raw[i] !== undefined;
 
@@ -1347,7 +1535,7 @@
 
       ctx.font = "bold 12px monospace";
       ctx.fillStyle = "#f4f4f5";
-      ctx.fillText(SENSOR_ROW_LABELS[i], x + 33, rowY);
+      ctx.fillText(row.label, x + 33, rowY);
 
       ctx.font = "12px monospace";
       ctx.fillStyle = echoing ? "#cdd6f4" : "#63736f";
@@ -1356,11 +1544,23 @@
       ctx.fillStyle = live ? "#cdd6f4" : "#63736f";
       ctx.fillText(formatCm(filtered[i]), x + 172, rowY);
 
-      if (sensor.column === i) {
+      if (sensorUsed(sensor, row)) {
         ctx.fillStyle = "#facc15";
         ctx.font = "bold 12px monospace";
         ctx.fillText("<--", x + 254, rowY);
       }
+    });
+
+    // Trilaterated position, and which sensors it came from.
+    const posY = y + 27 + rowH * 3;
+    ctx.font = "12px monospace";
+    if (Number.isFinite(sensor.xCm) && Number.isFinite(sensor.yCm)) {
+      ctx.fillStyle = "#cdd6f4";
+      const from = SOURCE_LABELS[sensor.source] ? `  (${SOURCE_LABELS[sensor.source]})` : "";
+      ctx.fillText(`x ${formatCm(sensor.xCm)}  y ${formatCm(sensor.yCm)} cm${from}`, x + 16, posY);
+    } else {
+      ctx.fillStyle = "#63736f";
+      ctx.fillText("x --  y -- cm", x + 16, posY);
     }
 
     // Resolved fix
@@ -1419,10 +1619,9 @@
     if (coordinateMap) coordinateMap.clear();
   }
 
-  // Today's rig cannot resolve position within a column, so x is the centre of
-  // whichever column won and y is that sensor's filtered distance. While the
-  // cursor is being held through bad readings the fix belongs to the bad
-  // reading, so the last good position is shown instead.
+  // The trilaterated position (x across, y depth) in cm. While the cursor is
+  // being held through bad readings the fix belongs to the bad reading, so the
+  // last good position is shown instead.
   function mapCoordinateFromSensor(sensor) {
     const label = sensor.held ? "held"
       : sensor.status === "ok" ? null
@@ -1433,12 +1632,12 @@
                y: lastMapPoint ? lastMapPoint.y : null, label };
     }
 
-    const hasFix = Number.isInteger(sensor.column) && Number.isFinite(sensor.distanceCm);
+    const hasFix = Number.isFinite(sensor.xCm) && Number.isFinite(sensor.yCm);
     if (!hasFix) return { x: null, y: null, label };
 
     // Out-of-bounds fixes still carry a position; the map pins those to its
     // edge in red, which shows the player which way they went.
-    const point = { x: ((sensor.column + 0.5) * MAP_AREA_WIDTH_CM) / 3, y: sensor.distanceCm };
+    const point = { x: sensor.xCm, y: sensor.yCm };
     if (sensor.status === "ok") lastMapPoint = point;
     return { ...point, label };
   }
@@ -1452,15 +1651,19 @@
     return { x: sensor.xCm, y: sensor.yCm, label };
   }
 
-  function renderCoordinateMap(ctx, canvas) {
+  // Drawn with its bottom edge at `bottom`, never reaching above `minTop`.
+  // Returns the map's top edge, or `bottom` when there is no room for even the
+  // smallest legible map.
+  function renderCoordinateMap(ctx, canvas, bottom, minTop) {
     const map = getCoordinateMap();
-    if (!map) return;
-    const height = canvas.clientHeight || canvas.height;
+    if (!map) return bottom;
 
-    // Fit the gutter left of the board, directly above the sensor panel that
-    // already owns the bottom-left corner.
+    // Fit the gutter left of the board, and the room above the sensor panel.
     const gutter = window.getGameGridLayout(canvas).gridLeft;
     map.size = Math.max(MAP_MIN_SIZE, Math.min(MAP_MAX_SIZE, gutter - 48));
+    const chrome = map.height - map.size;
+    map.size = Math.min(map.size, bottom - minTop - chrome);
+    if (map.size < MAP_MIN_SIZE) return bottom;
     map.depthCm = maxCoordCm();
 
     // Draw the SAME row boundaries rawToGrid() uses, and highlight the cell the
@@ -1477,25 +1680,131 @@
       ? { gx: sensor.gx, gy: sensor.gy } : null;
     map.update(x, y, label, cell);
 
-    const sensorPanelTop = height - SENSOR_PANEL_H - 12;
-    map.render(ctx, 12, sensorPanelTop - MAP_GAP - map.height);
+    const top = bottom - map.height;
+    map.render(ctx, HUD_EDGE, top);
+    return top;
   }
 
-  function renderInputReadout(ctx, canvas) {
-    const height = canvas.clientHeight || canvas.height;
+  // --- Miniature cursor ------------------------------------------------------
+  // A small copy of the board in the bottom-left corner with the LIVE cursor on
+  // it. In sensor mode that is the trilaterated position before the cell vote,
+  // so it moves continuously while the big cursor snaps from cell to cell.
+
+  let lastMiniPoint = null;
+
+  function miniCursorView(canvas) {
+    const layout = window.getGameGridLayout(canvas);
+    const view = {
+      point: null,
+      inBounds: true,
+      cell: null,
+      activeHole: gameState.activeHole,
+      activeType: gameState.moleType,
+      footer: "",
+      label: null,
+    };
 
     if (gameState.inputMode === "sensor") {
-      renderSensorPanel(ctx, canvas);
-      renderCoordinateMap(ctx, canvas);
-      return;
+      const sensor = gameState.sensor;
+      if (Number.isInteger(sensor.gx) && Number.isInteger(sensor.gy)) view.cell = holeForCell(sensor.gx, sensor.gy);
+      view.label = sensor.held ? "HELD" : null;
+
+      const live = !sensor.held && Number.isFinite(sensor.xCm) && Number.isFinite(sensor.yCm);
+      if (live) {
+        // Depth as a share of this column's calibrated play depth, the screen
+        // edge at the bottom - the same rows rawToGrid() uses.
+        const bounds = window.getCalibrationBounds ? window.getCalibrationBounds() : null;
+        const span = bounds && bounds.perColumn
+          ? bounds.perColumn[columnAtCm(sensor.xCm)]
+          : { near: 0, far: maxCoordCm() };
+        const up = (sensor.yCm - span.near) / (span.far - span.near);
+        const point = {
+          fx: sensor.xCm / PLAY_WIDTH_CM,
+          fy: 1 - up,
+          inBounds: sensor.status === "ok" && up >= 0 && up <= 1,
+          footer: `x ${sensor.xCm.toFixed(0)}  y ${sensor.yCm.toFixed(0)} cm`,
+        };
+        if (sensor.status === "ok") lastMiniPoint = point;
+        view.point = { fx: point.fx, fy: point.fy };
+        view.inBounds = point.inBounds;
+        view.footer = point.footer;
+      } else if (sensor.held && lastMiniPoint) {
+        view.point = { fx: lastMiniPoint.fx, fy: lastMiniPoint.fy };
+        view.footer = lastMiniPoint.footer;
+      } else {
+        view.footer = String(sensor.status).replace(/-/g, " ");
+      }
+      return view;
     }
 
-    drawHudPanel(ctx, 12, height - 52, 176, 40, 10);
-    ctx.textAlign = "left";
-    ctx.font = "bold 14px monospace";
-    ctx.fillStyle = "#9298aa";
-    ctx.fillText("Input: MOUSE", 26, height - 27);
-    ctx.textAlign = "start";
+    if (gameState.cursor.x === null) {
+      view.footer = "move the mouse";
+      return view;
+    }
+    const fx = (gameState.cursor.x - layout.gridLeft) / layout.gridSize;
+    const fy = (gameState.cursor.y - layout.gridTop) / layout.gridSize;
+    const hole = holeAtPoint(layout, gameState.cursor.x, gameState.cursor.y);
+    view.point = { fx, fy };
+    view.inBounds = fx >= 0 && fx <= 1 && fy >= 0 && fy <= 1;
+    view.cell = hole ? hole.index : null;
+    if (hole) view.footer = `hole ${hole.index + 1}`;
+    else view.footer = view.inBounds ? "between holes" : "off the board";
+    return view;
+  }
+
+  // --- HUD layout ------------------------------------------------------------
+  // Bottom-left, from the corner up: the miniature cursor; in sensor mode the
+  // sensor panel on it and the position map on that. LIVE STATS fills the room
+  // left between that stack and the score panel, showing as many rows as fit.
+  // LIVE DATA (box plot and bar charts) sits under the How to Play legend.
+
+  function renderHud(ctx, canvas) {
+    const height = canvas.clientHeight || canvas.height;
+    const view = window.GameStatsView || null;
+    const miniSize = view ? view.MINI_CURSOR : { w: 150, h: 180 };
+    const mini = { x: HUD_EDGE, y: height - HUD_EDGE - miniSize.h, w: miniSize.w, h: miniSize.h };
+    if (view) view.renderMiniCursor(ctx, mini, miniCursorView(canvas));
+
+    const score = getScorePanelRect(canvas);
+    const minTop = score.y + score.h + HUD_GAP;
+    let stackTop = mini.y;
+
+    if (gameState.inputMode === "sensor") {
+      stackTop -= HUD_GAP + SENSOR_PANEL_H;
+      renderSensorPanel(ctx, HUD_EDGE, stackTop);
+      stackTop = renderCoordinateMap(ctx, canvas, stackTop - MAP_GAP, minTop);
+    } else {
+      const pillX = mini.x + mini.w + HUD_GAP;
+      drawHudPanel(ctx, pillX, height - 52, 176, 40, 10);
+      ctx.textAlign = "left";
+      ctx.font = "bold 14px monospace";
+      ctx.fillStyle = "#9298aa";
+      ctx.fillText("Input: MOUSE", pillX + 14, height - 27);
+      ctx.textAlign = "start";
+    }
+
+    const stats = roundStats();
+    if (!view || !stats) return;
+    const now = performance.now();
+    const snap = stats.snapshot(now);
+
+    const gutter = window.getGameGridLayout(canvas).gridLeft - HUD_EDGE * 2;
+    const statsRect = { x: HUD_EDGE, y: minTop, w: Math.min(STATS_PANEL_W, gutter), h: stackTop - HUD_GAP - minTop };
+    if (statsRect.w >= STATS_PANEL_MIN_W && statsRect.h >= view.statsHeight(3)) {
+      view.renderStats(ctx, statsRect, snap);
+    }
+
+    const legend = getLegendRect(canvas);
+    const chartsTop = legend.y + legend.h + HUD_GAP;
+    const chartsRect = {
+      x: legend.x, y: chartsTop, w: legend.w,
+      h: Math.min(CHARTS_PANEL_MAX_H, height - HUD_EDGE - chartsTop),
+    };
+    if (chartsRect.h >= view.CHARTS_MIN_H) {
+      const bounds = window.getCalibrationBounds ? window.getCalibrationBounds() : null;
+      const band = bounds ? { from: bounds.nearCm, to: bounds.farCm } : null;
+      view.renderCharts(ctx, chartsRect, snap, now, band);
+    }
   }
 
   window.renderGame = function renderGame(ctx, canvas) {
@@ -1537,14 +1846,8 @@
     }
 
     // HUD: pause + score + lives share one row on the left, timer center, level right.
-    const scoreFontSize = Math.max(22, Math.min(30, width * 0.024));
-    const livesFontSize = Math.max(32, Math.min(46, width * 0.036));
-    const scorePanel = {
-      x: pauseLayout.x + pauseLayout.width + 10,
-      y: pauseLayout.y,
-      w: Math.max(190, Math.min(260, width * 0.2)),
-      h: scoreFontSize + livesFontSize + 40,
-    };
+    const scorePanel = getScorePanelRect(canvas);
+    const { scoreFontSize, livesFontSize } = scorePanel;
     drawHudPanel(ctx, scorePanel.x, scorePanel.y, scorePanel.w, scorePanel.h, 14);
 
     ctx.textAlign = "left";
@@ -1687,18 +1990,18 @@
     });
 
     // Floating "How to Play" legend, right-hand side.
-    const legendWidth = Math.max(220, Math.min(300, width * 0.22));
-    const legendX = width - 12 - legendWidth;
-    const legendY = Math.max(140, height * 0.22);
+    const legendRect = getLegendRect(canvas);
+    const legendWidth = legendRect.w;
+    const legendX = legendRect.x;
+    const legendY = legendRect.y;
     const legendEntries = [
       { imgKey: "mole", color: "#8b5e3c", title: "Mole", lines: ["Whack it for", "+1 point."] },
       { imgKey: "super_mole", color: "#eab308", title: "Hat Mole", lines: ["2 hits to defeat,", `worth +${SUPER_MOLE_POINTS} points.`] },
       { imgKey: "bomb", color: "#ef4444", title: "Bomb", lines: [`Avoid! -${BOMB_PENALTY} points`, "and a lost life."] },
     ];
-    const legendEntryHeight = 82;
-    const legendHeaderHeight = 40;
-    const legendHeight = legendHeaderHeight + legendEntries.length * legendEntryHeight + 14;
-    drawHudPanel(ctx, legendX, legendY, legendWidth, legendHeight, 14);
+    const legendEntryHeight = LEGEND_ENTRY_H;
+    const legendHeaderHeight = LEGEND_HEADER_H;
+    drawHudPanel(ctx, legendX, legendY, legendWidth, legendRect.h, 14);
 
     ctx.textAlign = "left";
     ctx.fillStyle = "#f4f4f5";
@@ -1758,7 +2061,7 @@
       }
     }
 
-    renderInputReadout(ctx, canvas);
+    renderHud(ctx, canvas);
 
     if (gameState.inputMode === "sensor" && gameState.status === "playing") {
       renderSensorStatusOverlay(ctx, canvas);

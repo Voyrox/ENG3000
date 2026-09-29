@@ -3,7 +3,10 @@ const ctx = c.getContext("2d");
 
 const nodes = new Map();
 const logsBuffer = new Map();
+// Node id per [left, centre, right]. The rig has two sensors, so the centre
+// slot is always empty; only SENSOR_SLOTS are ever filled.
 const calibrateSlotNodeIds = [null, null, null];
+const SENSOR_SLOTS = [0, 2];
 let selectedNodeId = null;
 let viewport = { width: 0, height: 0, dpr: 1 };
 const wsProtocol = location.protocol === "https:" ? "wss" : "ws";
@@ -124,7 +127,7 @@ function getSortedNodes() {
 }
 
 // --- Console diagnostics ---------------------------------------------------
-// With three sensors the node stream arrives at up to 60 messages a second, so
+// With two sensors the node stream arrives at up to 40 messages a second, so
 // the periodic dump is throttled. Events that are rare and interesting - a node
 // dropping out, the sensor state changing - are logged the moment they happen.
 
@@ -198,8 +201,9 @@ function logNodes() {
   nodeLogging.lastAssignment = assignment;
 
   if (assignmentChanged) {
-    const named = window.getSensorAssignment()
-      .map((id, i) => `${SLOT_NAMES[i]}=${id === null ? "--" : "node " + id}`)
+    const assignment = window.getSensorAssignment();
+    const named = SENSOR_SLOTS
+      .map((i) => `${SLOT_NAMES[i]}=${assignment[i] === null ? "--" : "node " + assignment[i]}`)
       .join("  ");
     console.info(`[assign] ${named}`);
   }
@@ -280,15 +284,16 @@ function updateCalibrateSlots(nextNodes) {
     calibrateSlotNodeIds[index] = nodeId !== null && nextIds.has(nodeId) ? nodeId : null;
   });
 
+  // Fill the remaining sensor slots, never the centre, which has no sensor.
   nextNodes
     .slice()
     .sort((a, b) => a.id - b.id)
     .forEach((node) => {
       if (calibrateSlotNodeIds.includes(node.id)) return;
 
-      const emptyIndex = calibrateSlotNodeIds.indexOf(null);
-      if (emptyIndex !== -1) {
-        calibrateSlotNodeIds[emptyIndex] = node.id;
+      const emptySlot = SENSOR_SLOTS.find((slot) => calibrateSlotNodeIds[slot] === null);
+      if (emptySlot !== undefined) {
+        calibrateSlotNodeIds[emptySlot] = node.id;
       }
     });
 }
@@ -299,17 +304,17 @@ function getCalibrateNodes() {
 
 // Auto-advance fires at most once per visit to the calibration screen. Without
 // this latch a nodes:update arriving milliseconds after the user presses Back
-// on the corners page would bounce them straight forward again - with three
-// nodes online the update stream runs at up to 60 messages per second.
+// on the corners page would bounce them straight forward again - with two
+// nodes online the update stream runs at up to 40 messages per second.
 let calibrateAutoContinueArmed = true;
 
-// All three sensors online means the rig is ready, so move straight on to
+// Both sensors identified means the rig is ready, so move straight on to
 // corner calibration without waiting for a button press.
 function maybeAutoContinueCalibration() {
   if (screen !== "calibrate") return;
 
-  // Gate on identification, not just connectivity: three online sensors are
-  // useless until we know which is which.
+  // Gate on identification, not just connectivity: two online sensors are
+  // useless until we know which is left and which is right.
   if (!window.isSensorAssignmentComplete()) {
     calibrateAutoContinueArmed = true;
     return;
