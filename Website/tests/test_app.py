@@ -893,7 +893,7 @@ class NodeConnectionTests(BrokerTestCase):
 
     def test_the_assigned_id_is_sent_on_the_first_line(self):
         conn = self.connect(b"\r\n")
-        self.assertEqual(conn.sent, ["1\n"])
+        self.assertEqual(conn.sent[0], "1\n")
         self.assertEqual(list(app.nodes), [1])
 
     def test_the_socket_is_told_to_block_while_the_handshake_arrives(self):
@@ -904,7 +904,7 @@ class NodeConnectionTests(BrokerTestCase):
     def test_a_reconnecting_node_gets_its_old_id_back(self):
         self.connect(b'\r\n', ['{"mac":"AA:BB","avg":1}\n'], ("10.0.0.1", 1))
         conn = self.connect(b'{"nodeId":1,"mac":"AA:BB"}\r\n', [], ("10.0.0.9", 2))
-        self.assertEqual(conn.sent, ["1\n"])
+        self.assertEqual(conn.sent[0], "1\n")
         self.assertEqual(len(app.nodes), 1)
         self.assertEqual(app.nodes[1]["address"], "10.0.0.9:2")
 
@@ -1232,12 +1232,12 @@ class NodeRoleTests(BrokerTestCase):
         app.assign_node_roles([1, None, None])
         conn = FakeNodeSocket(b"\r\n")
         app.handle_node_connection(conn, ("10.0.0.1", 1000))
-        self.assertEqual(conn.sent, ["1\n", "ROLE LEFT\n"])
+        self.assertEqual(conn.sent, ["1\n", "SCAN\n", "ROLE LEFT\n"])
 
     def test_a_node_without_a_role_is_sent_none(self):
         conn = FakeNodeSocket(b"\r\n")
         app.handle_node_connection(conn, ("10.0.0.1", 1000))
-        self.assertEqual(conn.sent, ["1\n"])
+        self.assertEqual(conn.sent, ["1\n", "SCAN\n"])
 
     def test_bad_slots_are_ignored(self):
         app.assign_node_roles([1, 2])
@@ -1259,12 +1259,16 @@ class NodeAimTests(BrokerTestCase):
     def setUp(self):
         super().setUp()
         self._saved_aim = app.nodes_aim_held
+        self._saved_requesters = set(app.aim_requesters)
         self._saved_roles = dict(app.node_roles)
         app.nodes_aim_held = False
+        app.aim_requesters.clear()
         app.node_roles.clear()
 
     def tearDown(self):
         app.nodes_aim_held = self._saved_aim
+        app.aim_requesters.clear()
+        app.aim_requesters.update(self._saved_requesters)
         app.node_roles.clear()
         app.node_roles.update(self._saved_roles)
         super().tearDown()
@@ -1283,10 +1287,47 @@ class NodeAimTests(BrokerTestCase):
         app.handle_node_connection(conn, ("10.0.0.1", 1000))
         self.assertEqual(conn.sent, ["1\n", "AIM 90\n"])
 
-    def test_a_node_that_connects_while_scanning_is_sent_nothing_extra(self):
+    def test_a_node_that_connects_while_nobody_calibrates_is_told_to_scan(self):
+        # It boots holding straight, so it only sweeps once told to.
         conn = FakeNodeSocket(b"\r\n")
         app.handle_node_connection(conn, ("10.0.0.1", 1000))
-        self.assertEqual(conn.sent, ["1\n"])
+        self.assertEqual(conn.sent, ["1\n", "SCAN\n"])
+
+    def test_the_hold_is_sent_before_the_role(self):
+        app.set_nodes_aim(True)
+        app.assign_node_roles([1, None, None])
+        conn = FakeNodeSocket(b"\r\n")
+        app.handle_node_connection(conn, ("10.0.0.1", 1000))
+        self.assertEqual(conn.sent, ["1\n", "AIM 90\n", "ROLE LEFT\n"])
+
+    def test_another_page_off_the_calibration_screen_cannot_release_the_hold(self):
+        _, node = self.add_node(conn=RecordingConn())
+        calibrating, elsewhere = object(), object()
+        app.request_nodes_aim(calibrating, True)
+        app.request_nodes_aim(elsewhere, False)
+        self.assertTrue(app.nodes_aim_held)
+        self.assertEqual(node["conn"].sent, ["AIM 90\n"])
+
+    def test_the_servos_are_held_until_the_last_calibrating_page_leaves(self):
+        _, node = self.add_node(conn=RecordingConn())
+        first, second = object(), object()
+        app.request_nodes_aim(first, True)
+        app.request_nodes_aim(second, True)
+        app.request_nodes_aim(first, False)
+        self.assertEqual(node["conn"].sent, ["AIM 90\n"], "still held, nothing re-sent")
+        app.request_nodes_aim(second, False)
+        self.assertFalse(app.nodes_aim_held)
+        self.assertEqual(node["conn"].sent, ["AIM 90\n", "SCAN\n"])
+
+    def test_a_page_closing_elsewhere_leaves_the_calibration_hold_alone(self):
+        _, node = self.add_node(conn=RecordingConn())
+        app.request_nodes_aim(object(), True)
+        message = json.dumps({"type": "nodes:aim", "hold": False})
+        socket = FakeBrowserSocket(incoming=[message])
+        with mock.patch.object(app, "server_filter", None):
+            asyncio.run(app.browser_handler(socket))
+        self.assertTrue(app.nodes_aim_held)
+        self.assertEqual(node["conn"].sent, ["AIM 90\n"])
 
     def test_the_calibration_screen_holds_the_nodes_without_server_filtering(self):
         _, node = self.add_node(conn=RecordingConn())

@@ -30,7 +30,8 @@ enum ScanRole { ROLE_UNKNOWN, ROLE_LEFT, ROLE_RIGHT };
 void setScanRole(ScanRole role);
 
 // Calibration (server AIM <deg> / SCAN): hold the servo at a fixed angle so the
-// node can be aimed straight by hand - it still reads and reports, but neither
-// steers nor sweeps - then go back to scanning.
+// node can be aimed straight by hand - it still reads and reports, but nothing
+// moves the servo - then go back to scanning. A node boots held at 90 and
+// scans only once told SCAN; the server sends AIM or SCAN as soon as it connects.
 void aimServoAt(int degrees);
 void resumeScanning();

@@ -415,10 +415,14 @@ def assign_node_roles(slots):
 
 
 # Calibration holds every node's servo at 90 degrees so the nodes can be aimed
-# straight out by hand; otherwise they scan. Set by the browser's calibration
-# screen (nodes:aim); a node that connects mid-calibration is told on arrival.
+# straight out by hand; otherwise they scan. Each game page says whether it is
+# on the calibration screen (nodes:aim), and the servos stay held while any page
+# is: another tab or device opening on the menu must not set them sweeping in
+# the middle of someone's calibration. A node is told AIM or SCAN on arrival.
 AIM_ANGLE_DEG = 90
 nodes_aim_held = False
+aim_requesters = set()          # the game pages on the calibration screen
+aim_lock = threading.Lock()     # one hold/release decided and sent at a time
 
 
 def aim_command():
@@ -436,12 +440,27 @@ def set_nodes_aim(hold):
         send_command(node_id, command)
 
 
+def request_nodes_aim(requester, hold):
+    """One game page arriving on (hold) or leaving the calibration screen. The
+    nodes are only told when that changes whether any page is on it."""
+    with aim_lock:
+        with state_lock:
+            if hold:
+                aim_requesters.add(requester)
+            else:
+                aim_requesters.discard(requester)
+            wanted = bool(aim_requesters)
+            changed = wanted != nodes_aim_held
+        if changed:
+            set_nodes_aim(wanted)
+
+
 def send_node_aim(node_id):
-    """Tell a node that connects during calibration to hold straight too."""
+    """Tell a node that has just connected to hold straight or to scan. It
+    boots holding, so it scans only once told to."""
     with state_lock:
-        command = aim_command() if nodes_aim_held else None
-    if command is not None:
-        send_command(node_id, command)
+        command = aim_command()
+    send_command(node_id, command)
 
 
 def send_node_role(node_id):
@@ -530,10 +549,10 @@ def handle_node_connection(conn, address):
         action = "restored" if reused_existing else "assigned"
         print(f"ESP32 connected from {address}, {action} id {node_id}")
         conn.sendall(f"{node_id}\n".encode("utf-8"))
-        # A rebooted node has forgotten which mount it is, and whether it should
-        # be holding straight for calibration; tell it again.
-        send_node_role(node_id)
+        # A rebooted node has forgotten whether it should be holding straight
+        # for calibration, and which mount it is; tell it again.
         send_node_aim(node_id)
+        send_node_role(node_id)
         if first_message is not None:
             update_node(node_id, first_message)
         with conn.makefile("r") as stream:
@@ -604,16 +623,15 @@ async def browser_handler(websocket):
                 if server_filter is not None:
                     apply_filter_event(event)
             elif event.get("type") == "nodes:aim":
-                # The calibration screen opening (hold) or closing (release).
-                await asyncio.to_thread(set_nodes_aim, bool(event.get("hold")))
+                # This page arriving on (hold) or leaving the calibration screen.
+                await asyncio.to_thread(request_nodes_aim, websocket, bool(event.get("hold")))
             elif server_filter is not None:
                 apply_filter_event(event)
     finally:
         BROWSER_CONNECTIONS.discard(websocket)
-        # The calibration screen that asked for the hold went with its tab: let
-        # the nodes scan again rather than stay frozen at 90 degrees.
-        if not BROWSER_CONNECTIONS and nodes_aim_held:
-            await asyncio.to_thread(set_nodes_aim, False)
+        # A calibration screen that closes with its tab no longer holds the
+        # servos; if it was the last one, the nodes scan again.
+        await asyncio.to_thread(request_nodes_aim, websocket, False)
 
 
 async def control_handler(websocket):

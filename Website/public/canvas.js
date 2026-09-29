@@ -304,8 +304,9 @@ function getCalibrateNodes() {
 // While the calibration screen is up, every node's servo is held at 90 degrees
 // so the operator can aim the nodes straight out into the play area by hand;
 // on any other screen the nodes scan. The server passes it on to each node
-// (AIM 90 / SCAN). Sent whenever the wanted state changes, and again after a
-// reconnect, since a restarted server has forgotten it.
+// (AIM 90 / SCAN), holding while any open page is on this screen. Sent
+// whenever the wanted state changes, and again after a reconnect, since a
+// restarted server has forgotten it.
 let sentNodesAim = null;
 
 function syncNodesAim() {

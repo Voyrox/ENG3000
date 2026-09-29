@@ -11,9 +11,11 @@
 // readSensorCoordinate() turns a slot index straight into a grid column, so if
 // this mapping is wrong the whole board is mirrored or scrambled.
 //
-// This screen is the whole calibration. While it is up both servos are held
-// at 90 degrees (canvas.js asks the server, which sends AIM 90 to each node),
-// so the operator can aim the nodes straight out into the play area by hand.
+// This screen is the whole calibration. While it is up - through both steps,
+// LEFT then RIGHT - both servos are held still at 90 degrees (canvas.js asks
+// the server, which sends AIM 90 to each node), so the operator can aim the
+// nodes straight out into the play area by hand. Each live-readings row shows
+// the angle the node reports, so a servo that is not holding stands out.
 // Start Game appears once both nodes are identified; leaving the screen lets
 // the nodes scan again.
 //
@@ -42,6 +44,8 @@
   // Hold steady this long to confirm. Long enough that a noise spike cannot
   // assign a slot, short enough not to be tiring.
   const HAND_DWELL_MS = 700;
+  // Where the servos are held while this screen is up (the server's AIM_ANGLE_DEG).
+  const AIM_ANGLE_DEG = 90;
 
 
   const state = {
@@ -103,6 +107,12 @@
   function distanceFor(node) {
     if (!window.readNodeDistance) return null;
     return window.readNodeDistance(node);
+  }
+
+  // The servo angle the node reported with its latest reading, or null.
+  function angleFor(node) {
+    if (!window.readNodeScan) return null;
+    return window.readNodeScan(node).angle;
   }
 
   // Drops any slot whose node has disappeared, so unplugging a sensor reopens
@@ -187,12 +197,16 @@
     const cardH = 132;
     const gap = 18;
     const rowW = cardW * SLOTS.length + gap * (SLOTS.length - 1);
-    const cardY = Math.max(180, height * 0.28);
+    // Title and instructions clear of the top button row; the cards clear of
+    // the last instruction line (the servo hold, at titleY + 96).
+    const titleY = Math.max(90, height * 0.12);
+    const cardY = Math.max(titleY + 120, height * 0.28);
 
     return {
       width,
       height,
       centerX,
+      titleY,
       cardY,
       cardW,
       cardH,
@@ -237,7 +251,7 @@
 
   window.renderCalibrate = function renderCalibrate(ctx, canvas, nodes = []) {
     const layout = window.getCalibrateLayout(canvas);
-    const { width, height, centerX } = layout;
+    const { width, height, centerX, titleY } = layout;
     const slot = activeSlot();
     const complete = isComplete();
 
@@ -246,18 +260,21 @@
 
     [layout.backButton, layout.resetButton, layout.skipButton].forEach((btn) => drawButton(ctx, btn));
 
-    // Title + instruction. Clear of the top button row.
-    const titleY = Math.max(90, height * 0.12);
+    // Title + instruction.
     ctx.textAlign = "center";
     ctx.fillStyle = "#f4f4f5";
     ctx.font = `bold ${Math.max(18, Math.min(32, width * 0.03))}px monospace`;
     ctx.fillText("Sensor Assignment", centerX, titleY);
 
-    // The servos are held straight for as long as this screen is up (canvas.js
-    // sends the hold; the server passes AIM 90 to every node).
+    // The servos are held straight for as long as this screen is up, through
+    // both steps (canvas.js sends the hold; the server passes AIM 90 to every node).
     ctx.fillStyle = "#7dd3fc";
     ctx.font = `bold ${Math.max(13, Math.min(18, width * 0.015))}px monospace`;
-    ctx.fillText("Servos held at 90° - aim both nodes straight out into the play area", centerX, titleY + 96);
+    ctx.fillText(
+      `Servos held at ${AIM_ANGLE_DEG}° throughout - aim both nodes straight out into the play area`,
+      centerX,
+      titleY + 96
+    );
 
     ctx.font = `${Math.max(15, Math.min(23, width * 0.02))}px monospace`;
     if (complete) {
@@ -360,7 +377,7 @@
     ctx.fillText("LIVE READINGS", centerX, listY - 18);
 
     const sorted = nodes.slice().sort((a, b) => a.id - b.id);
-    const rowW = Math.min(420, Math.max(280, width * 0.34));
+    const rowW = Math.min(460, Math.max(320, width * 0.36));
     const rowX = centerX - rowW / 2;
 
     sorted.forEach((node, index) => {
@@ -384,7 +401,7 @@
 
       // Nearer readings draw a longer bar, so a hand is obvious at a glance.
       if (distance !== null) {
-        const barMax = rowW - 200;
+        const barMax = rowW - 280;
         const closeness = Math.max(0, Math.min(1, 1 - distance / 100));
         ctx.fillStyle = distance <= HAND_DISTANCE_CM ? "#f59e0b" : "#3a3f52";
         ctx.beginPath();
@@ -393,6 +410,18 @@
       }
 
       ctx.textAlign = "right";
+      ctx.font = "12px monospace";
+      // The angle the node says its servo is at: it should sit on 90 for the
+      // whole screen, so anything else (amber) means it is not holding.
+      const angle = angleFor(node);
+      if (angle === null) {
+        ctx.fillStyle = "#63736f";
+        ctx.fillText("-", rowX + rowW - 56, rowY + 16);
+      } else {
+        ctx.fillStyle = Math.round(angle) === AIM_ANGLE_DEG ? "#22c55e" : "#f59e0b";
+        ctx.fillText(`${Math.round(angle)}°`, rowX + rowW - 56, rowY + 16);
+      }
+
       ctx.fillStyle = "#63736f";
       ctx.font = "11px monospace";
       const label = taken ? SLOTS.find((s) => state.slots[s.key] === node.id).label : "";

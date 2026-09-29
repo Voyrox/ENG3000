@@ -89,6 +89,17 @@ int steerDir = 1;
 // state, ahead of rotate(), which is what sets it.
 unsigned long lastServoWriteAt = 0;
 
+// Calibration: the server holds the servo at a fixed angle (AIM 90) while the
+// operator aims each node straight out by hand, then lets it scan again (SCAN).
+// While held the node still reads and reports - the calibration screen needs
+// the readings to tell which node is which - but nothing moves the servo.
+//
+// A node boots held at 90 and sweeps only once the server says SCAN, which it
+// does the moment the node connects unless calibration is under way. So a node
+// that reboots or reconnects in the middle of calibration never moves at all,
+// rather than sweeping until the AIM catches up with it.
+bool aimHeld = true;
+
 //USB 0001 is the left one, 1320 is the right one
 
 //For the left node; maxLeft = 150 [90 + 60], maxRight = 50 [90 - 40]
@@ -110,6 +121,12 @@ int maxLeft = UNKNOWN_ROLE_LIMITS.maxLeft;
 int maxRight = UNKNOWN_ROLE_LIMITS.maxRight;
 
 bool rotate(int amount){
+  // Held for calibration: nothing turns the servo off its aim angle - not a
+  // scan step, not a new role's limits - until the server says SCAN.
+  if (aimHeld) {
+    return false;
+  }
+
   bool returnVal = false;
   angle = angle + amount;
   if (angle > maxLeft){
@@ -153,12 +170,6 @@ float ultraSonicRead(const int USS[2]){
   return distance;
 }
 
-// Calibration: the server holds the servo at a fixed angle (AIM 90) while the
-// operator aims each node straight out by hand, then lets it scan again (SCAN).
-// While held the node still reads and reports - the calibration screen needs
-// the readings to tell which node is which - but it neither steers nor sweeps.
-bool aimHeld = false;
-
 void aimServoAt(int degrees) {
   aimHeld = true;
   angle = constrain(degrees, 0, 180);
@@ -168,6 +179,7 @@ void aimServoAt(int degrees) {
 
 void resumeScanning() {
   aimHeld = false;
+  rotate(0);  // inside this mount's limits before the first scan step
 }
 
 void setScanRole(ScanRole role) {
@@ -176,7 +188,7 @@ void setScanRole(ScanRole role) {
   if (role == ROLE_RIGHT) limits = RIGHT_NODE_LIMITS;
   maxLeft = limits.maxLeft;
   maxRight = limits.maxRight;
-  rotate(0);  // pull the servo back inside the new limits straight away
+  rotate(0);  // pull the servo back inside the new limits (not while held)
 }
 
 int rotationWaitTrack = 0;
