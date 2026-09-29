@@ -1,15 +1,25 @@
 #include "connectionManager.h"
 #include "networkDiscovery.h"
 
-constexpr char WIFI_SSID[] = "Aaron";
+constexpr char WIFI_SSID[] = "Josh's S24";
 constexpr char WIFI_PASSWORD[] = "bruh12345";
 constexpr bool AUTO_DISCOVER_SERVER = false;
-constexpr char SERVER_IP[] = "192.168.137.1"; // this laptop on its own Windows hotspot
+constexpr char SERVER_IP[] = "192.168.59.151";
 constexpr uint16_t SERVER_PORT = 3000;
 constexpr unsigned long SERVER_CONNECT_TIMEOUT_MS = 3000;
 constexpr unsigned long SERVER_DISCOVERY_TIMEOUT_MS = 120000;
 constexpr int32_t SERVER_PROBE_TIMEOUT_MS = 300;
 constexpr unsigned long NODE_ID_TIMEOUT_MS = 2000;
+
+// How long ONE connect attempt may block. Must be well under
+// SERVER_CONNECT_TIMEOUT_MS so that budget buys several attempts rather than one
+// long stall.
+constexpr int32_t SERVER_ATTEMPT_TIMEOUT_MS = 1000;
+
+// WiFiClient::setTimeout takes SECONDS and multiplies by 1000 internally. It also
+// doubles as the timeout for the *next* connect(), because connect(host, port)
+// forwards this same value as its connect timeout.
+constexpr uint32_t SOCKET_READ_TIMEOUT_SECONDS = 1;
 
 int nodeID = -1;
 unsigned long lastWifiAttemptMillis = 0;
@@ -29,16 +39,23 @@ bool connectServer() {
         }
     }
 
+    // Each attempt gets its own explicit timeout, in milliseconds. Passing only
+    // the host and port would reuse the socket's stored timeout, and that value
+    // is whatever the last setTimeout() left behind - see the note on
+    // SOCKET_READ_TIMEOUT_SECONDS. One attempt blocking far longer than
+    // SERVER_CONNECT_TIMEOUT_MS also defeats the budget check below, which can
+    // only run between attempts.
     while (WiFi.status() == WL_CONNECTED && !serverIP.isEmpty() &&
            !client.connected() &&
-           !client.connect(serverIP.c_str(), SERVER_PORT)) {
+           !client.connect(serverIP.c_str(), SERVER_PORT,
+                           SERVER_ATTEMPT_TIMEOUT_MS)) {
         Serial.println("Connecting to TCP server...");
         if (millis() - start >= SERVER_CONNECT_TIMEOUT_MS) {
             Serial.println("TCP connect timed out");
             client.stop();
             return false;
         }
-        delay(1000);
+        delay(500);
     }
 
     if (!client.connected()) {
@@ -46,7 +63,10 @@ bool connectServer() {
     }
 
     Serial.println("TCP connected");
-    client.setTimeout(1000);
+    // Read timeout for control lines, in seconds. This also becomes the connect
+    // timeout of the next attempt, which is why the retry loop above passes its
+    // own value explicitly rather than relying on it.
+    client.setTimeout(SOCKET_READ_TIMEOUT_SECONDS);
 
     String handshake = "{";
     handshake += "\"nodeId\":" + String(nodeID);

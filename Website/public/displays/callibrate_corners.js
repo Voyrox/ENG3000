@@ -209,6 +209,24 @@
     return distanceCm >= near - EDGE_MARGIN_CM && distanceCm <= far + EDGE_MARGIN_CM;
   };
 
+  // Where each slot's node physically stands, left to right, in centimetres
+  // across the play area: on the screen edge at the centre of the column it
+  // owns, which is the same x the grid mapping uses, so a position and the
+  // cell derived from it can never disagree about where the column boundaries
+  // are. The rig has two nodes, LEFT and RIGHT (SENSOR_COLUMNS); the centre
+  // column has none, so it has no x.
+  const AREA_WIDTH_CM = 150; // matches PlayArea.width_cm in filterRules.py
+  const COLUMN_COUNT = 3;
+
+  window.getSensorCount = function getSensorCount() {
+    return SENSOR_COLUMNS.length;
+  };
+
+  window.getSensorX = function getSensorX(column) {
+    if (!SENSOR_COLUMNS.includes(column)) return null;
+    return ((column + 0.5) * AREA_WIDTH_CM) / COLUMN_COUNT;
+  };
+
   // Picks the row, refusing to leave the previous one until the reading has
   // travelled BAND_HYSTERESIS_CM clear of the boundary between them.
   function bandFor(distanceCm, nearCm, rowDepth, previousGy) {

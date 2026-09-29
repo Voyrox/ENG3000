@@ -813,6 +813,75 @@ class StaleNodeSweepTests(BrokerTestCase):
         self.run_loop_until(app.cleanup_stale_nodes, 2)
         self.assertIn(node_id, app.nodes)
 
+    def test_a_sweep_does_not_release_a_live_connection(self):
+        """Silence is a display concern; the socket is what owns the node.
+
+        The firmware only reports while it holds the scan turn, so a node can go
+        quiet while perfectly connected. Releasing its conn here would drop it out
+        of the coordinator's rotation for good, and it could never report again.
+        """
+        node_id, node = self.add_node(conn=RecordingConn())
+        node["last_seen"] = time.monotonic() - (app.NODE_STALE_SECONDS + 1)
+
+        self.run_loop_until(app.cleanup_stale_nodes, 1)
+
+        self.assertFalse(node["online"], "still shown as silent")
+        self.assertIsNotNone(
+            node["conn"],
+            "a live socket must not be released by the staleness sweep",
+        )
+
+
+class SilentNodeRecoveryTests(BrokerTestCase):
+    """A node that goes quiet must still be given turns to recover on.
+
+    The firmware only sends while it holds the turn, so `online` and "able to
+    report" are the same thing. If the coordinator used `online` to pick who
+    scans, one quiet node would retire itself: flagged offline -> never granted a
+    turn -> never reports -> stays flagged. Forever, behind a healthy socket.
+    """
+
+    def stall_a_node(self, stalled_id, total=2):
+        """Add `total` nodes, let the cleaner flag the stalled one, tick twice."""
+        for index in range(total):
+            self.add_node(address=(f"10.0.0.{index + 1}", 1000 + index),
+                          conn=RecordingConn())
+        app.nodes[stalled_id]["last_seen"] = (
+            time.monotonic() - (app.NODE_STALE_SECONDS + 1)
+        )
+        self.run_loop_until(app.cleanup_stale_nodes, 1)
+        self.assertFalse(
+            app.nodes[stalled_id]["online"], "precondition: the node is flagged"
+        )
+        self.run_loop_until(app.coordinator_loop, 2)
+
+    def test_a_quiet_node_is_still_granted_the_turn(self):
+        """The recovery path: holding the turn is the only way to report again."""
+        node_id, _ = self.add_node(address=("10.0.0.1", 1000), conn=RecordingConn())
+        self.stall_a_node(node_id)
+
+        self.run_loop_until(app.coordinator_loop, 1)
+
+        self.assertTrue(
+            app.nodes[node_id]["has_turn"],
+            "a quiet node with a live socket must still get its turn back",
+        )
+
+    def test_a_quiet_node_stays_in_the_rotation_across_many_ticks(self):
+        """One tick could be luck; the rotation must actually come back round."""
+        node_id, _ = self.add_node(address=("10.0.0.1", 1000), conn=RecordingConn())
+        self.stall_a_node(node_id, total=3)
+
+        turns = 0
+        for _ in range(6):
+            self.run_loop_until(app.coordinator_loop, 1)
+            if app.nodes[node_id]["has_turn"]:
+                turns += 1
+
+        self.assertGreater(
+            turns, 0, "the stalled node was never granted a turn again"
+        )
+
 
 class NodeConnectionTests(BrokerTestCase):
     """A whole TCP session, driven through a fake socket."""
@@ -876,6 +945,46 @@ class NodeConnectionTests(BrokerTestCase):
     def test_a_reset_socket_is_reported_not_raised(self):
         self.connect(b"\r\n", [], ("10.0.0.1", 1), fail_send=True)
         self.assertFalse(app.nodes[1]["online"])
+
+    def test_a_stale_session_cannot_take_the_node_offline_after_a_reconnect(self):
+        """The dropped socket's handler must not retire the node that replaced it.
+
+        A node that reconnects has two live handlers for a moment: the new
+        session and the old one's `finally` on its way out. The old one used to
+        mark the node offline, clearing the live connection's state - so a node
+        that reconnected went dark until it reconnected again.
+
+        Driven through the claim and the release rather than through two full
+        sessions, because `handle_node_connection` returns only when the socket
+        is already dead, and the point here is the two being alive at once.
+        """
+        stale = FakeNodeSocket(b"\r\n", [])
+        node_id, _ = app.reuse_or_register_node(("10.0.0.1", 1), None, "AA:BB", conn=stale)
+
+        # The node reconnects, claiming the same slot with a new session.
+        fresh = FakeNodeSocket(b"\r\n", [])
+        app.reuse_or_register_node(("10.0.0.9", 2), node_id, "AA:BB", conn=fresh)
+
+        # The session that has already been replaced finishes unwinding.
+        app.mark_node_offline(node_id, stale)
+
+        self.assertTrue(
+            app.nodes[node_id]["online"],
+            "the replaced session took the node offline underneath the live one",
+        )
+        self.assertIs(app.nodes[node_id]["conn"], fresh)
+
+    def test_a_session_that_still_owns_the_node_does_take_it_offline(self):
+        conn = FakeNodeSocket(b"\r\n", [])
+        node_id, _ = app.reuse_or_register_node(("10.0.0.1", 1), None, None, conn=conn)
+        app.mark_node_offline(node_id, conn)
+        self.assertFalse(app.nodes[node_id]["online"])
+
+    def test_a_socket_that_dies_before_claiming_its_node_still_releases_it(self):
+        """A reset socket never reaches the point of adopting its slot."""
+        conn = self.connect(b"\r\n", [], ("10.0.0.1", 1), fail_send=True)
+        self.assertFalse(app.nodes[1]["online"], "the node was left online")
+        self.assertTrue(conn.closed)
 
     def test_the_session_keeps_the_conn_lock_per_node(self):
         self.connect(b"\r\n", ['{"avg":1}\n'], ("10.0.0.1", 1))

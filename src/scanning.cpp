@@ -23,6 +23,25 @@ int servoPin = 15;
 //For the servo
   Servo theServo;
 
+// How long the servo is given to actually arrive at a commanded angle before
+// anything is read through it. The pulse the previous read left in the air, and
+// the mechanics of the horn itself, both need clearing time: a reading taken
+// while the horn is still travelling describes some angle the rig was never at,
+// and two such readings are not two views of the same place.
+  const unsigned long servoSettleMs = 40;
+
+// How long a reading may wait for its echo. Sound covers the round trip to the
+// far edge of the play area in about 8.2 ms, so anything past this is not a
+// target. The old 50 ms budget let one dropped echo stall the whole scan for
+// seventeen metres' worth of nothing.
+  const unsigned long echoTimeoutUs = 9000;
+
+// Returned when no echo came back. Distinct from a reading of 0 cm, which is
+// impossible, and from a real close target: a dropped echo must not be allowed to
+// masquerade as a distance, or the scan treats silence as "nothing there" and
+// swings past a player who is standing right there.
+  const float NO_ECHO = -1.0f;
+
 // void Scan::scanSetup(){
 void scanSetup(){
   // Ultrasonic setup
@@ -60,6 +79,15 @@ void scanSetup(){
 int state = 0;
 int angle = 90;
 int dir = 1;
+// Direction the half-found case steers in. Kept apart from `dir` (the sweep
+// direction used when the player is lost) so a stuck sweep cannot drag the
+// steering with it, and vice versa.
+int steerDir = 1;
+
+// When the servo was last commanded to a new angle. Nothing is read through the
+// horn until it has had time to get there. Declared with the rest of the scan
+// state, ahead of rotate(), which is what sets it.
+unsigned long lastServoWriteAt = 0;
 
 //USB 0001 is the left one, 1320 is the right one
 
@@ -93,6 +121,7 @@ bool rotate(int amount){
     returnVal = true;
   }
   theServo.write(angle);
+  lastServoWriteAt = millis();
   return returnVal;
 }
 
@@ -110,13 +139,12 @@ float ultraSonicRead(const int USS[2]){
   digitalWrite(trigPin, LOW);
 
   // Read the echoPin, returns sound wave travel time in microseconds
-  unsigned long duration = pulseIn(echoPin, HIGH, 50000); //Timeout in 50ms, aka 17 metres
+  unsigned long duration = pulseIn(echoPin, HIGH, echoTimeoutUs);
 
-  // No echo before the timeout. -1, not 0: a 0 reads as "touching the
-  // sensor" to anything downstream, which is what the game's too-close alert
-  // is looking for.
+  // A timeout reads as zero, which would come out as a distance of 0 cm - a
+  // target pressed against the sensor. Report silence as silence instead.
   if (duration == 0) {
-    return -1;
+    return NO_ECHO;
   }
 
   // Calculate the distance (speed of sound is 0.034 cm/us, divided by 2 for round trip)
@@ -136,16 +164,23 @@ void setScanRole(ScanRole role) {
 
 int rotationWaitTrack = 0;
 const int rotatationWait = 30;
-const int sideReadDelay = 30;
+const int sideReadDelay = 50;
 int ultrasonicWaitTrack = 0;
 bool readLeftNext = true;
 
-float leftVal = -1;
-float rightVal = -1;
+float leftVal = NO_ECHO;
+float rightVal = NO_ECHO;
 int readAngle = 90;  // the servo angle the latest pair was read at
 
 bool scanLoop(){
   if ((rotationWaitTrack + rotatationWait) >= millis()){
+    return false;
+  }
+
+  // A reading taken while the horn is still travelling describes an angle the
+  // rig was never at, so it cannot be compared with - or triangulated against -
+  // a reading from a settled horn. Wait the horn out first.
+  if ((lastServoWriteAt + servoSettleMs) >= millis()){
     return false;
   }
 
@@ -167,18 +202,16 @@ bool scanLoop(){
   bool leftInRange = (leftVal >= minDist && leftVal <= maxDist);
   bool rightInRange = (rightVal >= minDist && rightVal <= maxDist);
 
-  const int maxDiff = 30;
+  const int maxDiff = 40;
 
-  if (leftInRange && rightInRange){
-    float diff = abs((leftVal - rightVal));
-    if(diff < maxDiff){
-      state = 0;
-    }
+  if (leftInRange && rightInRange && fabsf(leftVal - rightVal) < maxDiff){
+    state = 0;
   }
-  else if (leftInRange){
-    state = 1;
-  }
-  else if (rightInRange){
+  else if (leftInRange || rightInRange){
+    // One sensor, or both but too far apart to be the same target at a
+    // straight-on angle. Either way the player is off to one side, so steer.
+    // Previously this left `state` holding whatever it was before, so a scan
+    // that arrived here from "found" would sit still and never turn.
     state = 1;
   }
   else {
@@ -190,25 +223,30 @@ bool scanLoop(){
   Serial.println(state);
   Serial.println();
 
-  const int smallRotation = 4;
-  const int largeRotation = 15;
+  const int smallRotation = 3;
+  const int largeRotation = 14;
 
   // Both sensors were read at this angle; the servo only moves below.
   readAngle = angle;
 
   switch (state){
     case 0:{
+      steerDir = 1;
       break;
     }
     case 1:{
-      if(leftInRange){
-        rotate(smallRotation);
-      } else {
-        rotate(-smallRotation);
+      // Steer toward whichever sensor has the player. If that runs the servo into
+      // its own stop it is no longer chasing anything - it is grinding against
+      // the limit - and without this it would sit there pinned until the player
+      // happened to walk away. Reverse, so the rig sweeps back to find them.
+      bool flip = rotate(smallRotation * steerDir);
+      if(flip){
+        steerDir = -steerDir;
       }
       break;
     }
     case 2:{
+      steerDir = 1;
       bool flip = rotate(largeRotation * dir);
       if(flip){
         dir = -dir;
@@ -220,23 +258,20 @@ bool scanLoop(){
   return true;
 }
 
-int getLeftVal(){
+float getLeftVal(){
   return leftVal;
 }
 
-int getRightVal(){
+float getRightVal(){
   return rightVal;
 }
 
-float getLeftCm(){
-  return leftVal;
-}
-
-float getRightCm(){
-  return rightVal;
-}
-
-int getScanAngle(){
+// The pose the readings above were taken at. Until the rig reports these the
+// broker and the website have no idea where a node is pointing, so "left" and
+// "right" are just two distances and not a position. This is the angle the
+// pair was READ at: scanLoop() turns the servo straight after reading, so the
+// live `angle` is already one step on by the time the reading is sent.
+int getAngle(){
   return readAngle;
 }
 
@@ -257,5 +292,5 @@ float getScanDistance(){
   if (leftVal > 0 && rightVal > 0) return min(leftVal, rightVal);
   if (leftVal > 0) return leftVal;
   if (rightVal > 0) return rightVal;
-  return -1;
+  return NO_ECHO;
 }

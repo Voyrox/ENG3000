@@ -19,9 +19,28 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.10'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r Website/requirements.txt
+          pip install -r Website/requirements.txt pytest
       - name: Syntax check
         run: python -m py_compile Website/app.py
+      - name: Python tests
+        # The broker, the filter rules and the parity replay live here.
+        run: python -m pytest Website/tests/ -q
+      - name: Browser-side tests
+        # game.js and the continuous-position solver are loaded into a vm
+        # context and driven with real sensor streams, so these run without a
+        # browser.
+        run: node --test Website/tests/test_*.js
+      - name: The JS/Python cell mapping still agrees
+        # The grid cell is the game rule, and the Python port has to reach the
+        # same answer for the same readings. Regenerating the trace and diffing
+        # it is what catches a change to that rule on either side - the
+        # continuous cursor layer is deliberately not allowed to move it.
+        run: |
+          node Website/tests/generate_parity_trace.js
+          git diff --exit-code -- Website/tests/fixtures/js_parity_trace.json

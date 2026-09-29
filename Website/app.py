@@ -156,7 +156,15 @@ def find_known_node(claimed_node_id, device_id):
     return None
 
 
-def reuse_or_register_node(address, claimed_node_id, device_id=None):
+def reuse_or_register_node(address, claimed_node_id, device_id=None, conn=None):
+    """Claim a node id for a connection, reusing the device's existing slot.
+
+    `conn` is adopted inside the same lock that hands out the id, which is the
+    point. The session that is taking a node over owns it from the instant it is
+    named, with no gap in between: a gap is a window in which this session's
+    `finally` would find the node unowned and retire it, and a reconnect that
+    landed in that window would be marked offline by the session it replaced.
+    """
     with state_lock:
         node = find_known_node(claimed_node_id, device_id)
         if node is not None:
@@ -171,7 +179,7 @@ def reuse_or_register_node(address, claimed_node_id, device_id=None):
             node["filtered_distance"] = None
             node["synced"] = False
             node["has_turn"] = False
-            node["conn"] = None
+            node["conn"] = conn
             if device_id:
                 node["device_id"] = device_id
             node_id = node["id"]
@@ -180,6 +188,7 @@ def reuse_or_register_node(address, claimed_node_id, device_id=None):
             node_id = alloc_node_id()
             record = new_node(address, device_id)
             record["id"] = node_id
+            record["conn"] = conn
             nodes[node_id] = record
     schedule_broadcast_nodes()
     return node_id, reused_existing
@@ -276,10 +285,21 @@ def update_node(node_id, message):
     schedule_broadcast_nodes()
 
 
-def mark_node_offline(node_id):
+def mark_node_offline(node_id, conn=None):
+    """Take a node offline, unless a newer connection has already taken it over.
+
+    A node that drops and reconnects is the normal case, and the two sessions
+    overlap: the old socket's handler can still reach its `finally` after the new
+    one has registered. Marking the node offline from the old session then wipes
+    the live connection's state, and the node goes dark until it reconnects a
+    third time. Passing the connection that is going away means the only session
+    allowed to retire the node is the one that is actually leaving.
+    """
     with state_lock:
         node = nodes.get(node_id)
         if node is None:
+            return
+        if conn is not None and node.get("conn") is not conn:
             return
         node["online"] = False
         node["rps"] = 0.0
@@ -345,6 +365,11 @@ def cleanup_stale_nodes():
                     if server_filter is not None:
                         server_filter.on_missing(node_id)
                     stale_ids.append(node_id)
+                    # `conn` is deliberately left alone. Holding a live socket is
+                    # what keeps this node in the coordinator's turn rotation, and
+                    # clearing it here would take a merely quiet node out of the
+                    # schedule for good. The socket's own handler retires the node
+                    # via mark_node_offline when the connection really ends.
 
         for node_id in stale_ids:
             print(f"Node {node_id} timed out")
@@ -428,9 +453,17 @@ def coordinator_loop():
         time.sleep(TURN_INTERVAL_SECONDS)
         sync_tick += 1
         with state_lock:
+            # A live socket is the proof of life, not the `online` flag. Those
+            # two used to be conflated here, which is a one-way ratchet now that
+            # the firmware obeys HALT: a node only reports while it holds the
+            # turn, so a node that goes quiet for NODE_STALE_SECONDS is marked
+            # offline by cleanup_stale_nodes, which then drops it from this list,
+            # so it is never granted a turn again, so it never reports again --
+            # stuck offline for good behind a perfectly healthy connection.
+            # Trust the connection and let staleness stay a display concern.
             online_ids = sorted(
                 node_id for node_id, node in nodes.items()
-                if node.get("online") and node.get("conn") is not None
+                if node.get("conn") is not None
             )
         if not online_ids:
             continue
@@ -461,16 +494,13 @@ def handle_node_connection(conn, address):
         elif raw_handshake and claimed_node_id is None:
             first_message = raw_handshake
         conn.settimeout(None)
-        node_id, reused_existing = reuse_or_register_node(address, claimed_node_id, device_id)
+        node_id, reused_existing = reuse_or_register_node(
+            address, claimed_node_id, device_id, conn=conn
+        )
         action = "restored" if reused_existing else "assigned"
         print(f"ESP32 connected from {address}, {action} id {node_id}")
         conn.sendall(f"{node_id}\n".encode("utf-8"))
-        with state_lock:
-            node = nodes.get(node_id)
-            if node is not None:
-                node["conn"] = conn
-                node["synced"] = False
-                node["has_turn"] = False
+        # A rebooted node has forgotten which mount it is; tell it again.
         send_node_role(node_id)
         if first_message is not None:
             update_node(node_id, first_message)
@@ -483,8 +513,9 @@ def handle_node_connection(conn, address):
     except (OSError, TimeoutError) as exc:
         print(f"Node {node_id if node_id is not None else 'unknown'} disconnected: {exc}")
     finally:
+        # Scoped to this session, so a reconnect already in flight is left alone.
         if node_id is not None:
-            mark_node_offline(node_id)
+            mark_node_offline(node_id, conn)
         conn.close()
 
 
@@ -631,4 +662,8 @@ if __name__ == '__main__':
     threading.Thread(target=coordinator_loop, daemon=True).start()
     if CONTROL_ENABLED:
         print(f"Control panel enabled at http://{lan_ip()}:5000/control")
-    app.run(debug=True, host="0.0.0.0", threaded=True, use_reloader=False)
+    # debug=False, deliberately. The Werkzeug debugger is a remote shell on the
+    # machine running the rig, and this listens on 0.0.0.0 so every device on the
+    # network can reach it. Anything that trips an exception while the rig is in
+    # use is a bug to read in the log, not one to hand a console to the lab.
+    app.run(debug=False, host="0.0.0.0", threaded=True, use_reloader=False)

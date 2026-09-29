@@ -2,16 +2,27 @@
 
 void scanSetup();
 bool scanLoop();
-int getLeftVal();
-int getRightVal();
 
-// What the node reports to the game, for the pair read by the latest
-// scanLoop() that returned true.
-float getLeftCm();       // left ultrasonic, cm; -1 = no echo
-float getRightCm();      // right ultrasonic, cm; -1 = no echo
-float getScanDistance(); // the node's distance to the player, cm; -1 = nothing heard
-int getScanAngle();      // servo angle the pair was read at; 90 = straight out, more = screen-left
-int getScanState();      // 0 found (both sensors agree), 1 half-found, 2 lost
+// Distances from the two ultrasonic heads, in centimetres, or -1 when the last
+// read got no echo at all. Floats, because the scan state machine and the
+// payload both work in centimetres and truncating here threw away the decimal
+// the servo sweep is tuned against.
+float getLeftVal();
+float getRightVal();
+
+// The node's distance to the player, in centimetres: the mean of the heads
+// reading inside the scan range, else the nearer real echo, else -1.
+float getScanDistance();
+
+// Where the servo was pointing when the latest pair was read (90 = straight
+// out, more = screen-left), and what the scan concluded there:
+//   0 = both heads agree, hold this angle
+//   1 = one head has the player, steering toward it
+//   2 = nobody found, sweeping
+// A node's two readings only become a position once its angle is known, so these
+// travel with every payload.
+int getAngle();
+int getScanState();
 
 // Which node this is, as decided on the game's calibration screen and passed
 // on by the server (ROLE LEFT / ROLE RIGHT). Sets the servo limits for that mount.
