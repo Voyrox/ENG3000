@@ -1,0 +1,339 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <title>ENG3000 Control</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+    <link rel="icon" type="image/x-icon" href="/static/favicon.ico">
+</head>
+
+<body>
+    <header>
+        <strong>ENG3000 Control</strong>
+        <span id="conn" class="pill off">offline</span>
+    </header>
+
+    <section class="stats">
+        <div><span>Screen</span><b id="screen">--</b></div>
+        <div><span>Input</span><b id="mode">--</b></div>
+        <div><span>Score</span><b id="score">--</b></div>
+        <div><span>Lives</span><b id="lives">--</b></div>
+        <div><span>Time</span><b id="time">--</b></div>
+        <div><span>Round</span><b id="status">--</b></div>
+    </section>
+
+    <section>
+        <h2>Holes <small>green mole · blue hat mole · red bomb</small></h2>
+        <div id="pad"></div>
+    </section>
+
+    <section>
+        <h2>Input</h2>
+        <div class="row">
+            <button data-mode="remote">Remote</button>
+            <button data-mode="sensor">Sensors</button>
+            <button data-mode="mouse">Mouse</button>
+        </div>
+    </section>
+
+    <section>
+        <h2>Game</h2>
+        <div class="grid2">
+            <button data-action="start" data-start-mode="remote" class="primary">Start remote round</button>
+            <button data-action="start" data-start-mode="mouse">Start mouse round</button>
+            <button id="pauseBtn" data-action="pause">Pause</button>
+            <button data-action="restart">Restart</button>
+            <button data-action="menu">Main menu</button>
+            <button id="testBtn" data-action="testMode">Test mode: off</button>
+        </div>
+    </section>
+
+    <section>
+        <h2>Sensors</h2>
+        <table>
+            <thead><tr><th>Node</th><th>State</th><th>Filtered cm</th><th>RPS</th></tr></thead>
+            <tbody id="nodes"><tr><td colspan="4">No nodes</td></tr></tbody>
+        </table>
+    </section>
+
+    <script>
+        const wsProtocol = location.protocol === "https:" ? "wss" : "ws";
+        const wsUrl = `${wsProtocol}://${location.hostname}:8765/control`;
+        const $ = (id) => document.getElementById(id);
+        let socket = null;
+        let game = null;
+
+        const pad = $("pad");
+        for (let i = 0; i < 9; i++) {
+            const cell = document.createElement("div");
+            cell.className = "hole";
+            cell.dataset.hole = i;
+            pad.appendChild(cell);
+        }
+
+        function send(command) {
+            if (socket && socket.readyState === WebSocket.OPEN) {
+                socket.send(JSON.stringify(command));
+            }
+        }
+
+        // The pad is a touchpad: while a finger is down the game switches to
+        // remote input and the cursor follows it smoothly; lifting hands control
+        // back to the sensors. Positions go out at most once per animation
+        // frame so a fast drag does not flood the socket, and a still finger
+        // re-sends every HEARTBEAT_MS so the game knows it is still held.
+        const finger = document.createElement("div");
+        finger.id = "finger";
+        pad.appendChild(finger);
+
+        const HEARTBEAT_MS = 250;
+        let dragging = false;
+        let pendingPoint = null;
+        let lastPoint = null;
+        let sendQueued = false;
+        let heartbeat = null;
+
+        function queuePoint(e) {
+            const rect = pad.getBoundingClientRect();
+            const x = Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width));
+            const y = Math.min(1, Math.max(0, (e.clientY - rect.top) / rect.height));
+            finger.style.left = `${x * 100}%`;
+            finger.style.top = `${y * 100}%`;
+            pendingPoint = lastPoint = { x, y };
+            if (sendQueued) return;
+            sendQueued = true;
+            requestAnimationFrame(() => {
+                sendQueued = false;
+                if (pendingPoint) send({ action: "point", ...pendingPoint });
+                pendingPoint = null;
+            });
+        }
+
+        pad.addEventListener("pointerdown", (e) => {
+            e.preventDefault();
+            pad.setPointerCapture(e.pointerId);
+            dragging = true;
+            finger.classList.add("down");
+            queuePoint(e);
+            clearInterval(heartbeat);
+            heartbeat = setInterval(() => {
+                if (lastPoint) send({ action: "point", ...lastPoint });
+            }, HEARTBEAT_MS);
+        });
+        pad.addEventListener("pointermove", (e) => {
+            if (dragging) queuePoint(e);
+        });
+        const endDrag = () => {
+            if (!dragging) return;
+            dragging = false;
+            finger.classList.remove("down");
+            clearInterval(heartbeat);
+            // Drop any queued frame so it cannot re-grab control after the release.
+            pendingPoint = lastPoint = null;
+            send({ action: "release" });
+        };
+        pad.addEventListener("pointerup", endDrag);
+        pad.addEventListener("pointercancel", endDrag);
+        pad.addEventListener("lostpointercapture", endDrag);
+
+        document.querySelectorAll("[data-mode]").forEach((btn) => {
+            btn.addEventListener("click", () => send({ action: "mode", mode: btn.dataset.mode }));
+        });
+
+        document.querySelectorAll("[data-action]").forEach((btn) => {
+            btn.addEventListener("click", () => {
+                const action = btn.dataset.action;
+                if (action === "start") return send({ action, mode: btn.dataset.startMode });
+                if (action === "testMode") return send({ action, enabled: !(game && game.testMode) });
+                if (action === "pause" && game && game.status === "paused") return send({ action: "resume" });
+                send({ action });
+            });
+        });
+
+        function renderGame() {
+            if (!game) return;
+            $("screen").textContent = game.screen;
+            $("mode").textContent = game.mode;
+            $("score").textContent = game.score;
+            $("lives").textContent = game.lives;
+            $("time").textContent = `${Math.ceil(game.remainingMs / 1000)}s`;
+            $("status").textContent = game.status;
+            $("pauseBtn").textContent = game.status === "paused" ? "Resume" : "Pause";
+            $("testBtn").textContent = `Test mode: ${game.testMode ? "on" : "off"}`;
+            document.querySelectorAll("[data-mode]").forEach((btn) => {
+                btn.classList.toggle("selected", btn.dataset.mode === game.mode);
+            });
+            pad.classList.toggle("disabled", game.screen !== "game");
+            pad.querySelectorAll(".hole").forEach((cell, i) => {
+                const up = i === game.activeHole;
+                cell.classList.toggle("mole", up && game.moleType === "mole");
+                cell.classList.toggle("super", up && game.moleType === "super");
+                cell.classList.toggle("bomb", up && game.moleType === "bomb");
+                cell.classList.toggle("cursor", i === game.remoteHole);
+            });
+        }
+
+        function renderNodes(nodes) {
+            const body = $("nodes");
+            if (!nodes.length) {
+                body.innerHTML = '<tr><td colspan="4">No nodes</td></tr>';
+                return;
+            }
+            body.innerHTML = nodes
+                .slice()
+                .sort((a, b) => a.id - b.id)
+                .map((n) => {
+                    const cm = n.filtered_distance == null ? "--" : n.filtered_distance.toFixed(1);
+                    const state = n.online ? (n.has_turn ? "scanning" : "online") : "offline";
+                    return `<tr><td>${n.id}</td><td>${state}</td><td>${cm}</td><td>${(n.rps || 0).toFixed(1)}</td></tr>`;
+                })
+                .join("");
+        }
+
+        function connect() {
+            socket = new WebSocket(wsUrl);
+            socket.addEventListener("open", () => {
+                $("conn").textContent = "connected";
+                $("conn").className = "pill on";
+            });
+            socket.addEventListener("message", (event) => {
+                const payload = JSON.parse(event.data);
+                if (payload.type === "game:status") {
+                    game = payload;
+                    renderGame();
+                } else if (payload.type === "nodes:update") {
+                    renderNodes(payload.nodes);
+                }
+            });
+            socket.addEventListener("close", () => {
+                $("conn").textContent = "offline";
+                $("conn").className = "pill off";
+                setTimeout(connect, 1000);
+            });
+        }
+
+        connect();
+    </script>
+</body>
+<style>
+    * { box-sizing: border-box; }
+
+    body {
+        max-width: 480px;
+        margin: 0 auto;
+        padding: 12px 16px 32px;
+        background: #13131c;
+        color: #f4f4f5;
+        font-family: system-ui, -apple-system, sans-serif;
+        -webkit-tap-highlight-color: transparent;
+    }
+
+    header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 12px;
+    }
+
+    h2 {
+        font-size: 13px;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+        color: #9298aa;
+        margin: 20px 0 8px;
+    }
+
+    h2 small { text-transform: none; letter-spacing: 0; font-weight: normal; }
+
+    .pill { font-size: 12px; padding: 3px 10px; border-radius: 999px; }
+    .pill.on { background: #14532d; color: #86efac; }
+    .pill.off { background: #450a0a; color: #fca5a5; }
+
+    .stats {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 8px;
+    }
+
+    .stats div {
+        background: #1d1d2a;
+        border-radius: 10px;
+        padding: 8px 10px;
+        display: flex;
+        flex-direction: column;
+    }
+
+    .stats span { font-size: 11px; color: #9298aa; }
+    .stats b { font-size: 17px; overflow: hidden; text-overflow: ellipsis; }
+
+    #pad {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 10px;
+        touch-action: none;
+        user-select: none;
+        position: relative;
+    }
+
+    .hole { pointer-events: none; }
+
+    #finger {
+        position: absolute;
+        left: 50%;
+        top: 50%;
+        width: 36px;
+        height: 36px;
+        margin: -18px 0 0 -18px;
+        border-radius: 50%;
+        border: 3px solid #facc15;
+        background: rgba(250, 204, 21, 0.25);
+        pointer-events: none;
+        opacity: 0;
+        transition: opacity 0.15s;
+    }
+
+    #finger.down { opacity: 1; }
+
+    #pad.disabled { opacity: 0.4; }
+
+    .hole {
+        aspect-ratio: 1;
+        border-radius: 14px;
+        background: #3f2d1f;
+        border: 3px solid transparent;
+    }
+
+    .hole.mole { background: #8bc34a; }
+    .hole.super { background: #3b82f6; }
+    .hole.bomb { background: #dc2626; }
+    .hole.cursor { border-color: #facc15; }
+
+    .row { display: flex; gap: 8px; }
+    .row button { flex: 1; }
+
+    .grid2 {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 8px;
+    }
+
+    button {
+        font: inherit;
+        font-size: 15px;
+        padding: 14px 8px;
+        border: 0;
+        border-radius: 10px;
+        background: #2a2a3a;
+        color: #f4f4f5;
+    }
+
+    button:active { background: #3a3a50; }
+    button.primary { background: #1d4ed8; }
+    button.selected { background: #facc15; color: #13131c; font-weight: 600; }
+
+    table { width: 100%; border-collapse: collapse; font-size: 14px; }
+    th { text-align: left; color: #9298aa; font-weight: normal; font-size: 12px; }
+    th, td { padding: 6px 4px; border-bottom: 1px solid #2a2a3a; }
+</style>
+
+</html>

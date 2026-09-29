@@ -373,6 +373,90 @@ function startGameWithMode(mode) {
   startGameLoop();
 }
 
+// Touching the phone pad takes the cursor over from the sensors; lifting the
+// finger hands it straight back. The phone re-sends its position while a
+// finger is held, so if it goes quiet (lost release, phone locked) the
+// sensors take over again after REMOTE_IDLE_MS.
+const REMOTE_IDLE_MS = 1000;
+let remoteIdleTimer = null;
+
+function releaseRemote() {
+  window.clearTimeout(remoteIdleTimer);
+  remoteIdleTimer = null;
+  if (screen === "game" && window.getGameInputMode() === "remote") {
+    window.setGameInputMode("sensor");
+  }
+}
+
+// Commands relayed from the phone control panel (/control). The server only
+// relays these when it was started with CON=1.
+function handleRemoteCommand(command) {
+  switch (command.action) {
+    case "point":
+      if (screen !== "game") break;
+      if (window.getGameInputMode() !== "remote") window.setGameInputMode("remote");
+      window.setRemotePoint(command.x, command.y);
+      window.clearTimeout(remoteIdleTimer);
+      remoteIdleTimer = window.setTimeout(() => {
+        releaseRemote();
+        draw();
+      }, REMOTE_IDLE_MS);
+      break;
+    case "release":
+      releaseRemote();
+      break;
+    case "start":
+      startGameWithMode(command.mode || "remote");
+      break;
+    case "mode":
+      if (screen === "game") window.setGameInputMode(command.mode);
+      break;
+    case "pause":
+      window.pauseGame();
+      break;
+    case "resume":
+      window.resumeGame();
+      break;
+    case "restart":
+      startGameWithMode(window.getGameInputMode());
+      break;
+    case "menu":
+      stopGameLoop();
+      stopAlertNoise();
+      screen = "menu";
+      break;
+    case "testMode":
+      window.setGameSettings({ testMode: Boolean(command.enabled) });
+      break;
+    default:
+      return;
+  }
+  draw();
+}
+
+// Lets the control panel mirror the round. Cheap enough to send unconditionally;
+// the server drops it when the control panel is disabled.
+function sendGameStatus() {
+  if (!socket || socket.readyState !== WebSocket.OPEN) return;
+  const state = window.getGameState();
+  socket.send(JSON.stringify({
+    type: "game:status",
+    screen,
+    status: state.status,
+    mode: state.inputMode,
+    score: state.score,
+    lives: state.lives,
+    level: state.level,
+    remainingMs: state.remainingMs,
+    activeHole: state.activeHole,
+    moleType: state.moleType,
+    remoteHole: state.remoteHole,
+    testMode: window.getGameSettings().testMode,
+  }));
+}
+
+window.setInterval(sendGameStatus, 250);
+
 function connectSocket() {
   socket = new WebSocket(wsUrl);
 
@@ -406,6 +490,8 @@ function connectSocket() {
       maybeAutoContinueCalibration();
       logNodes();
       draw();
+    } else if (payload.type === "remote:command") {
+      handleRemoteCommand(payload);
     } else if (payload.type === "menu:status") {
       console.log(payload.message);
     }

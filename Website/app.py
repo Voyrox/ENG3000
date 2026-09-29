@@ -1,10 +1,11 @@
 import asyncio
 from collections import deque
 import json
+import os
 import socket
 import threading
 import time
-from flask import Flask, jsonify, render_template
+from flask import Flask, abort, jsonify, render_template
 from websockets.asyncio.server import broadcast, serve
 import numpy as np
 
@@ -49,12 +50,17 @@ FFT_MIN_SAMPLES = 16
 DISTANCE_SAMPLE_RATE_HZ = 20.0
 DISTANCE_CUTOFF_HZ = 2.0
 TURN_INTERVAL_SECONDS = 1.0
+# The phone control panel (/control) only exists when explicitly switched on:
+#   CON=1 python app.py
+CONTROL_ENABLED = os.environ.get("CON") == "1"
+CONTROL_ACTIONS = {"point", "release", "start", "mode", "pause", "resume", "restart", "menu", "testMode"}
 
 state_lock = threading.Lock()
 next_node_id = 1
 nodes = {}
 sync_tick = 0
 BROWSER_CONNECTIONS = set()
+CONTROL_CONNECTIONS = set()
 WS_LOOP = None
 
 
@@ -106,8 +112,9 @@ def snapshot_nodes():
 
 async def broadcast_nodes():
     message = json.dumps({"type": "nodes:update", "nodes": snapshot_nodes()})
-    if BROWSER_CONNECTIONS:
-        broadcast(BROWSER_CONNECTIONS.copy(), message)
+    targets = BROWSER_CONNECTIONS | CONTROL_CONNECTIONS
+    if targets:
+        broadcast(targets, message)
 
 
 def schedule_broadcast_nodes():
@@ -457,14 +464,40 @@ async def browser_handler(websocket):
                 print(f"Menu selection received: {option}")
                 status = json.dumps({"type": "menu:status", "message": f"Selected: {option}"})
                 broadcast(BROWSER_CONNECTIONS.copy(), status)
+            elif event.get("type") == "game:status" and CONTROL_CONNECTIONS:
+                broadcast(CONTROL_CONNECTIONS.copy(), message)
     finally:
         BROWSER_CONNECTIONS.discard(websocket)
+
+
+async def control_handler(websocket):
+    """Phone control panel: relays commands to every game browser."""
+    CONTROL_CONNECTIONS.add(websocket)
+    print(f"Control panel connected from {websocket.remote_address}")
+    try:
+        await websocket.send(json.dumps({"type": "nodes:update", "nodes": snapshot_nodes()}))
+        async for message in websocket:
+            try:
+                event = json.loads(message)
+            except json.JSONDecodeError:
+                continue
+            if event.get("action") not in CONTROL_ACTIONS:
+                continue
+            if event["action"] not in ("point", "release"):
+                print(f"Control panel: {event}")
+            command = json.dumps({**event, "type": "remote:command"})
+            broadcast(BROWSER_CONNECTIONS.copy(), command)
+    finally:
+        CONTROL_CONNECTIONS.discard(websocket)
+        print("Control panel disconnected")
 
 
 async def websocket_handler(websocket):
     match websocket.request.path:
         case "/browser":
             await browser_handler(websocket)
+        case "/control" if CONTROL_ENABLED:
+            await control_handler(websocket)
         case _:
             await websocket.close()
 
@@ -477,9 +510,28 @@ async def websocket_server():
         await asyncio.Future()
 
 
+def lan_ip():
+    """The laptop's address on the current network (no packet is sent)."""
+    probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        probe.connect(("10.255.255.255", 1))
+        return probe.getsockname()[0]
+    except OSError:
+        return "127.0.0.1"
+    finally:
+        probe.close()
+
+
 @app.route("/")
 def home():
     return render_template("index.html")
+
+
+@app.route("/control")
+def control():
+    if not CONTROL_ENABLED:
+        abort(404)
+    return render_template("control.html")
 
 
 @app.route("/api/nodes")
@@ -501,6 +553,8 @@ if __name__ == '__main__':
     threading.Thread(target=tcp_server, daemon=True).start()
     threading.Thread(target=cleanup_stale_nodes, daemon=True).start()
     threading.Thread(target=coordinator_loop, daemon=True).start()
+    if CONTROL_ENABLED:
+        print(f"Control panel enabled at http://{lan_ip()}:5000/control")
     # debug=False, deliberately. The Werkzeug debugger is a remote shell on the
     # machine running the rig, and this listens on 0.0.0.0 so every device on the
     # network can reach it. Anything that trips an exception while the rig is in
