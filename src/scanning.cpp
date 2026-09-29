@@ -4,9 +4,9 @@
 #include "scanning.h"
 
 //Trigger pin, Echo Pin
-int leftUSS[2] = {5, 18};
-int rightUSS[2] = {16, 17};
-int servoPin = 32;
+int leftUSS[2] = {33, 32};
+int rightUSS[2] = {33, 32};
+int servoPin = 15;
 
 //Notes
   //Refactor ultrasonics into seperate class later
