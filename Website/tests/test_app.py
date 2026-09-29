@@ -877,6 +877,46 @@ class NodeConnectionTests(BrokerTestCase):
         self.connect(b"\r\n", [], ("10.0.0.1", 1), fail_send=True)
         self.assertFalse(app.nodes[1]["online"])
 
+    def test_a_stale_session_cannot_take_the_node_offline_after_a_reconnect(self):
+        """The dropped socket's handler must not retire the node that replaced it.
+
+        A node that reconnects has two live handlers for a moment: the new
+        session and the old one's `finally` on its way out. The old one used to
+        mark the node offline, clearing the live connection's state - so a node
+        that reconnected went dark until it reconnected again.
+
+        Driven through the claim and the release rather than through two full
+        sessions, because `handle_node_connection` returns only when the socket
+        is already dead, and the point here is the two being alive at once.
+        """
+        stale = FakeNodeSocket(b"\r\n", [])
+        node_id, _ = app.reuse_or_register_node(("10.0.0.1", 1), None, "AA:BB", conn=stale)
+
+        # The node reconnects, claiming the same slot with a new session.
+        fresh = FakeNodeSocket(b"\r\n", [])
+        app.reuse_or_register_node(("10.0.0.9", 2), node_id, "AA:BB", conn=fresh)
+
+        # The session that has already been replaced finishes unwinding.
+        app.mark_node_offline(node_id, stale)
+
+        self.assertTrue(
+            app.nodes[node_id]["online"],
+            "the replaced session took the node offline underneath the live one",
+        )
+        self.assertIs(app.nodes[node_id]["conn"], fresh)
+
+    def test_a_session_that_still_owns_the_node_does_take_it_offline(self):
+        conn = FakeNodeSocket(b"\r\n", [])
+        node_id, _ = app.reuse_or_register_node(("10.0.0.1", 1), None, None, conn=conn)
+        app.mark_node_offline(node_id, conn)
+        self.assertFalse(app.nodes[node_id]["online"])
+
+    def test_a_socket_that_dies_before_claiming_its_node_still_releases_it(self):
+        """A reset socket never reaches the point of adopting its slot."""
+        conn = self.connect(b"\r\n", [], ("10.0.0.1", 1), fail_send=True)
+        self.assertFalse(app.nodes[1]["online"], "the node was left online")
+        self.assertTrue(conn.closed)
+
     def test_the_session_keeps_the_conn_lock_per_node(self):
         self.connect(b"\r\n", ['{"avg":1}\n'], ("10.0.0.1", 1))
         self.assertIsInstance(app.nodes[1]["conn_lock"], type(threading.Lock()))

@@ -125,7 +125,15 @@ def find_known_node(claimed_node_id, device_id):
     return None
 
 
-def reuse_or_register_node(address, claimed_node_id, device_id=None):
+def reuse_or_register_node(address, claimed_node_id, device_id=None, conn=None):
+    """Claim a node id for a connection, reusing the device's existing slot.
+
+    `conn` is adopted inside the same lock that hands out the id, which is the
+    point. The session that is taking a node over owns it from the instant it is
+    named, with no gap in between: a gap is a window in which this session's
+    `finally` would find the node unowned and retire it, and a reconnect that
+    landed in that window would be marked offline by the session it replaced.
+    """
     with state_lock:
         node = find_known_node(claimed_node_id, device_id)
         if node is not None:
@@ -140,7 +148,7 @@ def reuse_or_register_node(address, claimed_node_id, device_id=None):
             node["filtered_distance"] = None
             node["synced"] = False
             node["has_turn"] = False
-            node["conn"] = None
+            node["conn"] = conn
             if device_id:
                 node["device_id"] = device_id
             node_id = node["id"]
@@ -149,6 +157,7 @@ def reuse_or_register_node(address, claimed_node_id, device_id=None):
             node_id = alloc_node_id()
             record = new_node(address, device_id)
             record["id"] = node_id
+            record["conn"] = conn
             nodes[node_id] = record
     schedule_broadcast_nodes()
     return node_id, reused_existing
@@ -222,10 +231,21 @@ def update_node(node_id, message):
     schedule_broadcast_nodes()
 
 
-def mark_node_offline(node_id):
+def mark_node_offline(node_id, conn=None):
+    """Take a node offline, unless a newer connection has already taken it over.
+
+    A node that drops and reconnects is the normal case, and the two sessions
+    overlap: the old socket's handler can still reach its `finally` after the new
+    one has registered. Marking the node offline from the old session then wipes
+    the live connection's state, and the node goes dark until it reconnects a
+    third time. Passing the connection that is going away means the only session
+    allowed to retire the node is the one that is actually leaving.
+    """
     with state_lock:
         node = nodes.get(node_id)
         if node is None:
+            return
+        if conn is not None and node.get("conn") is not conn:
             return
         node["online"] = False
         node["rps"] = 0.0
@@ -373,16 +393,12 @@ def handle_node_connection(conn, address):
         elif raw_handshake and claimed_node_id is None:
             first_message = raw_handshake
         conn.settimeout(None)
-        node_id, reused_existing = reuse_or_register_node(address, claimed_node_id, device_id)
+        node_id, reused_existing = reuse_or_register_node(
+            address, claimed_node_id, device_id, conn=conn
+        )
         action = "restored" if reused_existing else "assigned"
         print(f"ESP32 connected from {address}, {action} id {node_id}")
         conn.sendall(f"{node_id}\n".encode("utf-8"))
-        with state_lock:
-            node = nodes.get(node_id)
-            if node is not None:
-                node["conn"] = conn
-                node["synced"] = False
-                node["has_turn"] = False
         if first_message is not None:
             update_node(node_id, first_message)
         with conn.makefile("r") as stream:
@@ -394,8 +410,9 @@ def handle_node_connection(conn, address):
     except (OSError, TimeoutError) as exc:
         print(f"Node {node_id if node_id is not None else 'unknown'} disconnected: {exc}")
     finally:
+        # Scoped to this session, so a reconnect already in flight is left alone.
         if node_id is not None:
-            mark_node_offline(node_id)
+            mark_node_offline(node_id, conn)
         conn.close()
 
 
@@ -471,4 +488,8 @@ if __name__ == '__main__':
     threading.Thread(target=tcp_server, daemon=True).start()
     threading.Thread(target=cleanup_stale_nodes, daemon=True).start()
     threading.Thread(target=coordinator_loop, daemon=True).start()
-    app.run(debug=True, host="0.0.0.0", threaded=True, use_reloader=False)
+    # debug=False, deliberately. The Werkzeug debugger is a remote shell on the
+    # machine running the rig, and this listens on 0.0.0.0 so every device on the
+    # network can reach it. Anything that trips an exception while the rig is in
+    # use is a bug to read in the log, not one to hand a console to the lab.
+    app.run(debug=False, host="0.0.0.0", threaded=True, use_reloader=False)

@@ -177,6 +177,26 @@
     return distanceCm >= near - EDGE_MARGIN_CM && distanceCm <= far + EDGE_MARGIN_CM;
   };
 
+  // Where each slot's sensor physically stands, left to right, in centimetres
+  // across the play area. Needed to turn per-sensor echo distances into one
+  // continuous position: two ranges from two known points is all the geometry
+  // that takes (see positionSolver.js).
+  //
+  // This is the centre of the column the slot owns, which is the same x the
+  // grid mapping uses, so a solved position and the cell derived from it can
+  // never disagree about where the column boundaries are.
+  const AREA_WIDTH_CM = 150; // matches PlayArea.width_cm in filterRules.py
+  const COLUMN_COUNT = 3;
+
+  window.getSensorCount = function getSensorCount() {
+    return COLUMN_COUNT;
+  };
+
+  window.getSensorX = function getSensorX(column) {
+    if (!Number.isInteger(column) || column < 0 || column >= COLUMN_COUNT) return null;
+    return ((column + 0.5) * AREA_WIDTH_CM) / COLUMN_COUNT;
+  };
+
   // Picks the row, refusing to leave the previous one until the reading has
   // travelled BAND_HYSTERESIS_CM clear of the boundary between them.
   function bandFor(distanceCm, nearCm, rowDepth, previousGy) {

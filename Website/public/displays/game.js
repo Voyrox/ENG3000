@@ -22,10 +22,14 @@
 // Two input modes share all of the game logic. Only the cursor source differs:
 //   "mouse"  - canvas.js feeds raw canvas pixels straight from mousemove.
 //              Reached via Skip on the calibration screen.
-//   "sensor" - readSensorCoordinate() picks the sensor that sees the player,
+//   "sensor" - readSensorCoordinate() picks the sensor that sees the player and
 //              rawToGrid() (callibrate_corners.js) turns that into 0-2 grid
-//              coordinates with (0,0) at BOTTOM-LEFT, and gridToCanvasPoint()
-//              places the cursor. Entered once all three nodes are configured.
+//              coordinates with (0,0) at BOTTOM-LEFT. That cell is the game
+//              rule: it decides which mole is live. Separately, the same
+//              per-node distances are triangulated into ONE continuous position
+//              in centimetres (positionSolver.js) and drawn as the cursor, so
+//              the player glides between holes instead of snapping to their
+//              centres. Entered once all three nodes are configured.
 
 (function () {
   const GAME_DURATION_MS = 60000; // overall round length shown as the countdown
@@ -121,6 +125,74 @@
   const COLUMN_MARGIN_CM = 8;     // a rival sensor must beat this to steal the column
   const TOO_CLOSE_FRAMES = 2;     // consecutive raw frames needed to raise the alert
 
+  // --- Continuous position ---------------------------------------------------
+  // The grid CELL is still what gets whacked, and it is still decided by the
+  // column a sensor owns plus the distance band the reading falls in. But the
+  // cursor no longer has to sit on that cell's centre: it is drawn from a
+  // continuous position in centimetres, so it glides across the board instead
+  // of jumping between nine fixed points.
+  //
+  // Keeping the cell derivation untouched matters. It is the part ported to
+  // filterRules.py and pinned by fixtures/js_parity_trace.json, and it is the
+  // part with the hysteresis and majority vote that stops a single bad frame
+  // changing which mole is live. The cursor is a presentation concern; the cell
+  // is the game rule.
+  const CURSOR_SMOOTH_TIME = 0.14; // s to close most of the gap to a new position
+  const CURSOR_MAX_SPEED = 900;     // px/s ceiling, so one bad frame cannot fling it
+
+  // Echo ranges that disagree by more than this are not one player, so no
+  // position is solved and the existing hold policy rides out the dropout
+  // instead. ~12 cm is about the disagreement a single unfiltered frame pair
+  // produces on a real target, so this rejects crosstalk without rejecting a
+  // player who is moving.
+  const MAX_POSITION_RESIDUAL_CM = 12;
+
+  // A solve also has to agree with the column vote before it is believed.
+  //
+  // The residual check alone is not enough, and it fails hardest exactly when it
+  // matters. With two nodes the normal equations are square, so least squares is
+  // exact: ANY pair of ranges produces a confident position with zero residual.
+  // With three nodes the per-slot median filter preserves the cross-slot
+  // coherence of a step change, so mid-turn-over all three ranges describe the
+  // same wrong point and again fit it exactly. Measured worst case, a step from
+  // one cell to another lands 80 cm off in x with a residual of 0.00.
+  //
+  // The column vote is the defence. It comes from a different rule - nearest
+  // in-bounds sensor, with COLUMN_MARGIN_CM of hysteresis - and its hysteresis is
+  // precisely what keeps it behind a coherent-but-wrong set of ranges long enough
+  // to disagree with them.
+  //
+  // It is a guard, not a guarantee, and the gap is worth stating. Once the vote
+  // has followed the ranges onto the new reading it agrees with the wrong solve
+  // by construction, and nothing downstream can tell the two apart: they are
+  // computed from the same numbers. That case is bounded rather than prevented -
+  // it resolves as soon as the median windows finish turning over, and
+  // POSITION_DISAGREE_FRAMES means it costs the cursor nothing when it is
+  // caught.
+  //
+  // The margin itself cannot be tightened much, because the two bands sit close
+  // together. A legitimately walking player can be 45 cm from the centre of the
+  // column that owns them: the vote's 8 cm of range hysteresis only turns over
+  // once the player is well past the column boundary, and near the back of the
+  // board the range difference grows slowly enough that the lag is wide. The
+  // smallest genuinely wrong solve is 50 cm away, a whole column pitch.
+  const COLUMN_SPAN_MARGIN_CM = 12;
+  // The check below is an identity for a coherent reading, so this only has to
+  // absorb filter noise, not real disagreement.
+  const POSITION_DEPTH_TOLERANCE_CM = 15;
+
+  // New readings a rejected solve is tolerated for before the cursor gives up
+  // and drops back to the column centre.
+  //
+  // This is what makes the margin above safe rather than a tuning compromise.
+  // A rejected solve HOLDS the last good position instead of jumping, because
+  // the two ways to be wrong here are both transient and self-cancelling. A
+  // stale column vote means the solve was right, and the vote catches up within
+  // a frame or two. A genuinely inconsistent set of ranges resolves within one
+  // median window. Neither is worth lurching the cursor for, and holding means
+  // neither band can put the cursor visibly in the wrong place.
+  const POSITION_DISAGREE_FRAMES = 25;
+
   // Bottom-left HUD. The position map sits directly above the sensor panel.
   const SENSOR_PANEL_H = 132;     // px
   const MAP_AREA_WIDTH_CM = 150;  // matches PlayArea.width_cm in filterRules.py
@@ -132,6 +204,17 @@
   // touches them and a `let` read before its line runs throws.
   let coordinateMap = null;
   let lastMapPoint = null;
+
+  // Drawn-cursor smoothing. Created once and reset between rounds, so it is
+  // declared with the rest of the module state rather than per round.
+  const cursorSmoother = new window.CursorSmoother({
+    smoothTime: CURSOR_SMOOTH_TIME,
+    maxSpeed: CURSOR_MAX_SPEED,
+  });
+  let cursorLastStepAt = null;
+  // New readings in a row that the solver has been refused for. See
+  // POSITION_DISAGREE_FRAMES.
+  let positionDisagreeStreak = 0;
 
   // Cell stabilisation. Filtering the distance is not enough on its own: a
   // single bad reading that survives the median still lands the cursor in the
@@ -197,6 +280,9 @@
     distanceCm: null, // that sensor's raw reading
     gx: null,
     gy: null, // parsed 0-2 grid coordinate
+    xCm: null,
+    yCm: null, // continuous play-area position, drives the cursor
+    resolved: false, // false when x fell back to the column centre
     configured: 0, // how many sensors reported a usable number
   });
 
@@ -488,7 +574,7 @@
       }
     }
 
-    return { holes, cellSize, gridLeft, gridTop, gridSize };
+    return { holes, cellSize, cellGap, gridLeft, gridTop, gridSize };
   };
 
   function awardPointForHole(holeIndex) {
@@ -684,8 +770,15 @@
     lastSeenFrameSeq = sensorFrameSeq;
     badReadingStreak = 0;
     resetCellFilter();
+    positionDisagreeStreak = 0;
     sensorHold.grid = null;
+    sensorHold.world = null;
     sensorHold.lastOkAt = -Infinity;
+    // Drops the drawn position too, so a new round opens its cursor where the
+    // player is standing instead of springing across the board from wherever
+    // the last one ended.
+    cursorSmoother.reset();
+    cursorLastStepAt = null;
     resetCoordinateMap();
   }
 
@@ -820,8 +913,136 @@
     };
   };
 
+  // --- Continuous position ----------------------------------------------------
+  // Everything below turns the same readings the grid mapping uses into ONE
+  // position in centimetres, so the cursor can be anywhere on the board rather
+  // than only at nine hole centres.
+
+  const SENSOR_COUNT = 3;
+  // Horizontal pitch between neighbouring sensors, i.e. the width of a column.
+  const COLUMN_PITCH_CM = MAP_AREA_WIDTH_CM / SENSOR_COUNT;
+
+  function sensorX(column) {
+    if (!window.getSensorX) return ((column + 0.5) * MAP_AREA_WIDTH_CM) / SENSOR_COUNT;
+    const x = window.getSensorX(column);
+    return x === null ? ((column + 0.5) * MAP_AREA_WIDTH_CM) / SENSOR_COUNT : x;
+  }
+
+  // Solves a continuous (x, y) in centimetres from the per-slot filtered
+  // distances. Two slots are enough - two ranges from two known points pin the
+  // player down - and a third, when it is in range, only sharpens the answer.
+  //
+  // Only slots whose reading is inside their own play area are offered to the
+  // solver. A node staring at a wall past the back of the board is not looking
+  // at the player, and one such range is enough to drag the solution away from
+  // where they are actually standing.
+  function solveWorldPosition(fix) {
+    if (!window.Multilateration) return null;
+
+    const samples = [];
+    fix.filtered.forEach((distance, slot) => {
+      if (distance === null || distance === undefined) return;
+      if (window.isWithinPlayArea && !window.isWithinPlayArea(slot, distance)) return;
+      samples.push({ x: sensorX(slot), d: distance });
+    });
+
+    const solved = window.Multilateration.solve(samples, {
+      maxResidualCm: MAX_POSITION_RESIDUAL_CM,
+    });
+    // A solve that contradicts the column vote is discarded, and the caller
+    // falls back to the column centre. Degrading to "one column wide" is much
+    // better than drawing the player in the wrong place.
+    return positionAgreesWithColumn(solved, fix) ? solved : null;
+  }
+
+  // Second opinion on a solve, from the column vote. See the note on
+  // MAX_POSITION_RESIDUAL_CM for why the solver's own residual cannot be
+  // trusted on its own.
+  function positionAgreesWithColumn(solved, fix) {
+    if (!solved || !fix) return false;
+
+    // Across: a column is half a pitch either side of its centre, and that
+    // boundary is exactly where two sensors tie, hence the extra margin. This
+    // is what catches a solve that has locked onto a different column entirely.
+    const columnCentre = sensorX(fix.column);
+    if (Math.abs(solved.x - columnCentre) > COLUMN_PITCH_CM / 2 + COLUMN_SPAN_MARGIN_CM) {
+      return false;
+    }
+
+    // Depth: for a reading that really came from the player, the range and the
+    // lateral offset satisfy the Pythagorean identity exactly. A solve that has
+    // the right column but an impossible depth is not the player either.
+    const offset = solved.x - columnCentre;
+    const impliedDepth = Math.sqrt(Math.max(0, fix.distanceCm * fix.distanceCm - offset * offset));
+    if (Math.abs(solved.y - impliedDepth) > POSITION_DEPTH_TOLERANCE_CM) return false;
+
+    return true;
+  }
+
+  // Position of the column a reading fell in, at that reading's depth. The
+  // honest floor when there is not enough geometry to solve for x - a single
+  // node genuinely cannot tell "to the left" from "further away" - and it is
+  // what the old column-only code always assumed.
+  function columnCentreWorld(column, distanceCm) {
+    return { x: sensorX(column), y: distanceCm };
+  }
+
+  // Continuous play-area centimetres -> canvas pixels.
+  //
+  // Calibrated so a position at a column centre AND a row-band centre lands on
+  // that hole's centre exactly - the same pixel gridToCanvasPoint returns for
+  // that cell. Every hole centre is therefore a fixed point of this mapping, so
+  // the smooth cursor passes through all nine of them and the drawn cursor can
+  // never disagree with the hit-test grid about where a mole is.
+  //
+  // Both axes are anchored on the NEAR-LEFT corner of the play area, because
+  // that is the origin gridToCanvasPoint counts out from: x grows right from
+  // the first column's centre, and depth grows up from the near edge, which is
+  // canvas-down.
+  function worldToCanvasPoint(canvas, xCm, yCm, column) {
+    if (!Number.isFinite(xCm) || !Number.isFinite(yCm)) return null;
+
+    const layout = window.getGameGridLayout(canvas);
+    // Centre-to-centre spacing of neighbouring holes, in pixels.
+    const pitch = layout.cellSize + layout.cellGap;
+
+    // Rows come from the same column's calibrated near/far as gridToCanvasPoint
+    // uses, so the two mappings stay in step even when columns are calibrated
+    // to different depths.
+    const bounds = window.getCalibrationBounds ? window.getCalibrationBounds() : null;
+    const slot = Number.isInteger(column) && column >= 0 && column < SENSOR_COUNT ? column : 1;
+    const span = bounds ? bounds.perColumn[slot] : { near: 20, far: 140 };
+    const rowDepth = Math.max(1e-6, (span.far - span.near) / SENSOR_COUNT);
+
+    // How many hole-widths from column 0's centre, and how far through the
+    // three rows, measured from the near edge. A column centre is an integer,
+    // and the middle of row r sits at t = r + 0.5.
+    const acrossHoles = (xCm - sensorX(0)) / COLUMN_PITCH_CM;
+    const depthT = (yCm - span.near) / rowDepth;
+
+    return {
+      x: layout.gridLeft + layout.cellSize / 2 + acrossHoles * pitch,
+      // Depth grows away from the screen, canvas y grows downward, so row 0
+      // (nearest the screen) is the last pitch down.
+      y: layout.gridTop + layout.cellSize / 2 + (SENSOR_COUNT - 0.5 - depthT) * pitch,
+    };
+  }
+
+  // Drives the drawn cursor from a continuous position, through the spring.
+  // Returns the pixel actually drawn, because the hover test has to use the
+  // drawn position too - scoring against the raw target would whack a mole a
+  // moment before the cursor visibly reached it.
+  function moveCursor(canvas, world, column, dt) {
+    const target = worldToCanvasPoint(canvas, world.x, world.y, column);
+    if (!target) return null;
+    const point = cursorSmoother.step(target, dt);
+    if (!point) return null;
+    gameState.cursor = { x: point.x, y: point.y, inBounds: true };
+    return point;
+  }
+
   // Last known-good cell, used to coast through brief signal loss.
-  const sensorHold = { grid: null, lastOkAt: -Infinity };
+  const sensorHold = { grid: null, world: null, lastOkAt: -Infinity };
 
   // --- Cell stabilisation ----------------------------------------------------
 
@@ -875,6 +1096,12 @@
     const now = performance.now();
     const fix = readSensorCoordinate(orderedNodes);
 
+    // Frame delta for the cursor spring. Clamped inside the smoother, and
+    // meaningless on the first frame after a reset because the spring snaps to
+    // its first target rather than easing toward it.
+    const dt = cursorLastStepAt === null ? 0 : now - cursorLastStepAt;
+    cursorLastStepAt = now;
+
     let grid = null;
     if (fix.status === "ok") {
       const mapped = window.rawToGrid(fix.column, fix.distanceCm, sensorHold.grid);
@@ -888,16 +1115,40 @@
       const cell = stabiliseCell(grid.gx, grid.gy, fix.isNewReading);
       const stable = { ...grid, gx: cell.gx, gy: cell.gy };
 
-      sensorHold.grid = stable;
+      // Two things come out of one set of readings: the discrete cell, which is
+      // the game rule and is decided exactly as it always was, and a continuous
+      // position, which is only ever used to draw the cursor. They are derived
+      // from the same numbers, so the cursor cannot drift somewhere the grid
+      // mapping does not also believe the player is.
+      const solved = solveWorldPosition(fix);
+      let world;
+      if (solved) {
+        world = { x: solved.x, y: solved.y, resolved: true };
+        positionDisagreeStreak = 0;
+      } else if (sensorHold.world && positionDisagreeStreak < POSITION_DISAGREE_FRAMES) {
+        // Refused. Hold the last good position rather than snapping to the
+        // column centre - see POSITION_DISAGREE_FRAMES for why a jump is the
+        // one thing that must not happen here.
+        world = { ...sensorHold.world };
+        if (fix.isNewReading) positionDisagreeStreak += 1;
+      } else {
+        // Nothing believable to hold: fall back to the column centre, which is
+        // always at worst one column from the truth.
+        world = { ...columnCentreWorld(fix.column, fix.distanceCm), resolved: false };
+        if (fix.isNewReading) positionDisagreeStreak += 1;
+      }
+
+      sensorHold.grid = { ...stable, yCm: world.y };
+      sensorHold.world = world;
       sensorHold.lastOkAt = now;
-      const point = window.gridToCanvasPoint(canvas, stable.gx, stable.gy);
       gameState.sensor = {
         ...fix, gx: stable.gx, gy: stable.gy,
         rawGx: grid.gx, rawGy: grid.gy,
         calibrated: grid.calibrated, held: false, heldFor: 0,
+        xCm: world.x, yCm: world.y, resolved: world.resolved,
       };
-      gameState.cursor = { x: point.x, y: point.y, inBounds: true };
-      window.handleGameHover(canvas, point.x, point.y);
+      const point = moveCursor(canvas, world, cell.gx, dt);
+      if (point) window.handleGameHover(canvas, point.x, point.y);
       return;
     }
 
@@ -905,6 +1156,7 @@
     if (fix.status === "too-close") {
       badReadingStreak = 0;
       sensorHold.grid = null;
+      sensorHold.world = null;
       gameState.sensor = { ...fix, gx: null, gy: null, held: false, heldFor: 0 };
       gameState.cursor = { x: null, y: null, inBounds: false };
       return;
@@ -922,17 +1174,23 @@
 
     if (sensorHold.grid && withinBudget && withinTimeout) {
       const held = sensorHold.grid;
-      const point = window.gridToCanvasPoint(canvas, held.gx, held.gy);
+      // While held, the fix belongs to the BAD reading, so the last good
+      // position is the one shown - exactly as the last good cell is.
+      const world = sensorHold.world || columnCentreWorld(held.gx, held.yCm);
       gameState.sensor = {
         ...fix, status: "ok", gx: held.gx, gy: held.gy,
         calibrated: held.calibrated, held: true, heldFor: badReadingStreak,
+        xCm: world.x, yCm: world.y, resolved: world.resolved,
       };
-      gameState.cursor = { x: point.x, y: point.y, inBounds: true };
-      window.handleGameHover(canvas, point.x, point.y);
+      // The spring keeps running while held, so the cursor eases to a stop
+      // instead of freezing mid-board the moment a frame is dropped.
+      const point = moveCursor(canvas, world, held.gx, dt);
+      if (point) window.handleGameHover(canvas, point.x, point.y);
       return;
     }
 
     sensorHold.grid = null;
+    sensorHold.world = null;
     gameState.sensor = {
       ...fix,
       status: fix.status === "ok" ? "out-of-bounds" : fix.status,
@@ -953,6 +1211,14 @@
       column: sensor.column,
       distanceCm: sensor.distanceCm,
       grid: sensor.gx === null ? null : { gx: sensor.gx, gy: sensor.gy },
+      // Continuous position in play-area centimetres, and whether x came from
+      // triangulating two or more nodes or fell back to the column centre. A
+      // rig with only one node in range can never resolve x, and this is how
+      // you tell that apart from a genuinely still player.
+      world: sensor.xCm === null || sensor.xCm === undefined
+        ? null
+        : { xCm: sensor.xCm, yCm: sensor.yCm, resolved: Boolean(sensor.resolved) },
+      cursor: gameState.cursor.x === null ? null : { ...gameState.cursor },
       badReadings: badReadingStreak,
       rejected: sensorFilters.map((filter) => filter.rejectCount),
       holdBudget: tuning.holdReadings,
@@ -1272,8 +1538,27 @@
 
     // Resolved fix
     const fixY = y + panelH - 12;
-    ctx.font = "bold 12px monospace";
     const status = sensor.status;
+
+    // The continuous position the cursor is drawn from, and whether x came from
+    // triangulating two or more nodes or fell back to the column centre. With a
+    // single node in range x can never be resolved, so this line is how you
+    // tell a coarse fix from a genuinely still player. Sits on its own row above
+    // the grid fix, which stays where it was.
+    if (status === "ok" && Number.isFinite(sensor.xCm)) {
+      ctx.font = "11px monospace";
+      ctx.fillStyle = sensor.resolved ? "#7dd3fc" : "#f59e0b";
+      ctx.fillText(
+        `x ${formatCm(sensor.xCm)}cm  y ${formatCm(sensor.yCm)}cm` +
+          (sensor.resolved ? "  triangulated" : "  column centre"),
+        x + 16,
+        y + panelH - 28
+      );
+    }
+
+    // Set here rather than inside each branch so the position line above cannot
+    // leak its 11px font into the status text.
+    ctx.font = "bold 12px monospace";
 
     if (status === "ok" && sensor.gx !== null) {
       ctx.fillStyle = sensor.held ? "#f59e0b" : "#22c55e";
@@ -1326,10 +1611,10 @@
     if (coordinateMap) coordinateMap.clear();
   }
 
-  // Today's rig cannot resolve position within a column, so x is the centre of
-  // whichever column won and y is that sensor's filtered distance. While the
-  // cursor is being held through bad readings the fix belongs to the bad
-  // reading, so the last good position is shown instead.
+  // The continuous play-area position, which is the same fix the cursor is
+  // drawn from, so the map and the cursor cannot disagree. While the cursor is
+  // being held through bad readings the fix belongs to the bad reading, so the
+  // last good position is shown instead.
   function mapCoordinateFromSensor(sensor) {
     const label = sensor.held ? "held"
       : sensor.status === "ok" ? null
@@ -1340,12 +1625,12 @@
                y: lastMapPoint ? lastMapPoint.y : null, label };
     }
 
-    const hasFix = Number.isInteger(sensor.column) && Number.isFinite(sensor.distanceCm);
+    const hasFix = Number.isFinite(sensor.xCm) && Number.isFinite(sensor.yCm);
     if (!hasFix) return { x: null, y: null, label };
 
     // Out-of-bounds fixes still carry a position; the map pins those to its
     // edge in red, which shows the player which way they went.
-    const point = { x: ((sensor.column + 0.5) * MAP_AREA_WIDTH_CM) / 3, y: sensor.distanceCm };
+    const point = { x: sensor.xCm, y: sensor.yCm };
     if (sensor.status === "ok") lastMapPoint = point;
     return { ...point, label };
   }
