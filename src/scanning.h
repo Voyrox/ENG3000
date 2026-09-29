@@ -28,3 +28,9 @@ int getScanState();
 // on by the server (ROLE LEFT / ROLE RIGHT). Sets the servo limits for that mount.
 enum ScanRole { ROLE_UNKNOWN, ROLE_LEFT, ROLE_RIGHT };
 void setScanRole(ScanRole role);
+
+// Calibration (server AIM <deg> / SCAN): hold the servo at a fixed angle so the
+// node can be aimed straight by hand - it still reads and reports, but neither
+// steers nor sweeps - then go back to scanning.
+void aimServoAt(int degrees);
+void resumeScanning();

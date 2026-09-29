@@ -32,6 +32,15 @@ static void handleLine(const String& line) {
         else setScanRole(ROLE_UNKNOWN);
         Serial.print("Scan role: ");
         Serial.println(role);
+    } else if (line.startsWith("AIM ")) {
+        // Calibration: hold the servo here so the node can be aimed by hand.
+        int degrees = line.substring(4).toInt();
+        aimServoAt(degrees);
+        Serial.print("Servo held at ");
+        Serial.println(degrees);
+    } else if (line == "SCAN") {
+        resumeScanning();
+        Serial.println("Scanning resumed");
     } else {
         Serial.print("Unhandled PC command: ");
         Serial.println(line);

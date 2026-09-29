@@ -153,6 +153,23 @@ float ultraSonicRead(const int USS[2]){
   return distance;
 }
 
+// Calibration: the server holds the servo at a fixed angle (AIM 90) while the
+// operator aims each node straight out by hand, then lets it scan again (SCAN).
+// While held the node still reads and reports - the calibration screen needs
+// the readings to tell which node is which - but it neither steers nor sweeps.
+bool aimHeld = false;
+
+void aimServoAt(int degrees) {
+  aimHeld = true;
+  angle = constrain(degrees, 0, 180);
+  theServo.write(angle);
+  lastServoWriteAt = millis();
+}
+
+void resumeScanning() {
+  aimHeld = false;
+}
+
 void setScanRole(ScanRole role) {
   ScanLimits limits = UNKNOWN_ROLE_LIMITS;
   if (role == ROLE_LEFT) limits = LEFT_NODE_LIMITS;
@@ -228,6 +245,12 @@ bool scanLoop(){
 
   // Both sensors were read at this angle; the servo only moves below.
   readAngle = angle;
+
+  // Held straight for calibration: report this reading, but do not move.
+  if (aimHeld) {
+    rotationWaitTrack = millis();
+    return true;
+  }
 
   switch (state){
     case 0:{

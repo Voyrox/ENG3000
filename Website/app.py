@@ -414,6 +414,36 @@ def assign_node_roles(slots):
         send_command(node_id, f"ROLE {role}")
 
 
+# Calibration holds every node's servo at 90 degrees so the nodes can be aimed
+# straight out by hand; otherwise they scan. Set by the browser's calibration
+# screen (nodes:aim); a node that connects mid-calibration is told on arrival.
+AIM_ANGLE_DEG = 90
+nodes_aim_held = False
+
+
+def aim_command():
+    return f"AIM {AIM_ANGLE_DEG}" if nodes_aim_held else "SCAN"
+
+
+def set_nodes_aim(hold):
+    """Hold every connected node's servo straight, or let them all scan."""
+    global nodes_aim_held
+    with state_lock:
+        nodes_aim_held = bool(hold)
+        command = aim_command()
+        node_ids = [node_id for node_id, node in nodes.items() if node.get("conn") is not None]
+    for node_id in node_ids:
+        send_command(node_id, command)
+
+
+def send_node_aim(node_id):
+    """Tell a node that connects during calibration to hold straight too."""
+    with state_lock:
+        command = aim_command() if nodes_aim_held else None
+    if command is not None:
+        send_command(node_id, command)
+
+
 def send_node_role(node_id):
     """Re-send a known role, e.g. after the node reconnects."""
     with state_lock:
@@ -500,8 +530,10 @@ def handle_node_connection(conn, address):
         action = "restored" if reused_existing else "assigned"
         print(f"ESP32 connected from {address}, {action} id {node_id}")
         conn.sendall(f"{node_id}\n".encode("utf-8"))
-        # A rebooted node has forgotten which mount it is; tell it again.
+        # A rebooted node has forgotten which mount it is, and whether it should
+        # be holding straight for calibration; tell it again.
         send_node_role(node_id)
+        send_node_aim(node_id)
         if first_message is not None:
             update_node(node_id, first_message)
         with conn.makefile("r") as stream:
@@ -571,10 +603,17 @@ async def browser_handler(websocket):
                 await asyncio.to_thread(assign_node_roles, event.get("slots"))
                 if server_filter is not None:
                     apply_filter_event(event)
+            elif event.get("type") == "nodes:aim":
+                # The calibration screen opening (hold) or closing (release).
+                await asyncio.to_thread(set_nodes_aim, bool(event.get("hold")))
             elif server_filter is not None:
                 apply_filter_event(event)
     finally:
         BROWSER_CONNECTIONS.discard(websocket)
+        # The calibration screen that asked for the hold went with its tab: let
+        # the nodes scan again rather than stay frozen at 90 degrees.
+        if not BROWSER_CONNECTIONS and nodes_aim_held:
+            await asyncio.to_thread(set_nodes_aim, False)
 
 
 async def control_handler(websocket):

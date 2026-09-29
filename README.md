@@ -24,7 +24,9 @@ Each ESP32 is a servo scanner (`src/scanning.cpp`): two ultrasonic sensors side 
 - `angle` is the servo angle the pair was read at: 90 points straight out into the play area, larger turns towards screen-left
 - `scanState` is `0` found (both readings agree), `1` half-found (one sees the player), `2` lost (sweeping)
 
-The server sends control lines back: `SYNC <tick>`, `TURN` / `HALT`, and `ROLE LEFT` / `ROLE RIGHT` once the game's calibration screen has identified the node (again whenever it reconnects), which sets that mount's servo limits.
+The server sends control lines back: `SYNC <tick>`, `TURN` / `HALT`, `ROLE LEFT` / `ROLE RIGHT` once the game's calibration screen has identified the node (again whenever it reconnects), which sets that mount's servo limits, and `AIM 90` / `SCAN` while the calibration screen is open / after it closes.
+
+**Calibration** is the game's sensor-assignment screen: both servos are held at 90 degrees (`AIM 90`) while the operator aims the nodes straight out into the play area by hand and identifies LEFT and RIGHT with a hand in front of each; Start Game then lets the nodes scan again (`SCAN`). There is no play-area (corner) calibration: the game plays on the default bounds, rows between 20 and 140 cm in every column. The browser asks for the hold with `{"type": "nodes:aim", "hold": true}` and releases it with `false`; if the last browser tab closes mid-calibration the server releases it itself.
 
 The game puts each node on the screen edge at the centre of an outer column and turns its distance and angle into a position; with both nodes in bounds the two positions are averaged. A node that sends no `angle` is treated as pointing straight out, and two such nodes are placed by trilateration.
 
@@ -69,11 +71,11 @@ With server-side filtering on, the server also accepts:
 {"type": "calibration:update", "perColumn": [{"near": 28.5, "far": 140.7}, ...]}
 ```
 
-The browser sends these only when the server reports the flag on, which it
-does by including the `coordinate` field in `nodes:update`. With the flag off
-the field is absent and the browser sends nothing new. `canvas.js` sends
-`sensors:assign` once the hand-wave assignment is complete, and
-`calibration:update` once all six corners are captured. Each is sent again
+`sensors:assign` is sent whatever the flag (the server passes each node its
+role), once the hand-wave assignment is complete. `calibration:update` is only
+sent when the server reports the flag on (the `coordinate` field in
+`nodes:update`) and a corner calibration has been captured - which no screen
+does any more, so the server keeps its default bounds. Each is sent again
 only if it changes or the socket reconnects, because `sensors:assign` resets
 the server's filters. `perColumn` is sent as captured; the server applies the
 same shallow-column fallback as `getBounds()`.
@@ -176,8 +178,8 @@ sensor_slots = [None, None, None]                         # node id per L, C, R
 
 **2. Get the sensor order and calibration from the browser.** Both currently
 live only in the browser: `calibrate.js` works out which node is left, centre
-and right by hand-wave, and `callibrate_corners.js` captures the six play-area
-points. Node IDs are assigned in TCP connection order and say nothing about
+and right by hand-wave, and `callibrate_corners.js` holds the play-area
+bounds (captured corners once; now the defaults). Node IDs are assigned in TCP connection order and say nothing about
 position, so the server cannot infer either. In `browser_handler()`, beside
 the existing `menu:select` case, accept:
 

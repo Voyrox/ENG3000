@@ -1253,6 +1253,52 @@ class NodeRoleTests(BrokerTestCase):
         self.assertEqual(node["conn"].sent, ["ROLE RIGHT\n"])
 
 
+class NodeAimTests(BrokerTestCase):
+    """Calibration holds every servo at 90 degrees while the nodes are aimed."""
+
+    def setUp(self):
+        super().setUp()
+        self._saved_aim = app.nodes_aim_held
+        self._saved_roles = dict(app.node_roles)
+        app.nodes_aim_held = False
+        app.node_roles.clear()
+
+    def tearDown(self):
+        app.nodes_aim_held = self._saved_aim
+        app.node_roles.clear()
+        app.node_roles.update(self._saved_roles)
+        super().tearDown()
+
+    def test_the_hold_and_release_reach_every_connected_node(self):
+        _, first = self.add_node(conn=RecordingConn())
+        _, second = self.add_node(address=("10.0.0.2", 1001), conn=RecordingConn())
+        app.set_nodes_aim(True)
+        app.set_nodes_aim(False)
+        self.assertEqual(first["conn"].sent, ["AIM 90\n", "SCAN\n"])
+        self.assertEqual(second["conn"].sent, ["AIM 90\n", "SCAN\n"])
+
+    def test_a_node_that_connects_mid_calibration_holds_straight_too(self):
+        app.set_nodes_aim(True)
+        conn = FakeNodeSocket(b"\r\n")
+        app.handle_node_connection(conn, ("10.0.0.1", 1000))
+        self.assertEqual(conn.sent, ["1\n", "AIM 90\n"])
+
+    def test_a_node_that_connects_while_scanning_is_sent_nothing_extra(self):
+        conn = FakeNodeSocket(b"\r\n")
+        app.handle_node_connection(conn, ("10.0.0.1", 1000))
+        self.assertEqual(conn.sent, ["1\n"])
+
+    def test_the_calibration_screen_holds_the_nodes_without_server_filtering(self):
+        _, node = self.add_node(conn=RecordingConn())
+        message = json.dumps({"type": "nodes:aim", "hold": True})
+        socket = FakeBrowserSocket(incoming=[message])
+        with mock.patch.object(app, "server_filter", None):
+            asyncio.run(app.browser_handler(socket))
+        # Held while the screen was open; released when its (only) tab went.
+        self.assertEqual(node["conn"].sent, ["AIM 90\n", "SCAN\n"])
+        self.assertFalse(app.nodes_aim_held)
+
+
 class ScannerAngleTests(unittest.TestCase):
     """The servo angle a scanner node sends alongside its distance."""
 

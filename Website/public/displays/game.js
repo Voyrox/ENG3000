@@ -1920,13 +1920,6 @@
       ctx.fillText(String(status).toUpperCase().replace(/-/g, " "), x + 16, fixY);
     }
 
-    if (sensor.calibrated === false) {
-      ctx.fillStyle = "#f59e0b";
-      ctx.font = "10px monospace";
-      ctx.textAlign = "right";
-      ctx.fillText("uncalibrated", x + panelW - 16, fixY);
-    }
-
     ctx.textAlign = "start";
   }
 

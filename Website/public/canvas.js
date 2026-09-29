@@ -73,13 +73,12 @@ function draw() {
   ctx.clearRect(0, 0, c.width, c.height);
   ctx.setTransform(viewport.dpr, 0, 0, viewport.dpr, 0, 0);
 
+  // Every screen change ends in a draw, so this is where the servo hold follows
+  // the screen. It only sends when the wanted state changes.
+  syncNodesAim();
+
   if (screen === "calibrate") {
     renderCalibrate(ctx, c, getSortedNodes());
-    return;
-  }
-
-  if (screen === "calibrate_corners") {
-    window.renderCalibrateCorners(ctx, c, window.readSensorCoordinate(getCalibrateNodes()));
     return;
   }
 
@@ -234,11 +233,10 @@ function logSensorStatus() {
   // window the reading actually failed against.
   let why = "";
   if (debug.status === "out-of-bounds" && debug.bounds) {
-    const { nearCm, farCm, calibrated } = debug.bounds;
+    const { nearCm, farCm } = debug.bounds;
     why =
       `  (play area ${nearCm.toFixed(0)}-${farCm.toFixed(0)}cm` +
-      `, limit ${debug.limits.maxCm.toFixed(0)}cm` +
-      `${calibrated ? "" : ", UNCALIBRATED"})`;
+      `, limit ${debug.limits.maxCm.toFixed(0)}cm)`;
   }
 
   console.info(
@@ -302,27 +300,18 @@ function getCalibrateNodes() {
   return calibrateSlotNodeIds.map((nodeId) => (nodeId === null ? null : nodes.get(nodeId) || null));
 }
 
-// Auto-advance fires at most once per visit to the calibration screen. Without
-// this latch a nodes:update arriving milliseconds after the user presses Back
-// on the corners page would bounce them straight forward again - with two
-// nodes online the update stream runs at up to 40 messages per second.
-let calibrateAutoContinueArmed = true;
+// --- Servos held straight while calibrating -----------------------------------
+// While the calibration screen is up, every node's servo is held at 90 degrees
+// so the operator can aim the nodes straight out into the play area by hand;
+// on any other screen the nodes scan. The server passes it on to each node
+// (AIM 90 / SCAN). Sent whenever the wanted state changes, and again after a
+// reconnect, since a restarted server has forgotten it.
+let sentNodesAim = null;
 
-// Both sensors identified means the rig is ready, so move straight on to
-// corner calibration without waiting for a button press.
-function maybeAutoContinueCalibration() {
-  if (screen !== "calibrate") return;
-
-  // Gate on identification, not just connectivity: two online sensors are
-  // useless until we know which is left and which is right.
-  if (!window.isSensorAssignmentComplete()) {
-    calibrateAutoContinueArmed = true;
-    return;
-  }
-
-  if (!calibrateAutoContinueArmed) return;
-  calibrateAutoContinueArmed = false;
-  screen = "calibrate_corners";
+function syncNodesAim() {
+  const hold = screen === "calibrate";
+  if (hold === sentNodesAim) return;
+  if (sendToServer({ type: "nodes:aim", hold })) sentNodesAim = hold;
 }
 
 // The loop keeps running across the game <-> alert boundary so the sensors are
@@ -525,6 +514,8 @@ function connectSocket() {
     console.log("WebSocket connected");
     sentAssignmentKey = null;
     sentCalibrationKey = null;
+    sentNodesAim = null;
+    syncNodesAim();
   });
 
   socket.addEventListener("message", (event) => {
@@ -552,7 +543,6 @@ function connectSocket() {
       }
       updateCalibrateSlots(payload.nodes);
       syncServerFilterSetup();
-      maybeAutoContinueCalibration();
       logNodes();
       draw();
     } else if (payload.type === "remote:command") {
@@ -616,25 +606,6 @@ c.addEventListener("click", (event) => {
         screen = "menu";
       } else if (hit.type === "reset") {
         window.resetSensorAssignment();
-      } else if (hit.type === "skip") {
-        startGameWithMode("mouse");
-      }
-      draw();
-    }
-    return;
-  }
-
-  if (screen === "calibrate_corners") {
-    const hit = window.getCalibrateCornersButtonAtPoint(c, point.x, point.y);
-    if (hit) {
-      if (hit.type === "back") {
-        // Deliberate Back: hold the calibration screen instead of re-advancing.
-        calibrateAutoContinueArmed = false;
-        screen = "calibrate";
-      } else if (hit.type === "capture") {
-        window.captureCorner(window.readSensorCoordinate(getCalibrateNodes()));
-      } else if (hit.type === "reset") {
-        window.resetCornerCalibration();
       } else if (hit.type === "skip") {
         startGameWithMode("mouse");
       } else if (hit.type === "start") {
@@ -739,7 +710,6 @@ c.addEventListener("click", (event) => {
 
   const choice = window.getMenuButtonAtPoint(c, point.x, point.y);
   if (choice === "Play") {
-    calibrateAutoContinueArmed = true;
     window.resetSensorAssignment();
     screen = "calibrate";
     draw();

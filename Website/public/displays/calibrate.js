@@ -11,6 +11,12 @@
 // readSensorCoordinate() turns a slot index straight into a grid column, so if
 // this mapping is wrong the whole board is mirrored or scrambled.
 //
+// This screen is the whole calibration. While it is up both servos are held
+// at 90 degrees (canvas.js asks the server, which sends AIM 90 to each node),
+// so the operator can aim the nodes straight out into the play area by hand.
+// Start Game appears once both nodes are identified; leaving the screen lets
+// the nodes scan again.
+//
 // API on `window`:
 //   window.updateSensorAssignment(nodes, now) - run detection, call on each update
 //   window.getSensorAssignment()              - [leftId, null, rightId]
@@ -37,7 +43,6 @@
   // assign a slot, short enough not to be tiring.
   const HAND_DWELL_MS = 700;
 
-  window.CALIBRATE_AUTO_CONTINUE_NODES = SLOTS.length;
 
   const state = {
     slots: { left: null, right: null },
@@ -194,6 +199,8 @@
       backButton: { type: "back", x: 16, y: 16, width: 80, height: 36, label: "◀ Back" },
       resetButton: { type: "reset", x: centerX - 50, y: 16, width: 100, height: 36, label: "Reset" },
       skipButton: { type: "skip", x: width - 96, y: 16, width: 80, height: 36, label: "Skip ▶" },
+      // Live once both nodes are identified: calibration ends here.
+      startButton: { type: "start", x: centerX - 110, y: height - 88, width: 220, height: 52, label: "Start Game" },
       cards: SLOTS.map((slot, index) => ({
         ...slot,
         x: centerX - rowW / 2 + index * (cardW + gap),
@@ -213,6 +220,7 @@
     if (pointInRect(x, y, layout.backButton)) return { type: "back" };
     if (pointInRect(x, y, layout.resetButton)) return { type: "reset" };
     if (pointInRect(x, y, layout.skipButton)) return { type: "skip" };
+    if (isComplete() && pointInRect(x, y, layout.startButton)) return { type: "start" };
     return null;
   };
 
@@ -238,12 +246,18 @@
 
     [layout.backButton, layout.resetButton, layout.skipButton].forEach((btn) => drawButton(ctx, btn));
 
-    // Title + instruction
-    const titleY = Math.max(54, height * 0.09);
+    // Title + instruction. Clear of the top button row.
+    const titleY = Math.max(90, height * 0.12);
     ctx.textAlign = "center";
     ctx.fillStyle = "#f4f4f5";
     ctx.font = `bold ${Math.max(18, Math.min(32, width * 0.03))}px monospace`;
     ctx.fillText("Sensor Assignment", centerX, titleY);
+
+    // The servos are held straight for as long as this screen is up (canvas.js
+    // sends the hold; the server passes AIM 90 to every node).
+    ctx.fillStyle = "#7dd3fc";
+    ctx.font = `bold ${Math.max(13, Math.min(18, width * 0.015))}px monospace`;
+    ctx.fillText("Servos held at 90° - aim both nodes straight out into the play area", centerX, titleY + 96);
 
     ctx.font = `${Math.max(15, Math.min(23, width * 0.02))}px monospace`;
     if (complete) {
@@ -260,10 +274,20 @@
     ctx.fillStyle = "#63736f";
     ctx.font = `${Math.max(12, Math.min(15, width * 0.013))}px monospace`;
     ctx.fillText(
-      complete ? "Continuing to corner calibration" : "Hold steady until the bar fills",
+      complete ? "Aim both nodes straight, then press Start Game" : "Hold steady until the bar fills",
       centerX,
       titleY + 66
     );
+
+    // Start Game: live once both nodes are identified, greyed out until then.
+    const start = layout.startButton;
+    ctx.fillStyle = complete ? "#22c55e" : "#2b2f3d";
+    ctx.beginPath();
+    ctx.roundRect(start.x, start.y, start.width, start.height, 10);
+    ctx.fill();
+    ctx.fillStyle = complete ? "#13131c" : "#63736f";
+    ctx.font = "bold 16px monospace";
+    ctx.fillText(start.label, start.x + start.width / 2, start.y + start.height / 2 + 6);
 
     // Slot cards
     layout.cards.forEach((card) => {
@@ -378,8 +402,4 @@
     ctx.textAlign = "start";
   };
 
-  // Counts slots filled by an online node - what the auto-advance gates on.
-  window.countConfiguredNodes = function countConfiguredNodes(nodes = []) {
-    return nodes.filter((node) => Boolean(node && node.online)).length;
-  };
 })();
