@@ -113,11 +113,17 @@
   // The conditioned reading from the one sensor this point is allowed to use.
   // Returns null when that sensor has nothing usable, regardless of what the
   // other one is reporting.
+  //
+  // A scanner node is usually turned towards the player, so its distance is a
+  // slant, not the depth the rows are cut from: readSensorCoordinate() turns it
+  // back by the servo angle into `depth`, and that is what gets captured. A
+  // reading without depth (a straight-ahead sensor) is its own depth.
   function readingForPoint(reading, key) {
     const point = pointFor(key);
     if (!point || !reading || !Array.isArray(reading.filtered)) return null;
 
-    const distance = reading.filtered[point.column];
+    const depths = Array.isArray(reading.depth) ? reading.depth : reading.filtered;
+    const distance = depths[point.column];
     if (distance === null || distance === undefined) return null;
     if (!Number.isFinite(distance)) return null;
     if (distance < ABSOLUTE_ALERT_CM) return null;
@@ -478,7 +484,7 @@
       ctx.font = `${Math.max(10, Math.min(12, width * 0.011))}px monospace`;
       const others = SENSOR_COLUMNS.filter((index) => index !== active.column)
         .map((index) => {
-          const value = reading.filtered[index];
+          const value = (Array.isArray(reading.depth) ? reading.depth : reading.filtered)[index];
           const shown = value === null || value === undefined ? "--" : value.toFixed(0) + "cm";
           return `${COLUMN_NAMES[index]} ${shown}`;
         })

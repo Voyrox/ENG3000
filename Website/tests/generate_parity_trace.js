@@ -93,6 +93,26 @@ function buildStream() {
   //     known blind spot, recorded so the Python port reproduces it exactly.
   for (let i = 0; i < 140; i++) push(wall(), i % 2 ? jitter(118, 2) : NO_ECHO);
 
+  // From here the nodes are servo scanners: each entry is [distance, angle],
+  // the angle the node's servo was at (90 = straight out, more = screen-left),
+  // in whole degrees as the firmware sends it.
+  const aimAt = (nodeX, x, depth) => Math.round(90 + (Math.atan2(nodeX - x, depth) * 180) / Math.PI);
+  const scanned = (nodeX, x, depth) => [jitter(Math.hypot(x - nodeX, depth), 2), aimAt(nodeX, x, depth)];
+
+  // 11. Both scanners track a player walking diagonally across the board.
+  for (let i = 0; i < 150; i++) {
+    const x = 40 + 70 * (i / 149);
+    const depth = 60 + 60 * (i / 149);
+    push(scanned(SENSOR_X_CM[0], x, depth), scanned(SENSOR_X_CM[1], x, depth));
+  }
+
+  // 12. The left scanner loses the player and sweeps (no echo); the right one
+  //     keeps tracking them in the centre column.
+  for (let i = 0; i < 90; i++) {
+    const sweep = 40 + ((i * 15) % 120);
+    push([NO_ECHO, sweep], scanned(SENSOR_X_CM[1], 80, 95));
+  }
+
   return steps;
 }
 
@@ -144,7 +164,11 @@ function runJs(stream, calibration) {
     clock = (i + 1) * STEP_MS;
     reading.forEach((value, s) => {
       if (!nodes[s]) return;
-      nodes[s].latest = JSON.stringify({ avg: value === NO_ECHO ? -1 : value });
+      // A scanner entry is [distance, angle]; a plain number has no angle.
+      const [distance, angle] = Array.isArray(value) ? value : [value, undefined];
+      const payload = { avg: distance === NO_ECHO ? -1 : distance };
+      if (angle !== undefined) payload.angle = angle;
+      nodes[s].latest = JSON.stringify(payload);
     });
     w.markSensorFrame();
     w.updateGame(clock, canvas, nodes);

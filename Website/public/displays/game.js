@@ -24,11 +24,12 @@
 // Three input modes share all of the game logic. Only the cursor source differs:
 //   "mouse"  - canvas.js feeds raw canvas pixels straight from mousemove.
 //              Reached via Skip on the calibration screen.
-//   "sensor" - readSensorCoordinate() trilaterates the player from the LEFT
-//              and RIGHT sensors, rawToGrid() (callibrate_corners.js) turns
-//              that into 0-2 grid coordinates with (0,0) at BOTTOM-LEFT, and
-//              gridToCanvasPoint() places the cursor. Entered once both
-//              sensors are identified and the corners calibrated.
+//   "sensor" - readSensorCoordinate() places the player from the LEFT and
+//              RIGHT scanner nodes (distance + servo angle; trilateration for
+//              nodes that send no angle), rawToGrid() (callibrate_corners.js)
+//              turns that into 0-2 grid coordinates with (0,0) at BOTTOM-LEFT,
+//              and gridToCanvasPoint() places the cursor. Entered once both
+//              nodes are identified and the corners calibrated.
 //              When the server runs filterRules.py (SERVER_FILTERING on), its
 //              coordinate replaces readSensorCoordinate() for the cursor and
 //              alert; with the flag off (the default) nothing here changes.
@@ -145,7 +146,7 @@
   // miniature cursor, the sensor panel, then the position map.
   const HUD_EDGE = 12;            // px from the canvas edge
   const HUD_GAP = 10;             // px between stacked panels
-  const SENSOR_PANEL_W = 322;     // px
+  const SENSOR_PANEL_W = 380;     // px
   const SENSOR_PANEL_H = 132;     // px
   const STATS_PANEL_W = 270;      // px; LIVE STATS, left gutter
   const STATS_PANEL_MIN_W = 190;  // px; narrower and the values collide with the labels
@@ -757,6 +758,35 @@
     return value;
   }
 
+  // The scanner fields of a node's latest payload (src/scanning.cpp): the servo
+  // angle the reading was taken at (90 = straight out, more = screen-left),
+  // the scan state (0 found, 1 half-found, 2 lost) and both ultrasonics
+  // (-1 = no echo). Each is null when the node's firmware does not send it.
+  const NO_SCAN = { angle: null, state: null, left: null, right: null };
+
+  function readScan(node) {
+    if (!node || !node.online || !node.latest) return NO_SCAN;
+    let payload;
+    try {
+      payload = JSON.parse(node.latest);
+    } catch (err) {
+      return NO_SCAN;
+    }
+    const numberOrNull = (value) => {
+      if (value === null || value === undefined || value === "") return null;
+      const number = Number(value);
+      return Number.isFinite(number) ? number : null;
+    };
+    return {
+      angle: numberOrNull(payload.angle),
+      state: numberOrNull(payload.state),
+      left: numberOrNull(payload.left),
+      right: numberOrNull(payload.right),
+    };
+  }
+
+  window.readNodeScan = readScan;
+
   // --- Per-sensor conditioning ----------------------------------------------
 
   function makeFilter() {
@@ -880,13 +910,14 @@
   let lastColumn = null;
   let closeStreak = 0;
 
-  // --- Two-sensor trilateration ----------------------------------------------
-  // The sensors sit on the screen line at the centres of the outer columns.
-  // Each distance is a circle around its sensor; where the two circles cross
-  // is the player. x picks the column (the centre one included) and y, the
-  // depth from the screen, picks the row. Deliberately basic - how the two
-  // sensors should really detect a player is being worked on separately.
-  // filterRules.py (TwoSensorGeometry) is the parity-tested Python port.
+  // --- Placing the player ----------------------------------------------------
+  // The two nodes sit on the screen line at the centres of the outer columns.
+  // Each is a servo scanner that reports its distance to the player and the
+  // angle it was read at, which puts the player at a point (locateNodes()).
+  // A node that reports no angle falls back to basic trilateration. x picks
+  // the column (the centre one included) and y, the depth from the screen,
+  // picks the row. filterRules.py (TwoSensorGeometry) is the parity-tested
+  // Python port.
 
   function columnCentreCm(column) {
     return ((column + 0.5) * PLAY_WIDTH_CM) / 3;
@@ -943,15 +974,64 @@
     };
   }
 
+  // Where one scanner node's reading puts the player. angle is the servo angle:
+  // 90 points straight out, larger turns towards screen-left (smaller x); null
+  // means straight out. Same arithmetic as scanner_point() in filterRules.py,
+  // operation for operation, so the two agree to the last bit.
+  function scannerPoint(nodeX, distance, angle) {
+    const phi = ((angle === null ? 90 : angle) - 90) * Math.PI / 180;
+    return { x: nodeX - distance * Math.sin(phi), y: distance * Math.cos(phi) };
+  }
+
+  // Both nodes in bounds: the midpoint of their two points. One: that point.
+  // None: the nearer reading, which still carries a position for the
+  // out-of-bounds message. Left wins a tie. Pure, like trilaterate().
+  function fromScanners(filtered, angles) {
+    const points = [];
+    [LEFT_SENSOR, RIGHT_SENSOR].forEach((slot) => {
+      const distance = filtered[slot];
+      if (distance === null) return;
+      const point = scannerPoint(columnCentreCm(slot), distance, angles[slot]);
+      const column = columnAtCm(Math.max(0, Math.min(PLAY_WIDTH_CM, point.x)));
+      points.push({
+        ...point,
+        distance,
+        inside: isInPlay(column, point.y),
+        source: slot === LEFT_SENSOR ? "left" : "right",
+      });
+    });
+
+    const inBounds = points.filter((point) => point.inside);
+    if (inBounds.length === 2) {
+      const [a, b] = inBounds;
+      return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2, source: "both" };
+    }
+    const pool = inBounds.length > 0 ? inBounds : points;
+    let best = null;
+    pool.forEach((point) => {
+      if (best === null || point.distance < best.distance) best = point;
+    });
+    return best === null ? null : { x: best.x, y: best.y, source: best.source };
+  }
+
+  // Scanner angles when either node sends one; trilateration when neither does.
+  function locateNodes(filtered, angles) {
+    if (angles[LEFT_SENSOR] === null && angles[RIGHT_SENSOR] === null) return trilaterate(filtered);
+    return fromScanners(filtered, angles);
+  }
+
   // Input:  [left, centre, right] node records, nulls allowed (calibration order).
   //         The centre is ignored: the rig has no centre sensor.
   // Output: {
   //   status:     "ok" | "too-close" | "no-signal" | "out-of-bounds",
   //   column:     the column the player is in - 0 left, 1 centre, 2 right,
   //   distanceCm: the player's depth from the screen (y),
-  //   xCm, yCm:   the trilaterated position in cm, source: see trilaterate(),
-  //   raw:        [l, c, r] straight off the wire, for debugging,
+  //   xCm, yCm:   the player's position in cm, source: "both" | "left" | "right",
+  //   raw:        [l, c, r] node distances straight off the wire, for debugging,
   //   filtered:   [l, c, r] after median + hold,
+  //   depth:      [l, c, r] each node's own depth reading (filtered distance
+  //               turned by its servo angle) - what corner calibration captures,
+  //   scans:      [l, c, r] each node's scanner fields, see readScan(),
   //   configured: how many sensors currently have a usable value
   // }
   function readSensorCoordinate(orderedNodes) {
@@ -959,15 +1039,19 @@
     const now = performance.now();
 
     const raw = [readDistance(list[LEFT_SENSOR]), null, readDistance(list[RIGHT_SENSOR])];
+    const scans = [readScan(list[LEFT_SENSOR]), NO_SCAN, readScan(list[RIGHT_SENSOR])];
+    const angles = scans.map((scan) => scan.angle);
     const filtered = raw.map((value, index) => conditionSensor(sensorFilters[index], value, now));
     const configured = filtered.filter((d) => d !== null).length;
+    const depth = filtered.map((distance, slot) =>
+      distance === null || slot === 1 ? null : scannerPoint(columnCentreCm(slot), distance, angles[slot]).y);
 
     // Fresh data, or the same reading being polled again by the render loop?
     const isNewReading = sensorFrameSeq !== lastSeenFrameSeq;
     lastSeenFrameSeq = sensorFrameSeq;
 
     const base = {
-      raw, filtered, configured, isNewReading,
+      raw, filtered, depth, scans, configured, isNewReading,
       column: null, distanceCm: null, xCm: null, yCm: null, source: null,
     };
 
@@ -986,7 +1070,7 @@
     }
     const tooClose = closeStreak >= TOO_CLOSE_FRAMES;
 
-    const position = trilaterate(filtered);
+    const position = locateNodes(filtered, angles);
     const x = position ? Math.max(0, Math.min(PLAY_WIDTH_CM, position.x)) : null;
 
     // Safety outranks every other state, including loss of signal. The column
@@ -1546,6 +1630,10 @@
     { index: RIGHT_SENSOR, label: "R", source: "right" },
   ];
   const SOURCE_LABELS = { both: "L+R", left: "L only", right: "R only" };
+  // The scanner's state (src/scanning.cpp): both sensors agree, one sees the
+  // player, or it is sweeping for them.
+  const SCAN_STATE_NAMES = { 0: "found", 1: "half", 2: "lost" };
+  const SCAN_STATE_COLOURS = { 0: "#22c55e", 1: "#f59e0b", 2: "#ef4444" };
 
   function formatCm(value) {
     return value === null || value === undefined ? "--" : value.toFixed(1);
@@ -1570,10 +1658,13 @@
     ctx.textAlign = "left";
     ctx.font = "bold 10.5px monospace";
     ctx.fillStyle = "#9298aa";
-    ctx.fillText("SENSOR", x + 16, y + 20);
-    ctx.fillText("RAW cm", x + 92, y + 20);
-    ctx.fillText("FILT cm", x + 172, y + 20);
-    ctx.fillText("USED", x + 254, y + 20);
+    ctx.fillText("NODE", x + 16, y + 20);
+    ctx.fillText("RAW", x + 56, y + 20);
+    ctx.fillText("FILT", x + 108, y + 20);
+    ctx.fillText("L / R cm", x + 160, y + 20);
+    ctx.fillText("SERVO", x + 226, y + 20);
+    ctx.fillText("SCAN", x + 272, y + 20);
+    ctx.fillText("USED", x + 322, y + 20);
 
     ctx.strokeStyle = "rgba(255, 255, 255, 0.14)";
     ctx.lineWidth = 1;
@@ -1584,6 +1675,8 @@
 
     const raw = sensor.raw || [null, null, null];
     const filtered = sensor.filtered || [null, null, null];
+    const scans = sensor.scans || [NO_SCAN, NO_SCAN, NO_SCAN];
+    const echo = (cm) => (cm === null || cm < 0 ? "--" : cm.toFixed(0));
 
     SENSOR_ROWS.forEach((row, k) => {
       const i = row.index;
@@ -1606,15 +1699,26 @@
 
       ctx.font = "12px monospace";
       ctx.fillStyle = echoing ? "#cdd6f4" : "#63736f";
-      ctx.fillText(formatCm(raw[i]), x + 92, rowY);
+      ctx.fillText(formatCm(raw[i]), x + 56, rowY);
 
       ctx.fillStyle = live ? "#cdd6f4" : "#63736f";
-      ctx.fillText(formatCm(filtered[i]), x + 172, rowY);
+      ctx.fillText(formatCm(filtered[i]), x + 108, rowY);
+
+      // The scanner's own view: both ultrasonics, the servo angle the pair
+      // was read at, and whether it has found the player.
+      const scan = scans[i] || NO_SCAN;
+      const heard = [scan.left, scan.right].filter((cm) => cm !== null && cm >= 0).length;
+      ctx.fillStyle = heard === 2 ? "#cdd6f4" : heard === 1 ? "#f59e0b" : "#63736f";
+      ctx.fillText(scan.left === null && scan.right === null ? "--" : `${echo(scan.left)}/${echo(scan.right)}`, x + 160, rowY);
+      ctx.fillStyle = scan.angle === null ? "#63736f" : "#cdd6f4";
+      ctx.fillText(scan.angle === null ? "--" : `${scan.angle.toFixed(0)}°`, x + 226, rowY);
+      ctx.fillStyle = SCAN_STATE_COLOURS[scan.state] || "#63736f";
+      ctx.fillText(SCAN_STATE_NAMES[scan.state] || "--", x + 272, rowY);
 
       if (sensorUsed(sensor, row)) {
         ctx.fillStyle = "#facc15";
         ctx.font = "bold 12px monospace";
-        ctx.fillText("<--", x + 254, rowY);
+        ctx.fillText("<--", x + 322, rowY);
       }
     });
 

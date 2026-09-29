@@ -13,14 +13,20 @@ ESP32 ── Wi-Fi ──▶ gateway/server ── TCP :3000 ──▶ Python Se
 
 ### ESP32 → Server (TCP)
 
-Each ESP32 connects to the laptop hotspot and uses the Wi-Fi gateway address as the server address. It opens a persistent TCP socket on port `3000`, receives a numeric node ID, and sends a JSON line on every `loop()` cycle:
+Each ESP32 is a servo scanner (`src/scanning.cpp`): two ultrasonics side by side (trigger/echo on GPIO 5/18 and 16/17) on a servo (GPIO 32) that turns to follow the player. It connects to the laptop hotspot, opens a persistent TCP socket on port `3000`, receives a numeric node ID, and sends a JSON line after every scan step:
 
 ```json
-{"nodeId":1,"avg":12.34,"detected":false}
+{"nodeId":1,"mac":"14:08:08:AB:F6:20","avg":82.40,"left":81.90,"right":82.90,"angle":112,"state":0}
 ```
 
-- `avg` is the rolling average of the last 3 ultrasonic distance readings (cm)
-- `detected` — `true` when `avg <= safeDistance` (50 cm)
+- `avg` is the node's distance to the player (cm): the mean of the ultrasonics reading inside the scan range, or the nearer real echo if neither is; `-1` when neither heard anything
+- `left` / `right` are the two ultrasonics (cm), `-1` for no echo
+- `angle` is the servo angle the pair was read at: 90 points straight out into the play area, larger turns towards screen-left
+- `state` is `0` found (both sensors agree), `1` half-found (one sees the player), `2` lost (sweeping)
+
+The server sends control lines back: `SYNC <tick>`, `TURN` / `HALT`, and `ROLE LEFT` / `ROLE RIGHT` once the game's calibration screen has identified the node (again whenever it reconnects), which sets that mount's servo limits.
+
+The game puts each node on the screen edge at the centre of an outer column and turns its distance and angle into a position; with both nodes in bounds the two positions are averaged. A node that sends no `angle` is treated as pointing straight out, and two such nodes are placed by trilateration.
 
 ### Python Server (Flask + WebSockets)
 

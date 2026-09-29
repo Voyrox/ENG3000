@@ -42,6 +42,7 @@ from filterRules import (  # noqa: E402
     StreakHold,
     TwoSensorGeometry,
     UltrasonicArrayGeometry,
+    scanner_point,
 )
 
 FIXTURE = os.path.join(HERE, "fixtures", "js_parity_trace.json")
@@ -302,6 +303,32 @@ class TwoSensorGeometryBehaviour(unittest.TestCase):
     def test_beyond_the_far_limit_is_out_of_bounds(self):
         fix = self.locate([None, None, 170.0])
         self.assertEqual(fix.status, STATUS_OUT_OF_BOUNDS)
+
+    # --- servo scanners: (distance, angle) per node ---------------------------
+
+    def test_a_scanner_at_90_degrees_points_straight_out(self):
+        self.assertEqual(scanner_point(25.0, 80.0, 90), (25.0, 80.0))
+
+    def test_a_larger_angle_turns_towards_screen_left(self):
+        x, y = scanner_point(125.0, 80.0, 120)
+        self.assertAlmostEqual(x, 85.0)
+        self.assertAlmostEqual(y, 80.0 * math.cos(math.radians(30)))
+
+    def test_two_scanners_in_bounds_are_averaged(self):
+        fix = self.locate(self.geometry.channels([(80.0, 60), None, (80.0, 120)]))
+        self.assertAlmostEqual(fix.x_cm, 75.0)
+        self.assertEqual(fix.column, 1)
+
+    def test_one_scanner_hearing_nothing_leaves_the_other(self):
+        fix = self.locate(self.geometry.channels([(None, 70), None, (90.0, 115)]))
+        x, y = scanner_point(125.0, 90.0, 115)
+        self.assertAlmostEqual(fix.x_cm, x)
+        self.assertAlmostEqual(fix.y_cm, y)
+
+    def test_without_angles_the_nodes_trilaterate(self):
+        fix = self.locate(self.geometry.channels(two_sensor_sample(60.0, 80.0)))
+        self.assertAlmostEqual(fix.x_cm, 60.0)
+        self.assertAlmostEqual(fix.y_cm, 80.0)
 
 
 class CartesianGeometryBehaviour(unittest.TestCase):

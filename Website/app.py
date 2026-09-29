@@ -208,6 +208,16 @@ def update_rate(node, now):
     node["rps"] = float(len(samples)) / float(RPS_WINDOW_SECONDS)
 
 
+def parse_angle_deg(payload):
+    """The servo angle a scanner node read its distance at, or None."""
+    angle = payload.get("angle")
+    try:
+        angle = float(angle)
+    except (TypeError, ValueError):
+        return None
+    return angle if np.isfinite(angle) else None
+
+
 def parse_distance_cm(payload):
     """The raw distance in a node message, as sent: negative means no echo."""
     distance = payload.get("distance")
@@ -261,7 +271,8 @@ def update_node(node_id, message):
             # own filtering and the proximity guard needs unsmoothed readings.
             raw_cm = parse_distance_cm(payload)
             if raw_cm is not None:
-                server_filter.on_reading(node_id, raw_cm, now * MS_PER_SECOND)
+                server_filter.on_reading(node_id, raw_cm, now * MS_PER_SECOND,
+                                         angle_deg=parse_angle_deg(payload))
     schedule_broadcast_nodes()
 
 
@@ -356,6 +367,36 @@ def send_command(node_id, command):
             pass
 
 
+# Which node is LEFT and which is RIGHT, as identified on the game's calibration
+# screen (node id -> "LEFT" | "RIGHT"). Each scanner node needs its role for
+# its servo limits; it is sent on assignment and again whenever the node
+# reconnects, since a rebooted ESP32 has forgotten it.
+NODE_ROLE_NAMES = {0: "LEFT", 2: "RIGHT"}   # slot index in [left, centre, right]
+node_roles = {}
+
+
+def assign_node_roles(slots):
+    """Record the browser's [left, centre, right] node ids and tell each node."""
+    if not isinstance(slots, list) or len(slots) != 3:
+        print(f"Ignored bad sensors:assign slots: {slots!r}")
+        return
+    roles = {slots[index]: role for index, role in NODE_ROLE_NAMES.items()
+             if isinstance(slots[index], int)}
+    with state_lock:
+        node_roles.clear()
+        node_roles.update(roles)
+    for node_id, role in roles.items():
+        send_command(node_id, f"ROLE {role}")
+
+
+def send_node_role(node_id):
+    """Re-send a known role, e.g. after the node reconnects."""
+    with state_lock:
+        role = node_roles.get(node_id)
+    if role is not None:
+        send_command(node_id, f"ROLE {role}")
+
+
 def sync_node(node_id):
     """Send the authoritative tick to one node (PC is source of truth)."""
     with state_lock:
@@ -430,6 +471,7 @@ def handle_node_connection(conn, address):
                 node["conn"] = conn
                 node["synced"] = False
                 node["has_turn"] = False
+        send_node_role(node_id)
         if first_message is not None:
             update_node(node_id, first_message)
         with conn.makefile("r") as stream:
@@ -492,6 +534,12 @@ async def browser_handler(websocket):
                 # The game's state for the phone control panel; never a filter event.
                 if CONTROL_CONNECTIONS:
                     broadcast(CONTROL_CONNECTIONS.copy(), message)
+            elif event.get("type") == "sensors:assign":
+                # Always: the scanner nodes need their roles whether or not the
+                # server filters. With SERVER_FILTERING on, the chain uses it too.
+                await asyncio.to_thread(assign_node_roles, event.get("slots"))
+                if server_filter is not None:
+                    apply_filter_event(event)
             elif server_filter is not None:
                 apply_filter_event(event)
     finally:

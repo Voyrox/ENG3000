@@ -1092,5 +1092,69 @@ class BroadcastFanoutTests(BrokerTestCase):
         broadcast.assert_not_called()
 
 
+class NodeRoleTests(BrokerTestCase):
+    """The calibration screen's LEFT / RIGHT reaches the scanner nodes."""
+
+    def setUp(self):
+        super().setUp()
+        self._saved_roles = dict(app.node_roles)
+        app.node_roles.clear()
+
+    def tearDown(self):
+        app.node_roles.clear()
+        app.node_roles.update(self._saved_roles)
+        super().tearDown()
+
+    def test_the_assignment_sends_each_node_its_role(self):
+        left_id, left = self.add_node(conn=RecordingConn())
+        right_id, right = self.add_node(address=("10.0.0.2", 1001), conn=RecordingConn())
+        app.assign_node_roles([left_id, None, right_id])
+        self.assertEqual(left["conn"].sent, ["ROLE LEFT\n"])
+        self.assertEqual(right["conn"].sent, ["ROLE RIGHT\n"])
+
+    def test_a_reassignment_replaces_the_old_roles(self):
+        first_id, _ = self.add_node(conn=RecordingConn())
+        second_id, _ = self.add_node(address=("10.0.0.2", 1001), conn=RecordingConn())
+        app.assign_node_roles([first_id, None, second_id])
+        app.assign_node_roles([second_id, None, first_id])
+        self.assertEqual(app.node_roles, {second_id: "LEFT", first_id: "RIGHT"})
+
+    def test_a_node_that_connects_later_is_sent_its_role_after_its_id(self):
+        app.assign_node_roles([1, None, None])
+        conn = FakeNodeSocket(b"\r\n")
+        app.handle_node_connection(conn, ("10.0.0.1", 1000))
+        self.assertEqual(conn.sent, ["1\n", "ROLE LEFT\n"])
+
+    def test_a_node_without_a_role_is_sent_none(self):
+        conn = FakeNodeSocket(b"\r\n")
+        app.handle_node_connection(conn, ("10.0.0.1", 1000))
+        self.assertEqual(conn.sent, ["1\n"])
+
+    def test_bad_slots_are_ignored(self):
+        app.assign_node_roles([1, 2])
+        app.assign_node_roles("left")
+        self.assertEqual(app.node_roles, {})
+
+    def test_the_browser_assignment_reaches_the_nodes_without_server_filtering(self):
+        node_id, node = self.add_node(conn=RecordingConn())
+        message = json.dumps({"type": "sensors:assign", "slots": [None, None, node_id]})
+        socket = FakeBrowserSocket(incoming=[message])
+        with mock.patch.object(app, "server_filter", None):
+            asyncio.run(app.browser_handler(socket))
+        self.assertEqual(node["conn"].sent, ["ROLE RIGHT\n"])
+
+
+class ScannerAngleTests(unittest.TestCase):
+    """The servo angle a scanner node sends alongside its distance."""
+
+    def test_the_angle_is_read_as_a_number(self):
+        self.assertEqual(app.parse_angle_deg({"angle": 112}), 112.0)
+        self.assertEqual(app.parse_angle_deg({"angle": "64"}), 64.0)
+
+    def test_no_angle_or_a_bad_one_is_none(self):
+        for payload in ({}, {"angle": None}, {"angle": "left"}, {"angle": float("nan")}):
+            self.assertIsNone(app.parse_angle_deg(payload), payload)
+
+
 if __name__ == "__main__":
     unittest.main()

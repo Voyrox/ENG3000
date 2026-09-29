@@ -36,8 +36,9 @@ Pipeline, in order:
                                           ▼
                                    FilteredCoordinate
 
-Geometry is the swappable part. TwoSensorGeometry is today's rig: two
-sensors, LEFT and RIGHT, placed by basic trilateration. UltrasonicArrayGeometry
+Geometry is the swappable part. TwoSensorGeometry is today's rig: two servo
+scanner nodes, LEFT and RIGHT, each placing the player by its distance and
+servo angle (basic trilateration for a node that sends no angle). UltrasonicArrayGeometry
 is the earlier three-sensor rig, kept so logged V1 sessions still replay
 (tools/chain_replay.py). CartesianGeometry accepts an (x, y) position
 directly, which is the entry point for the servo scanning rig in
@@ -460,23 +461,26 @@ class UltrasonicArrayGeometry(Geometry):
 
 
 class TwoSensorGeometry(Geometry):
-    """Two forward-facing sensors, LEFT and RIGHT, placed by basic trilateration.
+    """Two nodes, LEFT and RIGHT, on the screen line at the centres of the
+    outer columns. Port of locateNodes() and readSensorCoordinate() in game.js.
 
-    Port of trilaterate() and readSensorCoordinate() in game.js. The sensors
-    sit on the screen line at the centres of the outer columns. Each distance
-    is a circle around its sensor, and where the two circles cross is the
-    player: x picks the column (the centre one included) and y, the depth,
-    picks the row. Deliberately basic - how the two sensors should really
-    detect a player is being worked on separately.
+    Each node is a servo scanner (src/scanning.cpp) that reports its distance
+    to the player and the servo angle it was read at: 90 is straight out into
+    the play area, larger turns towards screen-left. That puts the player at
+    a point from each node; with both nodes in bounds the two points are
+    averaged, with one it is used alone, and with none in bounds the nearer
+    reading still gives a position for the out-of-bounds message.
 
-    A reading only counts toward the crossing if it is inside its own
-    column's play area. When only one does, or the circles miss each other
-    (one sensor is seeing something else), the nearer sensor places the
-    player straight in front of itself.
+    A node that reports no angle (firmware from before the scanner) falls
+    back to basic trilateration: each distance is a circle around its node,
+    and where the two circles cross is the player. When only one reading is
+    inside its own column's play area, or the circles miss each other, the
+    nearer node places the player straight in front of itself.
 
-    Sample: [left_cm, centre_cm, right_cm], None where a sensor had no echo.
-    The centre is ignored: there is no centre sensor. Three slots are kept so
-    the browser's [left, centre, right] assignment carries over unchanged.
+    Sample: [left, centre, right]. Each entry is a distance in cm, or a
+    (distance_cm, angle_deg) pair from a scanner; None where there is no
+    reading. The centre is ignored: there is no centre node. Three slots are
+    kept so the browser's [left, centre, right] assignment carries over.
     """
 
     LEFT = 0
@@ -484,6 +488,7 @@ class TwoSensorGeometry(Geometry):
 
     def __init__(self):
         self._last_column: Optional[int] = None
+        self._angles: list = [None] * GRID_SIZE
 
     @property
     def channel_count(self) -> int:
@@ -491,12 +496,18 @@ class TwoSensorGeometry(Geometry):
 
     def reset(self) -> None:
         self._last_column = None
+        self._angles = [None] * GRID_SIZE
 
     def channels(self, sample) -> list:
+        # Distances are filtered as channels; each node's angle is kept for
+        # locate(), which runs on the same update.
         values = list(sample) + [None] * GRID_SIZE
         out = [None] * GRID_SIZE
-        out[self.LEFT] = _valid_cm(values[self.LEFT])
-        out[self.RIGHT] = _valid_cm(values[self.RIGHT])
+        self._angles = [None] * GRID_SIZE
+        for slot in (self.LEFT, self.RIGHT):
+            distance, angle = _split_reading(values[slot])
+            out[slot] = _valid_cm(distance)
+            self._angles[slot] = _finite(angle)
         return out
 
     def nearest_raw_cm(self, raw_channels) -> Optional[float]:
@@ -506,6 +517,32 @@ class TwoSensorGeometry(Geometry):
     def position(self, filtered, area) -> Optional[tuple]:
         """(x_cm, y_cm) from the filtered distances, or None with no reading.
         Pure: touches no state. x is not yet clamped to the board."""
+        if self._angles[self.LEFT] is None and self._angles[self.RIGHT] is None:
+            return self._trilaterate(filtered, area)
+        return self._from_scanners(filtered, area)
+
+    def _from_scanners(self, filtered, area) -> Optional[tuple]:
+        points = []
+        for slot in (self.LEFT, self.RIGHT):
+            distance = filtered[slot]
+            if distance is None:
+                continue
+            x, y = scanner_point(area.column_centre_cm(slot), distance, self._angles[slot])
+            inside = area.contains(area.column_at(_clamp(x, 0.0, area.width_cm)), y)
+            points.append((x, y, distance, inside))
+
+        in_bounds = [p for p in points if p[3]]
+        if len(in_bounds) == 2:
+            a, b = in_bounds
+            return (a[0] + b[0]) / 2, (a[1] + b[1]) / 2
+        pool = in_bounds or points
+        if not pool:
+            return None
+        # The nearer reading; left wins a tie, as in the JS.
+        x, y, _, _ = min(pool, key=lambda p: p[2])
+        return x, y
+
+    def _trilaterate(self, filtered, area) -> Optional[tuple]:
         d_left, d_right = filtered[self.LEFT], filtered[self.RIGHT]
         in_left = d_left is not None and area.contains(self.LEFT, d_left)
         in_right = d_right is not None and area.contains(self.RIGHT, d_right)
@@ -838,6 +875,25 @@ class CoordinatePipeline:
 
 def _clamp(value, low, high):
     return max(low, min(high, value))
+
+
+def scanner_point(node_x_cm: float, distance_cm: float,
+                  angle_deg: Optional[float]) -> tuple:
+    """Where a scanner node's reading puts the player: (x_cm, y_cm).
+
+    angle_deg is the servo angle: 90 points straight out into the play area,
+    larger turns towards screen-left (smaller x). None means straight out.
+    Same arithmetic as scannerPoint() in game.js, operation for operation.
+    """
+    phi = ((90.0 if angle_deg is None else angle_deg) - 90) * math.pi / 180
+    return node_x_cm - distance_cm * math.sin(phi), distance_cm * math.cos(phi)
+
+
+def _split_reading(entry) -> tuple:
+    """A sample entry as (distance, angle): a plain distance has no angle."""
+    if isinstance(entry, (list, tuple)) and len(entry) == 2:
+        return entry[0], entry[1]
+    return entry, None
 
 
 def _finite(value) -> Optional[float]:

@@ -400,9 +400,10 @@ function applyServerFilteringFlag(payload) {
 // connection order, and the play area is captured on the corners screen.
 // Each is sent once complete, and again if it changes. Start Game needs both,
 // so the server always has them before a sensor round.
+//
+// The assignment goes whatever the filtering flag: the server passes each
+// scanner node its role (ROLE LEFT / ROLE RIGHT), which sets its servo limits.
 function syncServerFilterSetup() {
-  if (!serverFiltering) return;
-
   if (window.isSensorAssignmentComplete()) {
     const slots = window.getSensorAssignment();
     const key = JSON.stringify(slots);
@@ -410,6 +411,8 @@ function syncServerFilterSetup() {
       sentAssignmentKey = key;
     }
   }
+
+  if (!serverFiltering) return;
 
   const perColumn = window.getCapturedCalibration();
   if (perColumn) {

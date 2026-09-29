@@ -167,6 +167,27 @@ class StageTwoSensorRig(unittest.TestCase):
         self.assertAlmostEqual(result.x_cm, 75.0)
         self.assertAlmostEqual(result.y_cm, 100.0)
 
+    def test_scanner_angles_place_the_player(self):
+        # Each node 80 cm away, turned 30 degrees in towards the centre.
+        stage = ServerFilterStage()
+        stage.assign_slots([LEFT, None, RIGHT])
+        stage.on_reading(LEFT, 80.0, STEP_MS, angle_deg=60)
+        result = stage.on_reading(RIGHT, 80.0, 2 * STEP_MS, angle_deg=120)
+        self.assertEqual(result.column, 1)
+        self.assertAlmostEqual(result.x_cm, 75.0)
+        self.assertAlmostEqual(result.y_cm, 80.0 * math.cos(math.radians(30)))
+
+    def test_a_node_going_offline_forgets_its_angle(self):
+        stage = ServerFilterStage()
+        stage.assign_slots([LEFT, None, RIGHT])
+        stage.on_reading(LEFT, 80.0, STEP_MS, angle_deg=60)
+        stage.on_missing(LEFT)
+        # Past the channel's hold window, so the left distance no longer coasts.
+        result = stage.on_reading(RIGHT, 70.0, STEP_MS + 1000.0)
+        # Neither node has an angle now, so the right one places the player
+        # straight in front of itself, as before scanners.
+        self.assertAlmostEqual(result.x_cm, 125.0)
+
 
 class StagePathPrediction(unittest.TestCase):
     """The per-channel trackers behind the flag (#18)."""
