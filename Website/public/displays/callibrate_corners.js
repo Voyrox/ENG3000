@@ -39,6 +39,7 @@
 //   window.isCornerCalibrationComplete()
 //   window.getCornerCalibration()
 //   window.getCalibrationBounds()          - { nearCm, farCm, alertCm, maxCm, perColumn }
+//   window.getCapturedCalibration()        - [{ near, far }] x3 (centre derived), or null
 //   window.rawToGrid(column, distanceCm, previous) -> { gx, gy, inside, calibrated }
 
 (function () {
@@ -138,14 +139,15 @@
     };
   }
 
-  // Derives the usable calibration. The left and right columns keep their own
-  // near/far; the centre column, which has no sensor, takes the mean of the
-  // two. The alert and out-of-bounds limits come from the extremes across the
-  // measured columns, so no column gets clipped by another column's geometry.
-  function getBounds() {
-    if (!isComplete()) return defaultBounds();
+  // The four captured points as { near, far } per column: the left and right
+  // columns exactly as measured, the centre (no sensor) the mean of the two.
+  // Null until all four are in. Unlike getBounds() there is no fallback to
+  // defaults here: this is what gets sent to the server, whose PlayArea
+  // applies the same shallow-column fallback itself.
+  function capturedPerColumn() {
+    if (!isComplete()) return null;
 
-    const measured = SENSOR_COLUMNS.map((column) => {
+    const [left, right] = SENSOR_COLUMNS.map((column) => {
       const near = POINTS.find((p) => p.column === column && p.edge === "near");
       const far = POINTS.find((p) => p.column === column && p.edge === "far");
       return {
@@ -154,14 +156,25 @@
       };
     });
 
-    const shallow = measured.some((col) => !(col.far - col.near >= MIN_PLAY_DEPTH_CM));
-    if (shallow) return defaultBounds({ bad: true });
-
-    const [left, right] = measured;
     const perColumn = [];
     perColumn[SENSOR_COLUMNS[0]] = left;
     perColumn[SENSOR_COLUMNS[1]] = right;
     perColumn[CENTRE_COLUMN] = { near: (left.near + right.near) / 2, far: (left.far + right.far) / 2 };
+    return perColumn;
+  }
+
+  window.getCapturedCalibration = capturedPerColumn;
+
+  // Derives the usable calibration. The alert and out-of-bounds limits come
+  // from the extremes across the two measured columns, so no column gets
+  // clipped by another column's geometry.
+  function getBounds() {
+    const perColumn = capturedPerColumn();
+    if (!perColumn) return defaultBounds();
+
+    const measured = SENSOR_COLUMNS.map((column) => perColumn[column]);
+    const shallow = measured.some((col) => !(col.far - col.near >= MIN_PLAY_DEPTH_CM));
+    if (shallow) return defaultBounds({ bad: true });
 
     const nearCm = Math.min(...measured.map((col) => col.near));
     const farCm = Math.max(...measured.map((col) => col.far));

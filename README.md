@@ -40,9 +40,37 @@ When the TCP broker receives a sensor reading, it updates the node's state and b
 
 Nodes that haven't reported in 5 seconds are marked stale and removed.
 
+With server-side filtering on (`SERVER_FILTERING=1`, see below), the same
+message gains two fields; the existing fields do not change. `coordinate` is
+`null` until the sensors are assigned and a reading arrives. `predicted_cm`
+is each channel's predicted distance in cm (left, centre, right; see
+path prediction below), `null` for a channel with no live track:
+
+```json
+{"type":"nodes:update","nodes":[...],"coordinate":{"status":"ok","x":25.0,"y":60.0,"gx":0,"gy":1,"rawGx":0,"rawGy":1,"column":0,"held":false,"heldFor":0,"calibrated":false,"raw":[60.0,null,null],"filtered":[60.0,null,null]},"predicted_cm":[60.4,null,null]}
+```
+
+With the flag off neither field is present.
+
 ### Browser → Server (WebSocket)
 
 `canvas.js` connects to `ws://<host>:8765/browser` and renders live node data on an HTML canvas. It can also send `menu:select` messages back to the server for UI interactions.
+
+With server-side filtering on, the server also accepts:
+
+```json
+{"type": "sensors:assign",     "slots": [2, 1, 3]}
+{"type": "calibration:update", "perColumn": [{"near": 28.5, "far": 140.7}, ...]}
+```
+
+The browser sends these only when the server reports the flag on, which it
+does by including the `coordinate` field in `nodes:update`. With the flag off
+the field is absent and the browser sends nothing new. `canvas.js` sends
+`sensors:assign` once the hand-wave assignment is complete, and
+`calibration:update` once all six corners are captured. Each is sent again
+only if it changes or the socket reconnects, because `sensors:assign` resets
+the server's filters. `perColumn` is sent as captured; the server applies the
+same shallow-column fallback as `getBounds()`.
 
 ## Filtering pipeline (`Website/filterRules.py`)
 
@@ -52,8 +80,35 @@ and hold-and-recovery - are ported from `public/displays/game.js` into a
 standalone Python pipeline, so the filtered coordinate can be computed once on
 the server instead of in every browser tab.
 
-**It is not wired into `app.py` yet.** The game still filters in `game.js`
-until the steps below are done.
+**It is wired into `app.py` behind a flag, off by default.** Start the server
+with `SERVER_FILTERING=1` to run it; without the flag the server and the
+browser behave exactly as before and the game filters in `game.js`. With the
+flag on, the game's cursor and too-close alert come from the server's
+`coordinate` instead. `game.js` still holds the JS copy of the rules and stays
+the rule owner until step 6 below.
+`Website/serverFilter.py` is the adapter between node messages and the
+pipeline.
+
+**Path prediction (#18).** `Website/tracking.py` is a per-sensor
+constant-velocity Kalman tracker (distance and velocity). With the flag on,
+`serverFilter.py` keeps one tracker per channel, feeds it the same fresh raw
+reading that channel's filter gets, and publishes every channel's predicted
+distance as `predicted_cm` in `nodes:update`, brought forward to the time of
+the latest reading. It is **published only**: the coordinate, the cell vote
+and the proximity alert do not read it, the median stays the rule owner, and
+the browser does not use it yet. Replacing the median with the tracker would
+first need the model's NIS spike gate ported. Tunables, all named constants
+in `tracking.py` / `serverFilter.py`: process noise 400 cm/s², measurement
+noise 0.91 cm, track dropped after 0.5 s without a reading (or when its node
+goes offline), extrapolation capped at 250 ms, extra display lead 0 s until
+the end-to-end latency is measured. Tests are in
+`Website/tests/test_tracking.py` and `Website/tests/test_serverFilter.py`.
+
+The chain runs **once per new reading**. When one node reports, only its
+channel gets a new sample; the other channels are marked not fresh and are
+not fed their last reading again, which would fill their median windows with
+repeats and add lag. The proximity guard still sees every channel's latest
+raw reading.
 
 ```text
 sample ──► Geometry ──► ProximityGuard (RAW) ──► ChannelFilter per channel
@@ -99,6 +154,10 @@ a tenth of a second.
 
 ### Integrating into `app.py`
 
+Steps 1-5 are done, behind the flag; they are kept here as the record of the
+design. Step 6 waits until the team drops the flag, since the flag-off path
+still needs the JS copy.
+
 **1. Create one pipeline** at module level, next to the other shared state:
 
 ```python
@@ -133,7 +192,9 @@ result = pipeline.update(reading, time.monotonic() * 1000.0)
 ```
 
 where `raw_distance()` returns the payload's `distance`/`avg` as a float, and
-`None` for a missing node or a negative value. **Do not pass
+`None` for a missing node or a negative value. (As built, `serverFilter.py`
+also passes a `fresh` mask so only the reporting node's channel is fed; the
+snippet above alone would re-feed the other nodes' last readings.) **Do not pass
 `node["filtered_distance"]`** — that is already median- and FFT-smoothed, and
 filtering it again would add lag and could hide the spikes the proximity alert
 depends on.
@@ -147,7 +208,11 @@ json.dumps({"type": "coordinate:update", "coordinate": result.to_dict()})
 
 **5. Switch the browser over.** In `canvas.js`, on `coordinate:update`, hand
 the result to the game through one exported function, e.g.
-`window.setServerCoordinate(message.coordinate)`. In `game.js`, that function
+`window.setServerCoordinate(message.coordinate)`. (As built, the coordinate
+rides on `nodes:update`, and `window.setServerFilteringActive()` switches
+`game.js` between its own filters and the server's result. With the flag on,
+the cursor is also cleared once every assigned node is offline or the socket
+closes, because the server only recomputes on a new reading.) In `game.js`, that function
 replaces what `updateSensorCursor()` computes today:
 
 - store it as `gameState.sensor`, and drive the cursor from its `gx` / `gy`;
