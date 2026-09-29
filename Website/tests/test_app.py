@@ -1479,6 +1479,30 @@ class NodePulsesTests(BrokerTestCase):
         self.assertEqual(app.nodes_pulse_count, 3)
 
 
+class FakeControlSocket(FakeBrowserSocket):
+    """The slice of a connection that `control_handler` uses."""
+
+    remote_address = ("10.0.0.50", 5000)
+
+
+class ControlPanelTests(BrokerTestCase):
+    """The phone control panel's commands reach the game browsers."""
+
+    def relayed(self, *events):
+        phone = FakeControlSocket(path="/control", incoming=[json.dumps(e) for e in events])
+        with mock.patch.object(app, "broadcast") as broadcast, \
+                mock.patch("builtins.print"):
+            asyncio.run(app.control_handler(phone))
+        return [json.loads(call.args[1]) for call in broadcast.call_args_list]
+
+    def test_the_position_switch_is_relayed_to_the_game(self):
+        sent = self.relayed({"action": "position", "method": "tri"})
+        self.assertEqual(sent, [{"action": "position", "method": "tri", "type": "remote:command"}])
+
+    def test_an_unknown_action_is_not_relayed(self):
+        self.assertEqual(self.relayed({"action": "selfDestruct"}), [])
+
+
 class ScanStateTests(unittest.TestCase):
     """What a scanner node's scan made of a reading, from its message."""
 

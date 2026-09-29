@@ -171,6 +171,9 @@ reporting whatever its beam hits while it sweeps. The position methods
   however old, and whatever that node was looking at.
 - **Average** (`avg`): the midpoint of the two.
 
+The phone control panel (`/control`, server started with `CON=1`) has the
+same switch under *Placing the player*, and shows which method is in use; its
+buttons come from the game's status, so a new method appears there by itself.
 In the browser console, `tuneSensor({ losAccelCmS2, losBearingFoundDeg,
 losBearingHalfDeg })` changes the tracker live; `setPositionMethod("tri")`
 switches method. The Python side takes the same through `FilterConfig`

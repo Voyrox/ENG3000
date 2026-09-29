@@ -83,7 +83,9 @@ SERVER_FILTERING = server_filtering_enabled(os.environ)
 # The phone control panel (/control) only exists when explicitly switched on:
 #   CON=1 python app.py
 CONTROL_ENABLED = os.environ.get("CON") == "1"
-CONTROL_ACTIONS = {"point", "release", "start", "mode", "pause", "resume", "restart", "menu", "testMode"}
+# "position" is the position switch: line of sight, trilateration or their average.
+CONTROL_ACTIONS = {"point", "release", "start", "mode", "pause", "resume", "restart", "menu", "testMode",
+                   "position"}
 # Every raw node reading to logs/raw-*.csv, for the bench noise test
 # (tools/bench_noise.py). Off unless started with REC=1; see sessionRecorder.py.
 recorder = SessionRecorder.from_env(os.environ)

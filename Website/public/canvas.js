@@ -500,6 +500,12 @@ function handleRemoteCommand(command) {
     case "testMode":
       window.setGameSettings({ testMode: Boolean(command.enabled) });
       break;
+    case "position":
+      // The position switch, as the buttons above the sensor panel do it: line
+      // of sight, trilateration or their average. An unknown method is ignored.
+      window.setPositionMethod(command.method);
+      syncServerFilterSetup();
+      break;
     default:
       return;
   }
@@ -524,6 +530,8 @@ function sendGameStatus() {
     moleType: state.moleType,
     remoteHole: state.remoteHole,
     testMode: window.getGameSettings().testMode,
+    positionMethod: window.getPositionMethod(),
+    positionMethods: window.getPositionMethods(),
   }));
 }
 

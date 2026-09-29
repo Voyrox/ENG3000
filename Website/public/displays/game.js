@@ -1504,6 +1504,12 @@
     return positioning.method;
   };
 
+  // Every method with its label, in switch order - what the phone control
+  // panel draws its buttons from.
+  window.getPositionMethods = function getPositionMethods() {
+    return POSITION_METHODS.map((id) => ({ id, label: METHOD_STYLES[id].label }));
+  };
+
   window.setPositionMethod = function setPositionMethod(method) {
     if (POSITION_METHODS.includes(method)) {
       positioning.method = method;
