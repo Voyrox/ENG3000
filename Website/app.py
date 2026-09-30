@@ -281,8 +281,10 @@ def update_distance(node, payload, now):
     the reading's time in seconds (time.monotonic())."""
     distance = parse_distance_cm(payload)
     # No distance, or no echo (negative): nothing to filter, and the last value
-    # stands. A -1 in the median window would drag it towards zero.
-    if distance is None or distance < 0:
+    # stands. A -1 in the median window would drag it towards zero. A NaN or
+    # +/-inf is missing too: in the window it would make the median, the
+    # Kalman's input and the FFT history NaN.
+    if distance is None or not np.isfinite(distance) or distance < 0:
         return
 
     medians = node["median_samples"]
