@@ -7,6 +7,8 @@ Standard library only:
     python -m unittest discover -s Website/tests
 """
 
+import json
+import math
 import os
 import statistics
 import sys
@@ -16,9 +18,14 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(HERE))
 
 from tracking import (  # noqa: E402
+    DEFAULT_GAP_RESET_S,
     DEFAULT_MAX_LEAD_S,
+    DEFAULT_MAX_RANGE_CM,
+    DEFAULT_NIS_GATE,
     DEFAULT_SIGMA_A_CM_S2,
     DEFAULT_SIGMA_R_CM,
+    DEFAULT_V_MAX_CM_S,
+    REACQ_READINGS,
     ConstantVelocityTracker,
     PathPredictor,
     alpha_beta_closed_form,
@@ -214,6 +221,219 @@ class PathPredictorChannels(unittest.TestCase):
     def test_needs_a_channel(self):
         with self.assertRaises(ValueError):
             PathPredictor(0)
+
+    def test_gate_and_speed_limit_are_on_for_raw_readings(self):
+        pp = PathPredictor(2)
+        self.assertTrue(all(t.nis_gate == DEFAULT_NIS_GATE and t.v_max_cm_s == DEFAULT_V_MAX_CM_S
+                            for t in pp.trackers))
+        off = PathPredictor(1, nis_gate=None, v_max_cm_s=None)
+        self.assertIsNone(off.trackers[0].nis_gate)
+        self.assertIsNone(off.trackers[0].v_max_cm_s)
+
+
+# A reading far from a player standing at STEADY_CM: crosstalk or a stray echo.
+STEADY_CM = 100.0
+SPIKE_CM = 250.0
+
+
+def steady(tracker, n=30, distance_cm=STEADY_CM):
+    """Feed n readings of a standing player; return the last time stamp."""
+    t_s = 0.0
+    for k in range(n):
+        t_s = k * SAMPLE_DT_S
+        tracker.update(distance_cm, t_s)
+    return t_s
+
+
+def state_is_finite(tracker):
+    return all(math.isfinite(v) for v in (tracker.distance_cm, tracker.velocity_cm_s,
+                                          tracker.p00, tracker.p01, tracker.p11))
+
+
+class NonFiniteReadings(unittest.TestCase):
+    """H1: a NaN once made the state, and every prediction after it, NaN;
+    json.dumps then wrote a bare NaN that the browser cannot parse."""
+
+    def test_nan_is_missing(self):
+        tr = ConstantVelocityTracker()
+        t_last = run_ramp(tr, 30)
+        est = tr.update(math.nan, t_last + SAMPLE_DT_S)
+        self.assertAlmostEqual(est, ramp_cm(t_last + SAMPLE_DT_S), delta=0.5)
+        self.assertTrue(state_is_finite(tr))
+        t_next = t_last + 2 * SAMPLE_DT_S
+        self.assertAlmostEqual(tr.update(ramp_cm(t_next), t_next), ramp_cm(t_next), delta=0.5)
+
+    def test_infinities_are_missing(self):
+        for bad in (math.inf, -math.inf):
+            for negative_is_missing in (True, False):
+                tr = ConstantVelocityTracker(negative_is_missing=negative_is_missing)
+                t_last = steady(tr)
+                est = tr.update(bad, t_last + SAMPLE_DT_S)
+                self.assertAlmostEqual(est, STEADY_CM, delta=0.5)
+                self.assertTrue(state_is_finite(tr))
+
+    def test_nan_first_reading_starts_no_track(self):
+        tr = ConstantVelocityTracker(negative_is_missing=False)
+        self.assertIsNone(tr.update(math.nan, 0.0))
+        self.assertFalse(tr.alive)
+
+    def test_a_non_finite_time_changes_nothing(self):
+        tr = ConstantVelocityTracker()
+        steady(tr)
+        before = (tr.distance_cm, tr.velocity_cm_s, tr.t_s, tr.p00)
+        self.assertAlmostEqual(tr.update(STEADY_CM, math.nan), STEADY_CM, delta=0.5)
+        self.assertEqual((tr.distance_cm, tr.velocity_cm_s, tr.t_s, tr.p00), before)
+        self.assertTrue(math.isfinite(tr.predict_at(math.nan)))
+
+    def test_an_absurd_reading_cannot_overflow_the_state(self):
+        tr = ConstantVelocityTracker(negative_is_missing=False)
+        t_last = steady(tr)
+        est = tr.update(1e308, t_last + SAMPLE_DT_S)
+        self.assertTrue(est is None or math.isfinite(est))
+        self.assertTrue(not tr.alive or state_is_finite(tr))
+
+    def test_predictions_stay_json_safe(self):
+        pp = PathPredictor(2)
+        for k in range(20):
+            pp.update(0, STEADY_CM, k * SAMPLE_DT_S)
+            pp.update(1, 80.0, k * SAMPLE_DT_S)
+        t_s = 20 * SAMPLE_DT_S
+        for bad in (math.nan, math.inf, -math.inf):
+            pp.update(0, bad, t_s)
+            pp.update(1, bad, t_s)
+            t_s += SAMPLE_DT_S
+        # allow_nan=False raises on NaN or inf, as the browser's JSON.parse would.
+        json.dumps(pp.predicted_cm(t_s), allow_nan=False)
+
+
+class LeadCapAcrossMisses(unittest.TestCase):
+    """M1: no-echo readings used to move the state forward, so predict_at
+    extrapolated from there and the total lead reached ~474 ms."""
+
+    def test_no_echo_readings_do_not_extend_the_lead(self):
+        tr = ConstantVelocityTracker()
+        t_last = run_ramp(tr, 30)
+        at_reading_cm = tr.distance_cm
+        furthest_cm = abs(tr.velocity_cm_s) * DEFAULT_MAX_LEAD_S
+        t_s = t_last
+        while t_s + SAMPLE_DT_S - t_last <= DEFAULT_GAP_RESET_S:
+            t_s += SAMPLE_DT_S
+            est = tr.update(-1.0, t_s)
+            self.assertLessEqual(abs(est - at_reading_cm), furthest_cm + 1e-9)
+            lead = tr.predict_at(t_s, lead_s=DEFAULT_MAX_LEAD_S)
+            self.assertLessEqual(abs(lead - at_reading_cm), furthest_cm + 1e-9)
+        # the loop did run past the cap, so the cap was what held it
+        self.assertGreater(t_s - t_last, DEFAULT_MAX_LEAD_S)
+        self.assertAlmostEqual(tr.predict_at(t_s, lead_s=DEFAULT_MAX_LEAD_S),
+                               ramp_cm(t_last + DEFAULT_MAX_LEAD_S), delta=0.5)
+
+    def test_missing_readings_leave_the_state_at_the_last_reading(self):
+        tr = ConstantVelocityTracker()
+        t_last = run_ramp(tr, 30)
+        tr.update(None, t_last + SAMPLE_DT_S)
+        tr.update(-1.0, t_last + 2 * SAMPLE_DT_S)
+        self.assertEqual(tr.t_s, t_last)
+
+
+class SpikeGate(unittest.TestCase):
+    def test_a_single_spike_is_not_absorbed(self):
+        tr = ConstantVelocityTracker(nis_gate=DEFAULT_NIS_GATE)
+        t_last = steady(tr)
+        est = tr.update(SPIKE_CM, t_last + SAMPLE_DT_S)
+        self.assertAlmostEqual(est, STEADY_CM, delta=0.5)
+        self.assertAlmostEqual(tr.velocity_cm_s, 0.0, delta=0.5)
+        t_next = t_last + 2 * SAMPLE_DT_S
+        self.assertAlmostEqual(tr.update(STEADY_CM, t_next), STEADY_CM, delta=0.5)
+
+    def test_without_the_gate_the_spike_is_absorbed(self):
+        # The contrast: this is what the chain's copy does, where the slew
+        # gate and the median stop spikes before the tracker sees them.
+        tr = ConstantVelocityTracker()
+        t_last = steady(tr)
+        self.assertGreater(tr.update(SPIKE_CM, t_last + SAMPLE_DT_S), STEADY_CM + 50.0)
+
+    def test_agreeing_gated_readings_reacquire(self):
+        tr = ConstantVelocityTracker(nis_gate=DEFAULT_NIS_GATE)
+        t_s = steady(tr)
+        moved_cm = STEADY_CM + 60.0
+        for k in range(REACQ_READINGS - 1):
+            t_s += SAMPLE_DT_S
+            self.assertAlmostEqual(tr.update(moved_cm + k, t_s), STEADY_CM, delta=0.5)
+        t_s += SAMPLE_DT_S
+        last_cm = moved_cm + REACQ_READINGS - 1
+        self.assertEqual(tr.update(last_cm, t_s), last_cm)
+        self.assertEqual(tr.velocity_cm_s, 0.0)
+
+    def test_scattered_spikes_do_not_reacquire(self):
+        tr = ConstantVelocityTracker(nis_gate=DEFAULT_NIS_GATE)
+        t_s = steady(tr)
+        for spike_cm in (SPIKE_CM, 30.0, SPIKE_CM + 60.0, 30.0):
+            t_s += SAMPLE_DT_S
+            self.assertAlmostEqual(tr.update(spike_cm, t_s), STEADY_CM, delta=0.5)
+
+    def test_gate_is_off_by_default(self):
+        # The filtering chain's copy must match game.js's kalmanUpdate().
+        self.assertIsNone(ConstantVelocityTracker().nis_gate)
+        self.assertIsNone(ConstantVelocityTracker().v_max_cm_s)
+
+
+class SpeedLimit(unittest.TestCase):
+    FAST_CM_S = 1000.0
+
+    def run_fast(self, tracker):
+        for k in range(30):
+            t_s = k * SAMPLE_DT_S
+            tracker.update(RAMP_START_CM + self.FAST_CM_S * t_s, t_s)
+
+    def test_velocity_is_clamped(self):
+        tr = ConstantVelocityTracker(v_max_cm_s=DEFAULT_V_MAX_CM_S, range_cm=(0.0, 1e6))
+        self.run_fast(tr)
+        self.assertLessEqual(abs(tr.velocity_cm_s), DEFAULT_V_MAX_CM_S)
+        self.assertEqual(tr.velocity_cm_s, DEFAULT_V_MAX_CM_S)
+
+    def test_without_the_limit_it_is_not(self):
+        tr = ConstantVelocityTracker(range_cm=(0.0, 1e6))
+        self.run_fast(tr)
+        self.assertGreater(tr.velocity_cm_s, DEFAULT_V_MAX_CM_S)
+
+
+class RangeClamp(unittest.TestCase):
+    def test_distance_channel_is_clamped_to_range(self):
+        tr = ConstantVelocityTracker()
+        self.assertEqual(tr.range_cm, (0.0, DEFAULT_MAX_RANGE_CM))
+        self.assertEqual(tr.update(DEFAULT_MAX_RANGE_CM + 50.0, 0.0), DEFAULT_MAX_RANGE_CM)
+
+    def test_prediction_never_goes_below_zero(self):
+        tr = ConstantVelocityTracker()
+        # walking into the sensor at 50 cm/s, last reading 5 cm away
+        for k in range(20):
+            t_s = k * SAMPLE_DT_S
+            tr.update(5.0 + RAMP_SPEED_CM_S * (19 - k) * SAMPLE_DT_S, t_s)
+        self.assertLess(tr.distance_cm + tr.velocity_cm_s * DEFAULT_MAX_LEAD_S, 0.0)
+        self.assertEqual(tr.predict(DEFAULT_MAX_LEAD_S), 0.0)
+
+    def test_x_coordinate_is_not_clamped(self):
+        tr = ConstantVelocityTracker(negative_is_missing=False)
+        self.assertIsNone(tr.range_cm)
+        self.assertEqual(tr.update(-40.0, 0.0), -40.0)
+        tr.reset()
+        self.assertEqual(tr.update(DEFAULT_MAX_RANGE_CM + 50.0, 0.0), DEFAULT_MAX_RANGE_CM + 50.0)
+        tr.reset()
+        # moving left past x = 0: the prediction follows it below zero
+        for k in range(20):
+            t_s = k * SAMPLE_DT_S
+            tr.update(5.0 - RAMP_SPEED_CM_S * t_s, t_s)
+        self.assertLess(tr.predict(DEFAULT_MAX_LEAD_S), 0.0)
+
+    def test_x_coordinate_is_clamped_when_given_a_range(self):
+        tr = ConstantVelocityTracker(negative_is_missing=False, range_cm=(-20.0, 170.0))
+        self.assertEqual(tr.update(-40.0, 0.0), -20.0)
+
+    def test_bad_limits_rejected(self):
+        for kwargs in ({"range_cm": (10.0, 0.0)}, {"range_cm": (0.0, math.nan)},
+                       {"nis_gate": 0.0}, {"v_max_cm_s": 0.0}):
+            with self.assertRaises(ValueError, msg=str(kwargs)):
+                ConstantVelocityTracker(**kwargs)
 
 
 if __name__ == "__main__":
