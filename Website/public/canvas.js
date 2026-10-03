@@ -757,6 +757,8 @@ c.addEventListener("click", (event) => {
       } else if (hit.type === "testMode") {
         const current = window.getGameSettings();
         window.setGameSettings({ testMode: !current.testMode });
+      } else if (hit.type === "position") {
+        window.setPositionMethod(hit.value);
       }
       draw();
     }
