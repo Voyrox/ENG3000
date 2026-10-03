@@ -769,9 +769,42 @@
         distanceCm: numberOrNull(sensor.distanceCm),
         gx: hasCell ? sensor.gx : null,
         gy: hasCell ? sensor.gy : null,
+        method: positioning.method,
+        // Compare's rings: drawn on the board only while Compare is on and
+        // the browser places the player itself (renderPositionMarkers()).
+        compare: positioning.compare && !serverCoordinateActive,
+        fixes: compareFixes(canvas, sensor.fixes),
       },
     };
   };
+
+  // Every method's position as Compare draws it: { los, tri, avg }, each
+  // { xCm, yCm, nx, ny } or null. xCm and yCm are as the method placed the
+  // player; nx and ny are its ring on the board, as fractions like board above
+  // (x clamped to the board first, as the ring is).
+  function compareFixes(canvas, fixes) {
+    const out = {};
+    POSITION_METHODS.forEach((method) => {
+      const fix = fixes && fixes[method];
+      if (!fix || !Number.isFinite(fix.x) || !Number.isFinite(fix.y)) {
+        out[method] = null;
+        return;
+      }
+      let nx = null;
+      let ny = null;
+      if (canvas) {
+        const x = Math.max(0, Math.min(PLAY_WIDTH_CM, fix.x));
+        const point = worldToCanvasPoint(canvas, x, fix.y, columnAtCm(x));
+        if (point) {
+          const layout = window.getGameGridLayout(canvas);
+          nx = (point.x - layout.gridLeft) / layout.gridSize;
+          ny = (point.y - layout.gridTop) / layout.gridSize;
+        }
+      }
+      out[method] = { xCm: fix.x, yCm: fix.y, nx, ny };
+    });
+    return out;
+  }
 
   window.getGameGridLayout = function getGameGridLayout(canvas) {
     const width = canvas.clientWidth || canvas.width;

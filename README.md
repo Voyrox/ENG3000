@@ -180,7 +180,10 @@ reporting whatever its beam hits while it sweeps. The position methods
 
 The game's **Options** screen has the same switch under *Placing the
 Player*. The phone control panel (`/control`, server started with `CON=1`)
-has it under *Placing the player*, and shows which method is in use; its
+has it under *Placing the player*, and shows which method is in use. Its pad
+also draws Compare's rings (LOS, TRI, AVG) where each method puts the player,
+lists each method's (x, y), and its Sensors table gives each node's servo
+angle and scan state (found, half, lost) from the node's latest message. Its
 buttons come from the game's status, so a new method appears there by itself.
 In the browser console, `tuneSensor({ losAccelCmS2, losBearingFoundDeg,
 losBearingHalfDeg })` changes the tracker live; `setPositionMethod("tri")`

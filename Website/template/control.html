@@ -2,6 +2,7 @@
 <html>
 
 <head>
+    <meta charset="utf-8">
     <title>ENG3000 Control</title>
     <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
     <link rel="icon" type="image/x-icon" href="/static/favicon.ico">
@@ -29,7 +30,9 @@
             <div><span>Sensor (x, y) cm</span><b id="coordXY">--</b></div>
             <div><span>Sensors</span><b id="coordState">--</b></div>
         </div>
-        <p class="note">x runs across from screen-left (0-150 cm), y out from the screen.</p>
+        <div id="methodFixes" class="fixes"></div>
+        <p class="note">x runs across from screen-left (0-150 cm), y out from the screen. Rings: where each
+            method puts the player, as Compare draws them on the game board; the bold one moves the cursor.</p>
     </section>
 
     <section>
@@ -61,8 +64,8 @@
     <section>
         <h2>Sensors</h2>
         <table>
-            <thead><tr><th>Node</th><th>State</th><th>Filtered cm</th><th>RPS</th></tr></thead>
-            <tbody id="nodes"><tr><td colspan="4">No nodes</td></tr></tbody>
+            <thead><tr><th>Node</th><th>State</th><th>Filtered cm</th><th>Angle</th><th>Scan</th><th>RPS</th></tr></thead>
+            <tbody id="nodes"><tr><td colspan="6">No nodes</td></tr></tbody>
         </table>
     </section>
 
@@ -103,6 +106,27 @@
         gameCursor.id = "gameCursor";
         pad.appendChild(gameCursor);
 
+        // Compare, as on the game board: a ring for where each position method
+        // puts the player, in the game's colours. The cursor above follows the
+        // method in use, eased; the rings are where each method is right now.
+        const METHOD_STYLES = {
+            los: { short: "LOS", colour: "#22d3ee" },
+            tri: { short: "TRI", colour: "#e879f9" },
+            avg: { short: "AVG", colour: "#f8fafc" },
+        };
+        const rings = {};
+        Object.entries(METHOD_STYLES).forEach(([method, style]) => {
+            const ring = document.createElement("div");
+            ring.className = `ring ${method}`;
+            ring.style.borderColor = style.colour;
+            const label = document.createElement("span");
+            label.textContent = style.short;
+            label.style.color = style.colour;
+            ring.appendChild(label);
+            pad.appendChild(ring);
+            rings[method] = ring;
+        });
+
         const HEARTBEAT_MS = 250;
         let dragging = false;
         let pendingPoint = null;
@@ -132,6 +156,7 @@
             dragging = true;
             finger.classList.add("down");
             gameCursor.classList.remove("on");
+            Object.values(rings).forEach((ring) => ring.classList.remove("on"));
             queuePoint(e);
             clearInterval(heartbeat);
             heartbeat = setInterval(() => {
@@ -251,6 +276,8 @@
 
             const sensor = cursor && cursor.sensor;
             gameCursor.classList.toggle("held", Boolean(sensor && sensor.held));
+            renderRings(sensor);
+            renderMethodFixes(sensor);
             if (!sensor) {
                 $("coordXY").textContent = "--";
                 $("coordState").textContent = cursor ? `${game.mode} input` : "--";
@@ -266,10 +293,67 @@
             $("coordState").textContent = state;
         }
 
+        // The rings, while Compare is on in a sensor round and no finger is
+        // down. A ring off the board is pinned to its edge, as the cursor is.
+        function renderRings(sensor) {
+            const fixes = (sensor && sensor.fixes) || {};
+            const show = Boolean(sensor && sensor.compare) && !dragging && game.mode === "sensor";
+            Object.entries(rings).forEach(([method, ring]) => {
+                const fix = fixes[method];
+                const on = show && Boolean(fix) && fix.nx != null && fix.ny != null;
+                ring.classList.toggle("on", on);
+                ring.classList.toggle("inUse", Boolean(sensor) && sensor.method === method);
+                if (!on) return;
+                const clamp = (v) => Math.min(1, Math.max(0, v));
+                ring.style.left = `${clamp(fix.nx) * 100}%`;
+                ring.style.top = `${clamp(fix.ny) * 100}%`;
+            });
+        }
+
+        // Every method's (x, y) side by side, as the game's sensor panel lists
+        // them; the one in use is bold.
+        function renderMethodFixes(sensor) {
+            const box = $("methodFixes");
+            if (!sensor || !sensor.fixes) {
+                box.replaceChildren();
+                return;
+            }
+            box.replaceChildren(...Object.entries(METHOD_STYLES).map(([method, style]) => {
+                const fix = sensor.fixes[method];
+                const item = document.createElement("span");
+                item.style.color = fix ? style.colour : "#63736f";
+                item.classList.toggle("inUse", sensor.method === method);
+                item.textContent = `${style.short} ${fix ? `(${fix.xCm.toFixed(0)}, ${fix.yCm.toFixed(0)})` : "--"}`;
+                return item;
+            }));
+        }
+
+        // A node's servo angle and scan state, from its latest message - the
+        // same fields the game's sensor panel shows (readScan() in game.js).
+        const SCAN_STATES = { 0: ["found", "#22c55e"], 1: ["half", "#f59e0b"], 2: ["lost", "#ef4444"] };
+
+        function readScan(n) {
+            let payload = n.latest;
+            if (typeof payload === "string") {
+                try {
+                    payload = JSON.parse(payload);
+                } catch (err) {
+                    payload = null;
+                }
+            }
+            if (!payload || typeof payload !== "object") return { angle: null, state: null };
+            const number = (value) => {
+                if (value === null || value === undefined || value === "") return null;
+                const v = Number(value);
+                return Number.isFinite(v) ? v : null;
+            };
+            return { angle: number(payload.angle), state: number(payload.scanState ?? payload.state) };
+        }
+
         function renderNodes(nodes) {
             const body = $("nodes");
             if (!nodes.length) {
-                body.innerHTML = '<tr><td colspan="4">No nodes</td></tr>';
+                body.innerHTML = '<tr><td colspan="6">No nodes</td></tr>';
                 return;
             }
             body.innerHTML = nodes
@@ -278,7 +362,11 @@
                 .map((n) => {
                     const cm = n.filtered_distance == null ? "--" : n.filtered_distance.toFixed(1);
                     const state = n.online ? (n.has_turn ? "scanning" : "online") : "offline";
-                    return `<tr><td>${n.id}</td><td>${state}</td><td>${cm}</td><td>${(n.rps || 0).toFixed(1)}</td></tr>`;
+                    const scan = n.online ? readScan(n) : { angle: null, state: null };
+                    const angle = scan.angle === null ? "--" : `${scan.angle.toFixed(0)}°`;
+                    const [scanName, scanColour] = SCAN_STATES[scan.state] || ["--", "#63736f"];
+                    return `<tr><td>${n.id}</td><td>${state}</td><td>${cm}</td><td>${angle}</td>` +
+                        `<td style="color:${scanColour}">${scanName}</td><td>${(n.rps || 0).toFixed(1)}</td></tr>`;
                 })
                 .join("");
         }
@@ -417,6 +505,38 @@
 
     #gameCursor.on { opacity: 1; }
     #gameCursor.on.held { opacity: 0.45; }
+
+    .ring {
+        position: absolute;
+        left: 50%;
+        top: 50%;
+        width: 16px;
+        height: 16px;
+        margin: -8px 0 0 -8px;
+        border-radius: 50%;
+        border: 2px solid;
+        pointer-events: none;
+        opacity: 0;
+        transition: left 0.1s linear, top 0.1s linear, opacity 0.15s;
+    }
+
+    .ring.on { opacity: 1; }
+    .ring.inUse { border-width: 3px; }
+    .ring span { position: absolute; font: bold 10px monospace; white-space: nowrap; }
+    .ring.los span { left: 50%; bottom: 100%; transform: translateX(-50%); }
+    .ring.tri span { left: 50%; top: 100%; transform: translateX(-50%); }
+    .ring.avg span { left: 100%; top: 50%; transform: translate(3px, -50%); }
+
+    .fixes {
+        display: flex;
+        justify-content: space-between;
+        gap: 8px;
+        margin-top: 8px;
+        font: 13px monospace;
+        font-variant-numeric: tabular-nums;
+    }
+
+    .fixes .inUse { font-weight: bold; text-decoration: underline; }
 
     #pad.disabled { opacity: 0.4; }
 
