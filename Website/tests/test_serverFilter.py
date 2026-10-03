@@ -177,6 +177,27 @@ class StageTwoSensorRig(unittest.TestCase):
         self.assertAlmostEqual(result.x_cm, 75.0)
         self.assertAlmostEqual(result.y_cm, 80.0 * math.cos(math.radians(30)))
 
+    def test_turn_discards_only_that_nodes_distance_history(self):
+        stage = ServerFilterStage()
+        stage.assign_slots([LEFT, None, RIGHT])
+        for i in range(3):
+            stage.on_reading(LEFT, 60.0, i * STEP_MS, angle_deg=90)
+            stage.on_reading(RIGHT, 80.0, i * STEP_MS + 1, angle_deg=90)
+        result = stage.on_reading(LEFT, 120.0, 3 * STEP_MS, angle_deg=110)
+        self.assertEqual(result.filtered[0], 120.0)
+        self.assertEqual(result.filtered[2], 80.0)
+        self.assertEqual(samples_in(stage.pipeline, 0), 1)
+        self.assertEqual(samples_in(stage.pipeline, 2), 3)
+        self.assertEqual(stage.predicted_cm[0], 120.0)
+
+    def test_new_angle_with_no_echo_does_not_project_old_range(self):
+        stage = ServerFilterStage()
+        stage.assign_slots([LEFT, None, RIGHT])
+        stage.on_reading(LEFT, 60.0, STEP_MS, angle_deg=90)
+        result = stage.on_reading(LEFT, -1.0, 2 * STEP_MS, angle_deg=110)
+        self.assertIsNone(result.filtered[0])
+        self.assertIsNone(stage.predicted_cm[0])
+
     def test_a_node_going_offline_forgets_its_angle(self):
         stage = ServerFilterStage()
         stage.assign_slots([LEFT, None, RIGHT])

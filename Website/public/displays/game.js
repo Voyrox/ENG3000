@@ -868,6 +868,7 @@
       rejectCount: 0,   // total discarded, surfaced for diagnosis
       kalman: makeKalman(),
       smoothed: [],     // recent Kalman outputs: the FFT stage's window
+      angle: null,      // bearing of the current distance track
     };
   }
 
@@ -1075,7 +1076,17 @@
   // the Kalman follows the median without an average's lag; the FFT stage cuts
   // what is left above tuning.fftCutoffHz. The hold coasts through a dropped
   // echo instead of reporting the player gone.
-  function conditionSensor(filter, raw, now) {
+  function conditionSensor(filter, raw, now, angle = null) {
+    if (angle !== filter.angle) {
+      // A range at a new bearing is not another sample of the old track.
+      restartSmoothing(filter);
+      filter.value = null;
+      filter.lastGoodAt = -Infinity;
+      filter.anchor = null;
+      filter.anchorAt = -Infinity;
+      filter.rejects.length = 0;
+      filter.angle = angle;
+    }
     // An impossible jump is treated exactly like a dropped echo: it never
     // enters the median window, so it cannot drag the value toward itself.
     if (raw !== null && !isPlausible(filter, raw, now)) raw = null;
@@ -1110,6 +1121,7 @@
       filter.anchorAt = -Infinity;
       filter.rejects.length = 0;
       filter.rejectCount = 0;
+      filter.angle = null;
     });
     closeStreak = 0;
     lastColumn = null;
@@ -1272,7 +1284,7 @@
     lastSeenFrameSeq = sensorFrameSeq;
 
     const filtered = isNewReading
-      ? raw.map((value, index) => conditionSensor(sensorFilters[index], value, now))
+      ? raw.map((value, index) => conditionSensor(sensorFilters[index], value, now, angles[index]))
       : sensorFilters.map((filter) => filter.value);
     const configured = filtered.filter((d) => d !== null).length;
     const depth = filtered.map((distance, slot) =>

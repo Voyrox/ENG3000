@@ -177,8 +177,10 @@ each pair was measured, before moving the servo. For `app.py`'s per-node
 windows: ranges at different bearings are not samples of the same target.
 Its FFT uses the measured sampling interval and runs only when the current
 window is approximately uniform (within 20%); otherwise the timestamp-aware
-Kalman estimate is published. The browser/`ChannelFilter` pipeline retains
-its own existing filtering rules and fixed sample-rate assumption.
+Kalman estimate is published. Both the browser and the optional server
+coordinate pipeline also reset the affected channel (including its slew gate)
+when the reported angle changes; a missed echo at a new angle cannot project
+the old range onto that bearing. Their FFT still assumes a fixed sample rate.
 
 The chain runs **once per new reading**. When one node reports, only its
 channel gets a new sample; the other channels are marked not fresh and are

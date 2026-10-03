@@ -920,6 +920,10 @@ class CoordinatePipeline:
         self._held_xy = None
         self._last_ok_ms = -math.inf
 
+    def reset_channel(self, channel: int) -> None:
+        """Discard one sensor's old bearing without resetting the other nodes."""
+        self._channels[channel].reset()
+
     @property
     def rejected(self) -> list:
         return [channel.reject_count for channel in self._channels]

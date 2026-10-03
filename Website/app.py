@@ -642,8 +642,12 @@ def coordinator_loop():
             sync_node(node_id)
 
         active = online_ids[sync_tick % len(online_ids)]
+        # Revoke every other turn before granting the next one, regardless of
+        # node ID order. Never send TURN while another node is still authorized.
         for node_id in online_ids:
-            set_turn(node_id, node_id == active)
+            if node_id != active:
+                set_turn(node_id, False)
+        set_turn(active, True)
 
         print(
             f"Tick {sync_tick}: scanning node {active}, "

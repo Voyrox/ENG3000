@@ -256,6 +256,22 @@ test("every hole centre is a fixed point of the cm -> pixel mapping", () => {
   }
 });
 
+test("browser filter starts a fresh range track after a servo turn", () => {
+  const w = loadWindow();
+  const nodes = [1, 2, 3].map((id) => ({ id, online: true, latest: null }));
+  const read = (distance, angle, time) => {
+    nodes[0].latest = JSON.stringify({ avg: distance, angle });
+    contextNow(w, time);
+    w.markSensorFrame();
+    return w.readSensorCoordinate(nodes);
+  };
+  for (let i = 0; i < 6; i += 1) read(60, 90, 100 + 50 * i);
+  const turned = read(120, 110, 400);
+  assert.strictEqual(turned.filtered[0], 120, "old bearing must not slew-gate the new range");
+  const missed = read(-1, 130, 450);
+  assert.strictEqual(missed.filtered[0], null, "old range must not be projected at the new angle");
+});
+
 // --- The cursor is actually continuous ---------------------------------------
 
 test("the drawn cursor is continuous, not one of nine hole centres", () => {

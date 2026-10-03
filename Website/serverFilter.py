@@ -82,6 +82,8 @@ class ServerFilterStage:
         if len(slots) != GRID_SIZE:
             raise ValueError(f"need {GRID_SIZE} slots, got {len(slots)}")
         self.sensor_slots = slots
+        self._latest_cm.clear()
+        self._latest_angle.clear()
         self.pipeline.reset()
         self.predictor.reset()
         self.latest = None
@@ -95,11 +97,11 @@ class ServerFilterStage:
     def on_missing(self, node_id) -> None:
         """A node went offline: its channel has no reading from now on, and
         its track is dropped rather than extrapolated."""
-        if node_id in self._latest_cm:
-            self._latest_cm[node_id] = None
-            self._latest_angle[node_id] = None
+        self._latest_cm.pop(node_id, None)
+        self._latest_angle.pop(node_id, None)
         for channel, slot in enumerate(self.sensor_slots):
             if slot == node_id:
+                self.pipeline.reset_channel(channel)
                 self.predictor.reset_channel(channel)
                 self.predicted_cm[channel] = None
 
@@ -111,6 +113,10 @@ class ServerFilterStage:
         Returns None, and runs nothing, if the node is not assigned to a slot."""
         if node_id not in self.sensor_slots:
             return None
+        if node_id in self._latest_angle and self._latest_angle[node_id] != angle_deg:
+            channel = self.sensor_slots.index(node_id)
+            self.pipeline.reset_channel(channel)
+            self.predictor.reset_channel(channel)
         self._latest_cm[node_id] = distance_cm
         self._latest_angle[node_id] = angle_deg
 

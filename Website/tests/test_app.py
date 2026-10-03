@@ -767,6 +767,28 @@ class CoordinatorTurnsTests(BrokerTestCase):
         self.assertEqual(len(holders), 1)
         self.assertIn(holders[0]["id"], ids)
 
+    def test_old_turn_is_revoked_before_next_turn_is_granted(self):
+        sent = []
+
+        class OrderedConn(RecordingConn):
+            def __init__(self, node_id):
+                super().__init__()
+                self.node_id = node_id
+
+            def sendall(self, data):
+                sent.append((self.node_id, data.decode().strip()))
+                super().sendall(data)
+
+        ids = self.online_nodes()
+        for node_id in ids:
+            app.nodes[node_id]["conn"] = OrderedConn(node_id)
+        self.tick(3)  # the third tick wraps from the highest ID to the lowest
+        turn_positions = [i for i, (_, cmd) in enumerate(sent) if cmd == "TURN"]
+        self.assertEqual(len(turn_positions), 3)
+        for previous, current in zip(turn_positions, turn_positions[1:]):
+            old_id = sent[previous][0]
+            self.assertIn((old_id, "HALT"), sent[previous + 1:current])
+
     def test_the_tick_count_advances_once_per_round(self):
         self.online_nodes()
         self.tick(3)
