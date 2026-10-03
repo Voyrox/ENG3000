@@ -21,6 +21,9 @@ String formatReading(int nodeId, const String& mac, const ScanReading& reading) 
     // position; from an unknown one they do not.
     line += ",\"angle\":" + String(reading.angleDeg);
     line += ",\"scanState\":" + String(static_cast<int>(reading.state));
+    // The empty room: 0 not learnt, 1 learning (the echoes are the room's), 2
+    // learnt (echoes from the room already count as none).
+    line += ",\"room\":" + String(static_cast<int>(reading.room));
     line += "}";
     return line;
 }

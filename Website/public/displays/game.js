@@ -501,6 +501,7 @@
   // `canvas` and `orderedNodes` are only needed in sensor mode; orderedNodes is
   // [left, centre, right] in calibration slot order.
   window.updateGame = function updateGame(now, canvas, orderedNodes) {
+    roomStatus = readRoomStatus(orderedNodes);
     if (gameState.inputMode === "sensor" && canvas) {
       if (serverCoordinateActive) {
         applyServerCoordinate(canvas, orderedNodes);
@@ -827,9 +828,10 @@
 
   // The scanner fields of a node's latest payload (src/scanning.cpp): the servo
   // angle the reading was taken at (90 = straight out, more = screen-left),
-  // the scan state (0 found, 1 half-found, 2 lost) and both ultrasonics
-  // (-1 = no echo). Each is null when the node's firmware does not send it.
-  const NO_SCAN = { angle: null, state: null, left: null, right: null };
+  // the scan state (0 found, 1 half-found, 2 lost), both ultrasonics
+  // (-1 = no echo) and the empty room (0 not learnt, 1 learning, 2 learnt; see
+  // src/RoomMap.h). Each is null when the node's firmware does not send it.
+  const NO_SCAN = { angle: null, state: null, left: null, right: null, room: null };
 
   function readScan(node) {
     if (!node || !node.online || !node.latest) return NO_SCAN;
@@ -850,10 +852,29 @@
       state: numberOrNull(payload.scanState ?? payload.state),
       left: numberOrNull(payload.left),
       right: numberOrNull(payload.right),
+      room: numberOrNull(payload.room),
     };
   }
 
   window.readNodeScan = readScan;
+
+  // The empty room across the scanner nodes, from their latest readings:
+  // "learning" while any node is, "learned" once every node reporting it has,
+  // "not-learned" otherwise, and null when no node's firmware reports it.
+  const ROOM_LEARNING = 1;
+  const ROOM_LEARNED = 2;
+  let roomStatus = null;
+
+  function readRoomStatus(orderedNodes) {
+    const rooms = (Array.isArray(orderedNodes) ? orderedNodes : [])
+      .map((node) => readScan(node).room)
+      .filter((room) => room !== null);
+    if (rooms.length === 0) return null;
+    if (rooms.includes(ROOM_LEARNING)) return "learning";
+    return rooms.every((room) => room === ROOM_LEARNED) ? "learned" : "not-learned";
+  }
+
+  window.getGameRoomStatus = () => roomStatus;
 
   // --- Per-sensor conditioning ----------------------------------------------
 
@@ -1728,8 +1749,10 @@
   // True while sensor input cannot produce a playable coordinate. The round
   // clock is held during these states so the player is not penalised for a
   // dropout they cannot control.
+  // While the nodes learn the room, their echoes are the furniture's, not the
+  // player's, so the round waits for that too.
   function isSensorBlocked() {
-    return gameState.inputMode === "sensor" && gameState.sensor.status !== "ok";
+    return gameState.inputMode === "sensor" && (gameState.sensor.status !== "ok" || roomStatus === "learning");
   }
 
   window.getGameOverButtonAtPoint = function getGameOverButtonAtPoint(canvas, x, y) {
@@ -1808,6 +1831,42 @@
     console.info(`[scan] ${pulsesLabel()}`);
     return settings.pulsesPerAngle;
   };
+
+  // Room button: right under the Pulses button. Pressing it has the nodes learn
+  // the empty room (canvas.js sends nodes:room); it shows their progress.
+  function getRoomButtonLayout(canvas) {
+    const pulses = getPulsesButtonLayout(canvas);
+    return { x: pulses.x, y: pulses.y + pulses.height + 8, width: pulses.width, height: pulses.height };
+  }
+
+  function roomLabel() {
+    if (roomStatus === "learning") return "Learning room";
+    if (roomStatus === "learned") return "Room: learned";
+    return "Learn room";
+  }
+
+  window.getGameRoomButtonAtPoint = function getGameRoomButtonAtPoint(canvas, x, y) {
+    if (gameState.status !== "playing") return null;
+    return pointInRect(x, y, getRoomButtonLayout(canvas)) ? { type: "room" } : null;
+  };
+
+  // Amber while the nodes are learning the room, like Pulses while it is on.
+  function drawRoomButton(ctx, canvas) {
+    const room = getRoomButtonLayout(canvas);
+    const learning = roomStatus === "learning";
+    if (learning) {
+      ctx.fillStyle = "#f59e0b";
+      ctx.beginPath();
+      ctx.roundRect(room.x, room.y, room.width, room.height, 10);
+      ctx.fill();
+    } else {
+      drawHudPanel(ctx, room.x, room.y, room.width, room.height, 10);
+    }
+    ctx.textAlign = "center";
+    ctx.fillStyle = learning ? "#13131c" : "#f4f4f5";
+    ctx.font = "bold 15px monospace";
+    ctx.fillText(roomLabel(), room.x + room.width / 2, room.y + room.height / 2 + 5);
+  }
 
   function getPauseMenuLayout(canvas) {
     const width = canvas.clientWidth || canvas.width;
@@ -1983,9 +2042,13 @@
 
     let message = null;
     let detail = "";
-    if (status === "no-signal") {
-      message = "Come closer";
-      detail = "No coordinate detected - step into the play area";
+    if (roomStatus === "learning") {
+      message = "Learning the room";
+      detail = "Keep the play area clear until the button stops flashing";
+    } else if (status === "no-signal") {
+      // Nothing seen at all: nobody is on the board.
+      message = "Out of bounds";
+      detail = "Nobody detected - step into the play area";
     } else if (status === "out-of-bounds") {
       message = "Come back in bounds";
       detail = "Reading outside the play area - move back onto the board";
@@ -2302,6 +2365,7 @@
       ctx.fillStyle = pulsesOn ? "#13131c" : "#f4f4f5";
       ctx.font = "bold 15px monospace";
       ctx.fillText(pulsesLabel(), pulses.x + pulses.width / 2, pulses.y + pulses.height / 2 + 5);
+      drawRoomButton(ctx, canvas);
     }
 
     ctx.textAlign = "center";

@@ -13,6 +13,8 @@
 //   AIM <deg> / SCAN     hold the servo for calibration / scan again
 //   PULSES <n>           multi-pulse: pulse pairs per angle in found or
 //                        half-found, 1 = off (clamped to 1..MAX_PULSES_PER_ANGLE)
+//   LEARN / FORGET       learn the empty room (sweep with nobody in the play
+//                        area) / clear it; see RoomMap.h
 class CommandHandler {
 public:
     CommandHandler(NodeConnection& connection, Scanner& scanner);

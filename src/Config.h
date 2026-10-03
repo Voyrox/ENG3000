@@ -120,6 +120,31 @@ constexpr int MAX_PULSES_PER_ANGLE = 5;
 // an outlier and is left out (see Scanner::averageWithoutOutliers).
 constexpr float OUTLIER_TOLERANCE_CM = 20;
 
+// --- Empty room -------------------------------------------------------------
+// The game's Room button (LEARN) has each node sweep its whole range with nobody
+// in the play area and record, at every angle, the nearest echo each sensor gets:
+// a chair, a desk, the wall. From then on an echo that is not clearly nearer than
+// the room at that angle is the room, not the player, and counts as no echo -
+// so the scan sweeps past furniture instead of locking on to it. The room is
+// kept in flash, so it survives a reset; FORGET clears it. See RoomMap.h.
+//
+// Degrees between the angles learnt.
+constexpr int ROOM_STEP_DEG = 3;
+// Sweeps across the range (there, back, ...) and pulse pairs read at each angle
+// on each sweep.
+constexpr int ROOM_PASSES = 2;
+constexpr int ROOM_PAIRS_PER_ANGLE = 2;
+// The first angle learnt can be across the whole range from where the servo
+// was, which takes far longer than SERVO_SETTLE_MS.
+constexpr unsigned long ROOM_START_SETTLE_MS = 800;
+// An echo is the room unless it is at least this much nearer than the nearest
+// learnt echo within ROOM_STEP_DEG of the angle it was read at.
+constexpr float ROOM_MARGIN_CM = 15;
+// A learnt echo only counts if another one - at the same angle or within
+// ROOM_STEP_DEG of it - is within this of it. One stray echo would otherwise
+// hide everything behind it in that direction for good.
+constexpr float ROOM_MATCH_CM = 10;
+
 // --- Servo ----------------------------------------------------------------
 // 90 points straight out into the play area; larger turns towards screen-left.
 constexpr int CENTRE_DEG = 90;

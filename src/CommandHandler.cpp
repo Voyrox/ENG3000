@@ -52,6 +52,15 @@ void CommandHandler::handle(const String& line) {
     } else if (line.startsWith("PULSES ")) {
         scanner_.setPulsesPerAngle(line.substring(7).toInt());
         Serial.printf("Pulses per angle: %d\n", scanner_.pulsesPerAngle());
+    } else if (line == "LEARN") {
+        if (scanner_.learnRoom()) {
+            Serial.println("Learning the room: keep the play area clear");
+        } else {
+            Serial.println("Room not learnt: the servo is held for calibration");
+        }
+    } else if (line == "FORGET") {
+        scanner_.forgetRoom();
+        Serial.println("Room forgotten");
     } else {
         Serial.printf("Unhandled PC command: %s\n", line.c_str());
     }

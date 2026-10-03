@@ -1512,6 +1512,54 @@ class NodePulsesTests(BrokerTestCase):
         self.assertEqual(app.nodes_pulse_count, 3)
 
 
+class NodeRoomTests(BrokerTestCase):
+    """The empty room: the game screen's Room button reaches the scanner nodes."""
+
+    def test_learn_and_forget_reach_every_connected_node(self):
+        _, first = self.add_node(conn=RecordingConn())
+        _, second = self.add_node(address=("10.0.0.2", 1001), conn=RecordingConn())
+        self.assertTrue(app.send_nodes_room("learn"))
+        self.assertTrue(app.send_nodes_room("forget"))
+        self.assertEqual(first["conn"].sent, ["LEARN\n", "FORGET\n"])
+        self.assertEqual(second["conn"].sent, ["LEARN\n", "FORGET\n"])
+
+    def test_a_node_without_a_connection_is_not_sent_it(self):
+        _, node = self.add_node()
+        self.assertTrue(app.send_nodes_room("learn"))
+        self.assertIsNone(node.get("conn"))
+
+    def test_a_node_that_connects_later_is_not_told(self):
+        # The nodes keep the room in flash; there is nothing to replay.
+        app.send_nodes_room("learn")
+        conn = FakeNodeSocket(b"\r\n")
+        app.handle_node_connection(conn, ("10.0.0.1", 1000))
+        self.assertNotIn("LEARN\n", conn.sent)
+
+    def test_a_bad_action_is_ignored(self):
+        _, node = self.add_node(conn=RecordingConn())
+        for action in ("LEARN", "learn ", "clear", "", None, 1, ["learn"], {"learn": 1}):
+            self.assertFalse(app.send_nodes_room(action))
+        self.assertEqual(node["conn"].sent, [])
+
+    def test_the_browser_message_reaches_the_nodes_without_server_filtering(self):
+        _, node = self.add_node(conn=RecordingConn())
+        message = json.dumps({"type": "nodes:room", "action": "learn"})
+        socket = FakeBrowserSocket(incoming=[message])
+        with mock.patch.object(app, "server_filter", None):
+            asyncio.run(app.browser_handler(socket))
+        self.assertEqual(node["conn"].sent, ["LEARN\n"])
+
+    def test_the_http_api_learns_and_rejects_a_bad_action(self):
+        _, node = self.add_node(conn=RecordingConn())
+        client = app.app.test_client()
+        response = client.post("/api/room", json={"action": "learn"})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json(), {"action": "learn"})
+        response = client.post("/api/room", json={"action": "wipe"})
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(node["conn"].sent, ["LEARN\n"])
+
+
 class ScannerAngleTests(unittest.TestCase):
     """The servo angle a scanner node sends alongside its distance."""
 

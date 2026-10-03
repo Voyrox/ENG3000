@@ -329,6 +329,16 @@ function syncNodesPulses() {
   if (sendToServer({ type: "nodes:pulses", count })) sentPulsesPerAngle = count;
 }
 
+// --- Empty room (the Room button on the game screen) --------------------------
+// The server tells every node to learn the room (LEARN): with nobody in the play
+// area, each sweeps its range and from then on ignores the room's echoes. The
+// nodes report their progress in each reading, which the button shows. A press
+// while they are still learning is ignored rather than starting over.
+function learnRoom() {
+  if (window.getGameRoomStatus() === "learning") return;
+  if (sendToServer({ type: "nodes:room", action: "learn" })) console.info("[scan] Learning the room");
+}
+
 // The loop keeps running across the game <-> alert boundary so the sensors are
 // still read while the alert is up - that is what lets it clear itself once the
 // player steps back past the threshold.
@@ -666,6 +676,12 @@ c.addEventListener("click", (event) => {
     if (window.getGamePulsesButtonAtPoint(c, point.x, point.y)) {
       window.cycleGamePulses();
       draw(); // draw() sends the new count on to the nodes
+      return;
+    }
+
+    if (window.getGameRoomButtonAtPoint(c, point.x, point.y)) {
+      learnRoom();
+      draw();
       return;
     }
 

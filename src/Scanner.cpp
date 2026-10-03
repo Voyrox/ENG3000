@@ -42,14 +42,21 @@ void Scanner::begin() {
     leftSensor_.begin();
     rightSensor_.begin();
     servo_.begin();
+    room_.begin();
 }
 
 bool Scanner::update() {
-    PulsePair pair;
-    if (!readPair(pair)) {
+    if (room_.status() == RoomStatus::Learning) {
+        return updateLearning();
+    }
+
+    PulsePair heard;
+    if (!readPair(heard)) {
         return false;
     }
-    logPair(pair);
+    // From here on an echo from the room is no echo: it is not the player.
+    PulsePair pair = {withoutRoom(Side::Left, heard.leftCm), withoutRoom(Side::Right, heard.rightCm)};
+    logPair(heard, pair);
 
     if (pulseCount_ < config::MAX_PULSES_PER_ANGLE) {
         pulses_[pulseCount_++] = pair;
@@ -65,11 +72,24 @@ bool Scanner::update() {
 }
 
 void Scanner::setRole(NodeRole role) {
+    int minDeg = servo_.minDeg();
+    int maxDeg = servo_.maxDeg();
     servo_.setRole(role);
+    // A learn sweeping the old range would not cover the new one. The same role
+    // sent again (the game page reconnecting, say) leaves it running.
+    if (room_.status() == RoomStatus::Learning && (servo_.minDeg() != minDeg || servo_.maxDeg() != maxDeg)) {
+        room_.cancelLearning();
+        Serial.println("Room learning stopped: new servo limits");
+    }
     restart();
 }
 
 void Scanner::holdAt(int degrees) {
+    // Calibration needs the servo to stay where it is put.
+    if (room_.status() == RoomStatus::Learning) {
+        room_.cancelLearning();
+        Serial.println("Room learning stopped: servo held for calibration");
+    }
     servo_.holdAt(degrees);
     restart();
 }
@@ -86,6 +106,86 @@ void Scanner::setPulsesPerAngle(int count) {
 void Scanner::restart() {
     readLeftNext_ = true;
     pulseCount_ = 0;
+}
+
+bool Scanner::learnRoom() {
+    if (servo_.isHeld()) {
+        return false;
+    }
+    room_.startLearning();
+    learnPass_ = 0;
+    learnStep_ = 0;
+    learnPairs_ = 0;
+    restart();
+    servo_.stepBy(learningAngle(0, 0) - servo_.angleDeg());
+    learnStartMs_ = millis();
+    return true;
+}
+
+void Scanner::forgetRoom() {
+    room_.forget();
+    restart();
+}
+
+// One step of learning the room: a pair read at this angle with nothing left
+// out, and once the angle has all its pairs, on to the next. The last pair at
+// each angle is reported, so the server still hears from the node and the game
+// can show that it is learning.
+bool Scanner::updateLearning() {
+    if (millis() - learnStartMs_ < config::ROOM_START_SETTLE_MS) {
+        return false;
+    }
+    PulsePair pair;
+    if (!readPair(pair)) {
+        return false;
+    }
+    if (config::LOG_EVERY_PAIR) {
+        Serial.printf("learn L %.2f  R %.2f  angle %d  sweep %d/%d\n", pair.leftCm, pair.rightCm,
+                      servo_.angleDeg(), learnPass_ + 1, config::ROOM_PASSES);
+    }
+    room_.record(servo_.angleDeg(), pair.leftCm, pair.rightCm);
+    if (++learnPairs_ < config::ROOM_PAIRS_PER_ANGLE) {
+        return false;
+    }
+
+    latest_.leftCm = pair.leftCm;
+    latest_.rightCm = pair.rightCm;
+    latest_.angleDeg = servo_.angleDeg();
+    latest_.state = ScanState::Lost; // sweeping, not tracking anyone
+    latest_.room = RoomStatus::Learning;
+
+    learnPairs_ = 0;
+    if (++learnStep_ >= learningSteps()) {
+        learnStep_ = 0;
+        if (++learnPass_ >= config::ROOM_PASSES) {
+            room_.finishLearning();
+            latest_.room = room_.status();
+            Serial.println("Room learnt");
+            return true; // the scan carries on from this angle
+        }
+    }
+    servo_.stepBy(learningAngle(learnPass_, learnStep_) - servo_.angleDeg());
+    return true;
+}
+
+// How many angles one sweep learns: every config::ROOM_STEP_DEG from one end of
+// the range, and the far end itself.
+int Scanner::learningSteps() const {
+    int span = servo_.maxDeg() - servo_.minDeg();
+    return (span + config::ROOM_STEP_DEG - 1) / config::ROOM_STEP_DEG + 1;
+}
+
+// The angle of one step of one sweep. Even sweeps go up the range and odd ones
+// come back down, so each sweep starts where the one before it ended.
+int Scanner::learningAngle(int pass, int step) const {
+    int along = (pass % 2 == 0) ? step : learningSteps() - 1 - step;
+    return min(servo_.minDeg() + along * config::ROOM_STEP_DEG, servo_.maxDeg());
+}
+
+// An echo from the room counts as no echo. The servo has not moved since the
+// pair was read, so its angle is the pair's.
+float Scanner::withoutRoom(Side side, float distanceCm) const {
+    return room_.isRoom(side, servo_.angleDeg(), distanceCm) ? config::NO_ECHO : distanceCm;
 }
 
 // Reads one pulse pair without blocking: the left sensor, then the right one
@@ -151,6 +251,7 @@ ScanReading Scanner::averagePulses() const {
     reading.rightCm = averageWithoutOutliers(rightReadings, pulseCount_);
     reading.angleDeg = servo_.angleDeg(); // the servo has not moved since the first pulse
     reading.state = ScanReading::classify(reading.leftCm, reading.rightCm);
+    reading.room = room_.status();
 
     if (config::LOG_EVERY_PAIR && pulseCount_ > 1) {
         Serial.printf("  average of %d: L %.2f  R %.2f  state %d\n", pulseCount_,
@@ -249,11 +350,15 @@ void Scanner::move(const ScanReading& reading) {
     }
 }
 
-void Scanner::logPair(const PulsePair& pair) const {
+// Prints what each sensor heard; an echo the room took out is marked "(room)".
+// The state is the one the scan acts on, i.e. without the room.
+void Scanner::logPair(const PulsePair& heard, const PulsePair& pair) const {
     if (!config::LOG_EVERY_PAIR) {
         return;
     }
-    Serial.printf("L %.2f  R %.2f  state %d  angle %d\n", pair.leftCm, pair.rightCm,
+    Serial.printf("L %.2f%s  R %.2f%s  state %d  angle %d\n", heard.leftCm,
+                  pair.leftCm != heard.leftCm ? " (room)" : "", heard.rightCm,
+                  pair.rightCm != heard.rightCm ? " (room)" : "",
                   static_cast<int>(ScanReading::classify(pair.leftCm, pair.rightCm)),
                   servo_.angleDeg());
 }
