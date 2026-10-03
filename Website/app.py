@@ -610,6 +610,30 @@ def send_node_pulses(node_id):
     send_command(node_id, command)
 
 
+# The empty room, from the Room button on the game screen (nodes:room) or
+# POST /api/room. LEARN: with nobody in the play area, each scanner node sweeps
+# its range and records the room's echoes, and from then on ignores them.
+# FORGET clears that. The nodes keep the room in flash and report it in every
+# reading ("room": 0 not learnt, 1 learning, 2 learnt), so a node that
+# reconnects is not told again.
+ROOM_COMMANDS = {"learn": "LEARN", "forget": "FORGET"}
+
+
+def send_nodes_room(action):
+    """Tell every connected node to learn or forget the room. Anything but an
+    action in ROOM_COMMANDS is ignored. Returns whether it was sent."""
+    command = ROOM_COMMANDS.get(action) if isinstance(action, str) else None
+    if command is None:
+        print(f"Ignored bad nodes:room action: {action!r}")
+        return False
+    with state_lock:
+        node_ids = [node_id for node_id, node in nodes.items() if node.get("conn") is not None]
+    print(f"Room: {action} on {len(node_ids)} node(s)")
+    for node_id in node_ids:
+        send_command(node_id, command)
+    return True
+
+
 def sync_node(node_id):
     """Send the authoritative tick to one node (PC is source of truth)."""
     with state_lock:
@@ -780,6 +804,9 @@ async def browser_handler(websocket):
             elif event.get("type") == "nodes:pulses":
                 # The game screen's Pulses button: multi-pulse off (1), 2 or 3.
                 await asyncio.to_thread(set_nodes_pulse_count, event.get("count"))
+            elif event.get("type") == "nodes:room":
+                # The game screen's Room button: learn the empty room.
+                await asyncio.to_thread(send_nodes_room, event.get("action"))
             elif server_filter is not None:
                 apply_filter_event(event)
     finally:
@@ -888,6 +915,17 @@ def api_pulses():
     if not set_nodes_pulse_count(count):
         return jsonify({"error": f"count must be one of {list(PULSE_COUNT_OPTIONS)}"}), 400
     return jsonify({"count": count})
+
+
+@app.route("/api/room", methods=["POST"])
+def api_room():
+    """The empty room without the game page: {"action": "learn"|"forget"}. Each
+    node's progress is the "room" field of its readings in /api/nodes."""
+    body = request.get_json(silent=True) or {}
+    action = body.get("action")
+    if not send_nodes_room(action):
+        return jsonify({"error": f"action must be one of {sorted(ROOM_COMMANDS)}"}), 400
+    return jsonify({"action": action})
 
 
 if __name__ == '__main__':

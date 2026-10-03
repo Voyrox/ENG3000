@@ -3,6 +3,7 @@
 #include <Arduino.h>
 
 #include "Config.h"
+#include "RoomMap.h"
 #include "ScannerServo.h"
 #include "UltrasonicSensor.h"
 
@@ -21,6 +22,9 @@ struct ScanReading {
     float rightCm = config::NO_ECHO;
     int angleDeg = config::CENTRE_DEG;
     ScanState state = ScanState::Lost;
+    // What the node knew about the empty room when this was read. While it is
+    // learning, the sensors' echoes are the room's, sent as heard.
+    RoomStatus room = RoomStatus::NotLearned;
 
     // The node's distance to the player: the mean of the sensors reading inside
     // the play area, else the nearer real echo, else config::NO_ECHO.
@@ -42,6 +46,11 @@ struct ScanReading {
 // pairs, each sensor's readings are averaged with outliers left out, and the
 // averaged reading is what gets reported and moved on. A lost pair still sweeps
 // on its own, so a search is no slower.
+//
+// Empty room: once the room has been learnt (learnRoom(), the game's Room
+// button), an echo from the room - a chair, a desk, the wall - counts as no
+// echo, so the scan sweeps past furniture instead of locking on to it. See
+// RoomMap.h.
 class Scanner {
 public:
     Scanner(UltrasonicSensor& left, UltrasonicSensor& right, ScannerServo& servo);
@@ -68,6 +77,16 @@ public:
     // HALT with a right one from after the next TURN.
     void restart();
 
+    // LEARN: sweep the whole range with nobody in the play area and learn the
+    // room, then scan on. LEARN again starts over. Not while the servo is held
+    // for calibration: returns false and does nothing. A learn is cut short by
+    // calibration (holdAt) or by a role with other limits, which keeps the room
+    // from before.
+    bool learnRoom();
+    // FORGET: no room; every echo counts again.
+    void forgetRoom();
+    RoomStatus roomStatus() const { return room_.status(); }
+
 private:
     struct PulsePair {
         float leftCm;
@@ -78,7 +97,12 @@ private:
     bool isCollectingMore(const PulsePair& pair) const;
     ScanReading averagePulses() const;
     void move(const ScanReading& reading);
-    void logPair(const PulsePair& pair) const;
+    void logPair(const PulsePair& heard, const PulsePair& pair) const;
+
+    bool updateLearning();
+    int learningSteps() const;
+    int learningAngle(int pass, int step) const;
+    float withoutRoom(Side side, float distanceCm) const;
 
     // The average of one sensor's echoes, outliers left out; see Scanner.cpp.
     static float averageWithoutOutliers(const float* readings, int count);
@@ -105,4 +129,13 @@ private:
     // steering with it, and vice versa.
     int sweepDir_ = 1;
     int steerDir_ = 1;
+
+    RoomMap room_;
+
+    // Learning the room: which sweep, which angle along it, how many pairs have
+    // been read there, and when the servo set off for the first angle.
+    int learnPass_ = 0;
+    int learnStep_ = 0;
+    int learnPairs_ = 0;
+    unsigned long learnStartMs_ = 0;
 };

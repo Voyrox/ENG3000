@@ -457,6 +457,24 @@ class TwoSensorGeometryBehaviour(unittest.TestCase):
         fix = self.locate([None, None, 170.0])
         self.assertEqual(fix.status, STATUS_OUT_OF_BOUNDS)
 
+    def test_off_either_side_of_the_board_is_out_of_bounds(self):
+        # Every method, each on its own geometry (a line-of-sight track would
+        # carry over). 80 cm from the left scanner at 130 degrees:
+        # x = 25 - 80 sin 40 = -26.
+        for method in ("los", "tri", "avg"):
+            left = self.scan([(80.0, 130), None, None], geometry=TwoSensorGeometry(method=method))
+            self.assertEqual(left.status, STATUS_OUT_OF_BOUNDS, method)
+            self.assertEqual(left.x_cm, 0.0, method)  # clamped for the column, still out
+            # 80 cm from the right scanner at 50 degrees: x = 125 + 80 sin 40 = 176.
+            right = self.scan([None, None, (80.0, 50)], geometry=TwoSensorGeometry(method=method))
+            self.assertEqual(right.status, STATUS_OUT_OF_BOUNDS, method)
+
+    def test_just_inside_the_side_edge_is_in_bounds(self):
+        # 80 cm from the left scanner at 105 degrees: x = 25 - 80 sin 15 = 4.3.
+        for method in ("los", "tri", "avg"):
+            fix = self.scan([(80.0, 105), None, None], geometry=TwoSensorGeometry(method=method))
+            self.assertEqual(fix.status, STATUS_OK, method)
+
     # --- servo scanners: (distance, angle) per node ---------------------------
 
     def test_a_scanner_at_90_degrees_points_straight_out(self):

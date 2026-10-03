@@ -1014,7 +1014,11 @@ class TwoSensorGeometry(Geometry):
             if abs(x - boundary) < config.column_margin_cm:
                 column = last
 
-        if y > area.max_cm:
+        # Off either side of the board is out of bounds as much as past the
+        # far edge. x is clamped for the column only; the check uses the
+        # position as measured.
+        off_the_side = not 0.0 <= where[0] <= area.width_cm
+        if off_the_side or y > area.max_cm:
             return Fix(STATUS_OUT_OF_BOUNDS, x_cm=x, y_cm=y, column=column, distance_cm=y)
 
         self._last_column = column
@@ -1239,6 +1243,9 @@ class CoordinatePipeline:
         raw = self.geometry.channels(sample)
         if fresh is None:
             fresh = [True] * len(raw)
+        # A range at a new bearing is not another sample of the old track: as
+        # in conditionSensor() in game.js, a fresh reading at another scanner
+        # angle starts that channel's filter over (ChannelFilter.update).
         angles = self.geometry.channel_angles()
         filtered = [ch.update(v, now_ms, a) if is_fresh else ch.value
                     for ch, v, a, is_fresh in zip(self._channels, raw, angles, fresh)]

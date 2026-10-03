@@ -72,15 +72,20 @@ constexpr float NO_ECHO = -1.0f;
 // Speed of sound in cm/us. A reading is half the round trip.
 constexpr double SOUND_CM_PER_US = 0.034;
 
-// How long a reading may wait for its echo. Sound covers the round trip to the
-// far edge of the play area in about 8.2 ms, so anything past this is not a
-// target.
-constexpr unsigned long ECHO_TIMEOUT_US = 9000;
-
 // A reading inside this range is taken to be the player; outside it there is no
 // target.
 constexpr float MIN_TARGET_CM = 10;
 constexpr float MAX_TARGET_CM = 180;
+
+// How long a reading may wait for its echo. pulseIn() counts from the trigger,
+// not from the start of the echo pulse, and the HC-SR04 only raises ECHO about
+// half a millisecond after its trigger. So the timeout is the round trip to
+// MAX_TARGET_CM plus that start: the old flat 9000 us left room for only
+// ~145 cm, and nothing past it - the far edge of the play area included - was
+// ever heard.
+constexpr unsigned long ECHO_START_US = 600;
+constexpr unsigned long ECHO_TIMEOUT_US =
+    static_cast<unsigned long>(MAX_TARGET_CM * 2 / SOUND_CM_PER_US) + ECHO_START_US;
 
 // --- Scan timing ----------------------------------------------------------
 // Quiet time after one pulse pair before the next pair starts.
@@ -119,6 +124,31 @@ constexpr int MAX_PULSES_PER_ANGLE = 5;
 // When the pulses are averaged, an echo further than this from their median is
 // an outlier and is left out (see Scanner::averageWithoutOutliers).
 constexpr float OUTLIER_TOLERANCE_CM = 20;
+
+// --- Empty room -------------------------------------------------------------
+// The game's Room button (LEARN) has each node sweep its whole range with nobody
+// in the play area and record, at every angle, the nearest echo each sensor gets:
+// a chair, a desk, the wall. From then on an echo that is not clearly nearer than
+// the room at that angle is the room, not the player, and counts as no echo -
+// so the scan sweeps past furniture instead of locking on to it. The room is
+// kept in flash, so it survives a reset; FORGET clears it. See RoomMap.h.
+//
+// Degrees between the angles learnt.
+constexpr int ROOM_STEP_DEG = 3;
+// Sweeps across the range (there, back, ...) and pulse pairs read at each angle
+// on each sweep.
+constexpr int ROOM_PASSES = 2;
+constexpr int ROOM_PAIRS_PER_ANGLE = 2;
+// The first angle learnt can be across the whole range from where the servo
+// was, which takes far longer than SERVO_SETTLE_MS.
+constexpr unsigned long ROOM_START_SETTLE_MS = 800;
+// An echo is the room unless it is at least this much nearer than the nearest
+// learnt echo within ROOM_STEP_DEG of the angle it was read at.
+constexpr float ROOM_MARGIN_CM = 15;
+// A learnt echo only counts if another one - at the same angle or within
+// ROOM_STEP_DEG of it - is within this of it. One stray echo would otherwise
+// hide everything behind it in that direction for good.
+constexpr float ROOM_MATCH_CM = 10;
 
 // --- Servo ----------------------------------------------------------------
 // 90 points straight out into the play area; larger turns towards screen-left.

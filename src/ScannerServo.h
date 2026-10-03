@@ -40,6 +40,10 @@ public:
 
     int angleDeg() const { return angleDeg_; }
 
+    // This mount's range: the smallest and the largest angle it may turn to.
+    int minDeg() const { return limits_.maxRightDeg; }
+    int maxDeg() const { return limits_.maxLeftDeg; }
+
 private:
     void write(int degrees);
 
