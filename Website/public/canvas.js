@@ -513,10 +513,13 @@ function handleRemoteCommand(command) {
 }
 
 // Lets the control panel mirror the round. Cheap enough to send unconditionally;
-// the server drops it when the control panel is disabled.
+// the server drops it when the control panel is disabled. The cursor is only
+// current while the game loop runs; on any other screen it is whatever the
+// last round left behind, so it is not sent.
 function sendGameStatus() {
   if (!socket || socket.readyState !== WebSocket.OPEN) return;
   const state = window.getGameState();
+  const loopRunning = screen === "game" || (screen === "alert" && alertReturnScreen === "game");
   socket.send(JSON.stringify({
     type: "game:status",
     screen,
@@ -529,13 +532,15 @@ function sendGameStatus() {
     activeHole: state.activeHole,
     moleType: state.moleType,
     remoteHole: state.remoteHole,
+    cursor: loopRunning ? window.getGameCursorStatus(c) : null,
     testMode: window.getGameSettings().testMode,
     positionMethod: window.getPositionMethod(),
     positionMethods: window.getPositionMethods(),
   }));
 }
 
-window.setInterval(sendGameStatus, 250);
+// 10 Hz, so the cursor mirrored on the phone glides rather than steps.
+window.setInterval(sendGameStatus, 100);
 
 function connectSocket() {
   socket = new WebSocket(wsUrl);

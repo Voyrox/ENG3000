@@ -18,6 +18,7 @@
 //   window.getGameOverButtonAtPoint(canvas,x,y) - hit-test Restart / Return to Start
 //   window.renderGame(ctx, canvas)              - draw the current frame
 //   window.getGameState()                       - read-only peek at state (score/level/etc)
+//   window.getGameCursorStatus(canvas)          - the cursor and sensor (x, y) for the phone panel
 //   window.setServerFilteringActive(active)     - the server has SERVER_FILTERING on
 //   window.setServerCoordinate(coordinate)      - latest filtered coordinate from the server
 //
@@ -725,6 +726,46 @@
     gameState.remoteHole = hole ? hole.index : -1;
     window.handleGameHover(canvas, x, y);
   }
+
+  // The cursor as the phone control panel mirrors it, in any input mode.
+  // board is the drawn cursor as a fraction of the board - 0-1 with (0,0) at
+  // the top-left, the pad's own orientation - and hole is the hole under it,
+  // which is the one that scores. sensor is only filled in sensor mode: the
+  // player's position in play-area cm (x across from screen-left, y the depth
+  // from the screen), the cell, and the state the sensors are in.
+  window.getGameCursorStatus = function getGameCursorStatus(canvas) {
+    const cursor = gameState.cursor;
+    let board = null;
+    let hole = -1;
+    if (canvas && cursor.x !== null) {
+      const layout = window.getGameGridLayout(canvas);
+      board = {
+        nx: (cursor.x - layout.gridLeft) / layout.gridSize,
+        ny: (cursor.y - layout.gridTop) / layout.gridSize,
+      };
+      const over = holeAtPoint(layout, cursor.x, cursor.y);
+      hole = over ? over.index : -1;
+    }
+
+    if (gameState.inputMode !== "sensor") return { board, hole, sensor: null };
+
+    const sensor = gameState.sensor;
+    const hasCell = Number.isInteger(sensor.gx) && Number.isInteger(sensor.gy);
+    return {
+      board,
+      hole,
+      sensor: {
+        status: sensor.status,
+        held: Boolean(sensor.held),
+        source: sensor.source || null,
+        xCm: numberOrNull(sensor.xCm),
+        yCm: numberOrNull(sensor.yCm),
+        distanceCm: numberOrNull(sensor.distanceCm),
+        gx: hasCell ? sensor.gx : null,
+        gy: hasCell ? sensor.gy : null,
+      },
+    };
+  };
 
   window.getGameGridLayout = function getGameGridLayout(canvas) {
     const width = canvas.clientWidth || canvas.width;
