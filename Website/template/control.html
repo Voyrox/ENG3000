@@ -23,8 +23,13 @@
     </section>
 
     <section>
-        <h2>Holes <small>green mole · blue hat mole · red bomb</small></h2>
+        <h2>Holes <small>green mole · blue hat mole · red bomb · cyan cursor</small></h2>
         <div id="pad"></div>
+        <div class="coord">
+            <div><span>Sensor (x, y) cm</span><b id="coordXY">--</b></div>
+            <div><span>Sensors</span><b id="coordState">--</b></div>
+        </div>
+        <p class="note">x runs across from screen-left (0-150 cm), y out from the screen.</p>
     </section>
 
     <section>
@@ -86,6 +91,13 @@
         finger.id = "finger";
         pad.appendChild(finger);
 
+        // The game's own cursor, mirrored from game:status: in sensor mode
+        // that is where the sensors put the player. Hidden while a finger is
+        // down, because then it is only a delayed copy of the finger.
+        const gameCursor = document.createElement("div");
+        gameCursor.id = "gameCursor";
+        pad.appendChild(gameCursor);
+
         const HEARTBEAT_MS = 250;
         let dragging = false;
         let pendingPoint = null;
@@ -114,6 +126,7 @@
             pad.setPointerCapture(e.pointerId);
             dragging = true;
             finger.classList.add("down");
+            gameCursor.classList.remove("on");
             queuePoint(e);
             clearInterval(heartbeat);
             heartbeat = setInterval(() => {
@@ -164,13 +177,54 @@
                 btn.classList.toggle("selected", btn.dataset.mode === game.mode);
             });
             pad.classList.toggle("disabled", game.screen !== "game");
+            // The hole under the game's cursor in any mode; a game page from
+            // before the cursor was mirrored only sends the remote one.
+            const cursorHole = game.cursor !== undefined
+                ? (game.cursor ? game.cursor.hole : -1)
+                : game.remoteHole;
             pad.querySelectorAll(".hole").forEach((cell, i) => {
                 const up = i === game.activeHole;
                 cell.classList.toggle("mole", up && game.moleType === "mole");
                 cell.classList.toggle("super", up && game.moleType === "super");
                 cell.classList.toggle("bomb", up && game.moleType === "bomb");
-                cell.classList.toggle("cursor", i === game.remoteHole);
+                cell.classList.toggle("cursor", i === cursorHole);
             });
+            renderCursor();
+        }
+
+        const STATE_LABELS = { "too-close": "too close", "out-of-bounds": "out of bounds", "no-signal": "no signal" };
+        const SOURCE_LABELS = { both: "both", left: "left only", right: "right only" };
+        const cm = (v) => v.toFixed(1);
+
+        // Mirrors the game's cursor onto the pad and, in sensor mode, shows
+        // where the sensors put the player. A position off the board is pinned
+        // to its edge on the pad; the numbers stay exact.
+        function renderCursor() {
+            const cursor = game && game.cursor;
+            const board = cursor && cursor.board;
+            const show = Boolean(board) && !dragging && game.mode !== "remote";
+            gameCursor.classList.toggle("on", show);
+            if (show) {
+                const clamp = (v) => Math.min(1, Math.max(0, v));
+                gameCursor.style.left = `${clamp(board.nx) * 100}%`;
+                gameCursor.style.top = `${clamp(board.ny) * 100}%`;
+            }
+
+            const sensor = cursor && cursor.sensor;
+            gameCursor.classList.toggle("held", Boolean(sensor && sensor.held));
+            if (!sensor) {
+                $("coordXY").textContent = "--";
+                $("coordState").textContent = cursor ? `${game.mode} input` : "--";
+                return;
+            }
+            const placed = sensor.xCm != null && sensor.yCm != null;
+            $("coordXY").textContent = placed ? `(${cm(sensor.xCm)}, ${cm(sensor.yCm)})` : "--";
+            let state = STATE_LABELS[sensor.status] || sensor.status;
+            if (sensor.status === "ok") state = sensor.held ? "held" : SOURCE_LABELS[sensor.source] || "ok";
+            if (sensor.status === "too-close" && sensor.distanceCm != null) {
+                state += ` (${Math.round(sensor.distanceCm)} cm)`;
+            }
+            $("coordState").textContent = state;
         }
 
         function renderNodes(nodes) {
@@ -255,7 +309,8 @@
         gap: 8px;
     }
 
-    .stats div {
+    .stats div,
+    .coord div {
         background: #1d1d2a;
         border-radius: 10px;
         padding: 8px 10px;
@@ -263,8 +318,19 @@
         flex-direction: column;
     }
 
-    .stats span { font-size: 11px; color: #9298aa; }
-    .stats b { font-size: 17px; overflow: hidden; text-overflow: ellipsis; }
+    .stats span, .coord span { font-size: 11px; color: #9298aa; }
+    .stats b, .coord b { font-size: 17px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+    .coord {
+        display: grid;
+        grid-template-columns: 3fr 2fr;
+        gap: 8px;
+        margin-top: 10px;
+    }
+
+    #coordXY { font-variant-numeric: tabular-nums; }
+
+    .note { font-size: 12px; color: #9298aa; margin: 6px 0 0; }
 
     #pad {
         display: grid;
@@ -293,6 +359,25 @@
     }
 
     #finger.down { opacity: 1; }
+
+    #gameCursor {
+        position: absolute;
+        left: 50%;
+        top: 50%;
+        width: 22px;
+        height: 22px;
+        margin: -11px 0 0 -11px;
+        border-radius: 50%;
+        border: 2px solid #13131c;
+        background: #22d3ee;
+        box-shadow: 0 0 0 3px rgba(34, 211, 238, 0.35);
+        pointer-events: none;
+        opacity: 0;
+        transition: left 0.1s linear, top 0.1s linear, opacity 0.15s;
+    }
+
+    #gameCursor.on { opacity: 1; }
+    #gameCursor.on.held { opacity: 0.45; }
 
     #pad.disabled { opacity: 0.4; }
 
