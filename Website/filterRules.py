@@ -515,6 +515,12 @@ class Geometry(ABC):
     def reset(self) -> None:
         """Clear any state carried between updates. Override if stateful."""
 
+    def channel_angles(self) -> list:
+        """Each channel's scanner angle from the last channels() call, None
+        where there is none. A channel whose angle changes starts its filter
+        over (CoordinatePipeline.update). Override for a rig with scanners."""
+        return [None] * self.channel_count
+
 
 class UltrasonicArrayGeometry(Geometry):
     """Three forward-facing sensors on one line, one column each (the V1 rig).
@@ -638,6 +644,9 @@ class TwoSensorGeometry(Geometry):
         present = [v for v in raw_channels if v is not None]
         return min(present) if present else None
 
+    def channel_angles(self) -> list:
+        return list(self._angles)
+
     def position(self, filtered, area) -> Optional[tuple]:
         """(x_cm, y_cm) from the filtered distances, or None with no reading.
         Pure: touches no state. x is not yet clamped to the board."""
@@ -713,7 +722,11 @@ class TwoSensorGeometry(Geometry):
             if abs(x - boundary) < config.column_margin_cm:
                 column = last
 
-        if y > area.max_cm:
+        # Off either side of the board is out of bounds as much as past the
+        # far edge. x is clamped for the column only; the check uses the
+        # position as measured.
+        off_the_side = not 0.0 <= where[0] <= area.width_cm
+        if off_the_side or y > area.max_cm:
             return Fix(STATUS_OUT_OF_BOUNDS, x_cm=x, y_cm=y, column=column, distance_cm=y)
 
         self._last_column = column
@@ -899,6 +912,8 @@ class CoordinatePipeline:
         self.config = config or FilterConfig()
         self.hold = hold or StreakHold(self.config)
         self._channels = [ChannelFilter(self.config) for _ in range(geometry.channel_count)]
+        # The scanner angle each channel's filter is tracking at.
+        self._channel_angles: list = [None] * geometry.channel_count
         self._guard = ProximityGuard(self.config)
         self._stabiliser = CellStabiliser(self.config)
         self._held_cell: Optional[tuple] = None
@@ -912,6 +927,7 @@ class CoordinatePipeline:
     def reset(self) -> None:
         for channel in self._channels:
             channel.reset()
+        self._channel_angles = [None] * len(self._channels)
         self._guard.reset()
         self._stabiliser.reset()
         self.hold.reset()
@@ -938,6 +954,13 @@ class CoordinatePipeline:
         raw = self.geometry.channels(sample)
         if fresh is None:
             fresh = [True] * len(raw)
+        # A range at a new bearing is not another sample of the old track: as
+        # in conditionSensor() in game.js, a fresh reading at another scanner
+        # angle starts that channel's filter over.
+        for channel, (angle, is_fresh) in enumerate(zip(self.geometry.channel_angles(), fresh)):
+            if is_fresh and angle != self._channel_angles[channel]:
+                self.reset_channel(channel)
+                self._channel_angles[channel] = angle
         filtered = [ch.update(v, now_ms) if is_fresh else ch.value
                     for ch, v, is_fresh in zip(self._channels, raw, fresh)]
 

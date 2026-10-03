@@ -1356,8 +1356,12 @@
       if (Math.abs(x - boundary) < COLUMN_MARGIN_CM) column = lastColumn;
     }
 
+    // Off either side of the board is out of bounds as much as past the far
+    // edge. x above is clamped for the cursor's column only; the check uses the
+    // position as measured.
     const fix = { ...base, column, distanceCm: y, xCm: x, yCm: y, source: position.source };
-    if (y > maxCoordCm()) {
+    const offTheSide = position.x < 0 || position.x > PLAY_WIDTH_CM;
+    if (offTheSide || y > maxCoordCm()) {
       return { ...fix, status: "out-of-bounds" };
     }
 
