@@ -72,15 +72,20 @@ constexpr float NO_ECHO = -1.0f;
 // Speed of sound in cm/us. A reading is half the round trip.
 constexpr double SOUND_CM_PER_US = 0.034;
 
-// How long a reading may wait for its echo. Sound covers the round trip to the
-// far edge of the play area in about 8.2 ms, so anything past this is not a
-// target.
-constexpr unsigned long ECHO_TIMEOUT_US = 9000;
-
 // A reading inside this range is taken to be the player; outside it there is no
 // target.
 constexpr float MIN_TARGET_CM = 10;
 constexpr float MAX_TARGET_CM = 180;
+
+// How long a reading may wait for its echo. pulseIn() counts from the trigger,
+// not from the start of the echo pulse, and the HC-SR04 only raises ECHO about
+// half a millisecond after its trigger. So the timeout is the round trip to
+// MAX_TARGET_CM plus that start: the old flat 9000 us left room for only
+// ~145 cm, and nothing past it - the far edge of the play area included - was
+// ever heard.
+constexpr unsigned long ECHO_START_US = 600;
+constexpr unsigned long ECHO_TIMEOUT_US =
+    static_cast<unsigned long>(MAX_TARGET_CM * 2 / SOUND_CM_PER_US) + ECHO_START_US;
 
 // --- Scan timing ----------------------------------------------------------
 // Quiet time after one pulse pair before the next pair starts.
