@@ -37,6 +37,11 @@
     </section>
 
     <section>
+        <h2>Placing the player <small>sensor mode</small></h2>
+        <div class="row" id="position"></div>
+    </section>
+
+    <section>
         <h2>Game</h2>
         <div class="grid2">
             <button data-action="start" data-start-mode="remote" class="primary">Start remote round</button>
@@ -150,8 +155,42 @@
             });
         });
 
+        // The position switch: how the sensors place the player - line of
+        // sight, trilateration or their average. The game sends the methods it
+        // has, and the one in use, with its status, so a new method shows up
+        // here without changing this page.
+        const DEFAULT_POSITION_METHODS = [
+            { id: "los", label: "Line of sight" },
+            { id: "tri", label: "Trilateration" },
+            { id: "avg", label: "Average" },
+        ];
+        let positionKey = null;
+
+        function renderPositionMethods() {
+            const methods = (game && game.positionMethods) || DEFAULT_POSITION_METHODS;
+            const key = methods.map((m) => m.id).join(",");
+            const box = $("position");
+            if (key !== positionKey) {
+                positionKey = key;
+                box.replaceChildren();
+                methods.forEach((m) => {
+                    const btn = document.createElement("button");
+                    btn.dataset.method = m.id;
+                    btn.textContent = m.label;
+                    btn.addEventListener("click", () => send({ action: "position", method: m.id }));
+                    box.appendChild(btn);
+                });
+            }
+            box.querySelectorAll("[data-method]").forEach((btn) => {
+                btn.classList.toggle("selected", Boolean(game) && btn.dataset.method === game.positionMethod);
+            });
+        }
+
+        renderPositionMethods();
+
         function renderGame() {
             if (!game) return;
+            renderPositionMethods();
             $("screen").textContent = game.screen;
             $("mode").textContent = game.mode;
             $("score").textContent = game.score;

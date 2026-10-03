@@ -43,11 +43,13 @@ from filterRules import (  # noqa: E402
     TwoSensorGeometry,
     UltrasonicArrayGeometry,
     fft_lowpass_last,
+    line_of_sight,
     scanner_point,
 )
 from tracking import ConstantVelocityTracker  # noqa: E402
 
 FIXTURE = os.path.join(HERE, "fixtures", "js_parity_trace.json")
+SILENT = "silent"   # generate_parity_trace.js: the node sent nothing this step
 
 
 class ParityWithGameJs(unittest.TestCase):
@@ -63,12 +65,20 @@ class ParityWithGameJs(unittest.TestCase):
         fields = self.trace["fields"]
         area = (PlayArea.calibrated(run["calibration"]) if run["calibration"]
                 else PlayArea.default())
-        pipeline = CoordinatePipeline(TwoSensorGeometry(), area=area)
+        pipeline = CoordinatePipeline(TwoSensorGeometry(method=run["method"]), area=area)
 
+        # A node that is "silent" for a step sent nothing: its last reading
+        # stands, as the server keeps it, and the recorded fresh mask (what
+        # game.js worked out from last_seen) says it is not new.
+        latest = [None, None, None]
         for i, (reading, expected_row) in enumerate(zip(self.trace["stream"], run["steps"])):
             expected = dict(zip(fields, expected_row))
             now_ms = (i + 1) * self.trace["stepMs"]
-            got = pipeline.update(reading, now_ms)
+            for slot, entry in enumerate(reading):
+                if entry != SILENT:
+                    latest[slot] = entry
+            fresh = [bool(f) for f in expected["fresh"]]
+            got = pipeline.update(list(latest), now_ms, fresh=fresh)
             where = f"{run_name} step {i}, reading {reading}"
 
             self.assertEqual(got.status, expected["status"], where)
@@ -85,6 +95,10 @@ class ParityWithGameJs(unittest.TestCase):
                     self.assertIsNone(a, f"{where}, channel {channel}")
                 else:
                     self.assertAlmostEqual(a, b, places=9, msg=f"{where}, channel {channel}")
+            # Where the player was placed, by the run's method.
+            if got.status == STATUS_OK:
+                self.assertAlmostEqual(got.x_cm, expected["x"], delta=2e-6, msg=f"{where}, x")
+                self.assertAlmostEqual(got.y_cm, expected["y"], delta=2e-6, msg=f"{where}, y")
         return len(run["steps"])
 
     def test_default_bounds(self):
@@ -92,6 +106,24 @@ class ParityWithGameJs(unittest.TestCase):
 
     def test_calibrated_bounds(self):
         self.assertGreater(self._replay("calibrated"), 0)
+
+    def test_trilateration(self):
+        self.assertGreater(self._replay("trilateration"), 0)
+
+    def test_average_of_line_of_sight_and_trilateration(self):
+        self.assertGreater(self._replay("average"), 0)
+
+    def test_the_methods_really_differ_on_the_recorded_stream(self):
+        runs = self.trace["runs"]
+        at = self.trace["fields"].index("x")
+        differ = sum(1 for a, b in zip(runs["default"]["steps"], runs["trilateration"]["steps"])
+                     if a[at] is not None and b[at] is not None and abs(a[at] - b[at]) > 1.0)
+        self.assertGreater(differ, 50, "line of sight and trilateration should not agree everywhere")
+
+    def test_the_stream_has_turns_where_a_node_is_silent(self):
+        fresh = self.trace["fields"].index("fresh")
+        stale = [row for row in self.trace["runs"]["default"]["steps"] if 0 in (row[fresh][0], row[fresh][2])]
+        self.assertGreater(len(stale), 100)
 
     def test_fixture_covers_every_branch_it_claims(self):
         seen = {(row[0], bool(row[6])) for run in self.trace["runs"].values()
@@ -172,6 +204,15 @@ class ChannelFilterRules(unittest.TestCase):
             out = self.ch.update(200.0, t)
         self.assertEqual(out, 200.0, "no Kalman or FFT memory of 70 after the re-lock")
 
+    def test_a_channel_starts_again_after_a_silence(self):
+        # The node's scanning turn ended; it comes back 1 s later, 80 cm on.
+        # The gate would turn an 80 cm jump away, but after a silence longer
+        # than the hold nothing it remembers describes the player any more.
+        for t in range(10):
+            self.ch.update(70.0, t * 20)
+        self.assertEqual(self.ch.update(150.0, 9 * 20 + 1000), 150.0)
+        self.assertEqual(self.ch.reject_count, 0)
+
     def test_relocks_when_rejects_agree_with_each_other(self):
         self.ch.update(70, 0)
         t = 0
@@ -206,6 +247,18 @@ class FftLowpassLast(unittest.TestCase):
     def test_config_refuses_a_negative_window(self):
         with self.assertRaises(ValueError):
             FilterConfig(fft_window=-1)
+
+    def test_the_channel_measures_the_fft_rate_from_its_readings(self):
+        # A 5 Hz swing is above a 3 Hz cutoff when readings come 25 ms apart
+        # (40/s, window rate measured), and the same readings 100 ms apart are
+        # a 1.25 Hz swing, which passes.
+        swing = [100.0 + (4.0 if i % 8 < 4 else -4.0) for i in range(40)]
+        fast = ChannelFilter(FilterConfig())
+        slow = ChannelFilter(FilterConfig())
+        for i, value in enumerate(swing):
+            a = fast.update(value, i * 25)
+            b = slow.update(value, i * 100)
+        self.assertLess(abs(a - 100.0), abs(b - 100.0))
 
 
 class ProximityGuardRules(unittest.TestCase):
@@ -328,6 +381,16 @@ class PipelineBehaviour(unittest.TestCase):
         self.assertEqual(pipe.update([None, None, None], 20).status, STATUS_NO_SIGNAL)
 
 
+def scanner_sample(x_cm, y_cm, state=0, aim_error_deg=0.0):
+    """[left, centre, right] scanner readings of a player at (x_cm, y_cm):
+    exact distances, each node's angle pointing at the player (plus
+    aim_error_deg), and a scan state."""
+    def reading(node_x):
+        angle = 90 + math.degrees(math.atan2(node_x - x_cm, y_cm)) + aim_error_deg
+        return (math.hypot(x_cm - node_x, y_cm), angle, state)
+    return [reading(25.0), None, reading(125.0)]
+
+
 def two_sensor_sample(x_cm, depth_cm):
     """[left, centre, right] distances a player at (x, depth) would produce,
     with the sensors at the centres of the outer columns (25 and 125 cm)."""
@@ -392,16 +455,123 @@ class TwoSensorGeometryBehaviour(unittest.TestCase):
         self.assertAlmostEqual(x, 85.0)
         self.assertAlmostEqual(y, 80.0 * math.cos(math.radians(30)))
 
-    def test_two_scanners_in_bounds_are_averaged(self):
-        fix = self.locate(self.geometry.channels([(80.0, 60), None, (80.0, 120)]))
-        self.assertAlmostEqual(fix.x_cm, 75.0)
+    # --- the position methods, which need track() before locate() ----------
+
+    def scan(self, sample, now_ms=0.0, fresh=(True, True, True), geometry=None):
+        """One update as the pipeline runs it, on unfiltered readings."""
+        geometry = geometry or self.geometry
+        readings = geometry.channels(sample)
+        geometry.track(readings, list(fresh), now_ms, self.area, self.config)
+        return geometry.locate(readings, self.area, self.config)
+
+    def test_two_scanners_on_the_same_point_put_the_player_there(self):
+        fix = self.scan(scanner_sample(75.0, 80.0))
+        self.assertAlmostEqual(fix.x_cm, 75.0, places=6)
+        self.assertAlmostEqual(fix.y_cm, 80.0, places=6)
         self.assertEqual(fix.column, 1)
 
     def test_one_scanner_hearing_nothing_leaves_the_other(self):
-        fix = self.locate(self.geometry.channels([(None, 70), None, (90.0, 115)]))
+        fix = self.scan([(None, 70, 2), None, (90.0, 115, 0)])
         x, y = scanner_point(125.0, 90.0, 115)
         self.assertAlmostEqual(fix.x_cm, x)
         self.assertAlmostEqual(fix.y_cm, y)
+
+    def test_line_of_sight_leaves_out_a_node_that_is_sweeping(self):
+        # The left node is lost, and its beam has found furniture at 120 cm.
+        sample = scanner_sample(80.0, 95.0)
+        sample[0] = (120.0, 60, 2)
+        fix = self.scan(sample)
+        x, y = scanner_point(125.0, *sample[2][:2])
+        self.assertAlmostEqual(fix.x_cm, x)
+        self.assertAlmostEqual(fix.y_cm, y)
+        # Trilateration has no way to know, and takes the furniture's distance.
+        tri = self.scan(sample, geometry=TwoSensorGeometry(method="tri"))
+        self.assertGreater(math.dist((tri.x_cm, tri.y_cm), (80.0, 95.0)), 10.0)
+
+    def test_trilateration_uses_the_distances_alone(self):
+        geometry = TwoSensorGeometry(method="tri")
+        # Angles that point somewhere else entirely do not matter to it.
+        sample = [(math.hypot(60 - 25, 80), 150, 0), None, (math.hypot(60 - 125, 80), 150, 0)]
+        fix = self.scan(sample, geometry=geometry)
+        self.assertAlmostEqual(fix.x_cm, 60.0)
+        self.assertAlmostEqual(fix.y_cm, 80.0)
+
+    def test_average_is_the_midpoint_of_the_other_two(self):
+        sample = scanner_sample(80.0, 95.0)
+        sample[0] = (120.0, 60, 0)      # the left node aimed at something else
+        fixes = {}
+        for method in ("los", "tri", "avg"):
+            geometry = TwoSensorGeometry(method=method)
+            fix = self.scan(sample, geometry=geometry)
+            fixes[method] = (fix.x_cm, fix.y_cm)
+        # x is clamped to the board by locate(); these all lie on it.
+        self.assertAlmostEqual(fixes["avg"][0], (fixes["los"][0] + fixes["tri"][0]) / 2)
+        self.assertAlmostEqual(fixes["avg"][1], (fixes["los"][1] + fixes["tri"][1]) / 2)
+
+    def test_a_node_whose_reading_is_not_new_is_not_fed_to_the_track(self):
+        self.scan(scanner_sample(40.0, 70.0), now_ms=0.0)
+        # The right node's last reading is repeated but not new (the left
+        # node's turn); even a distance that no longer fits is not taken.
+        sample = scanner_sample(40.0, 72.0)
+        sample[2] = (30.0, 90, 0)
+        fix = self.scan(sample, now_ms=50.0, fresh=(True, True, False))
+        self.assertLess(abs(fix.x_cm - 40.0), 3.0)
+        self.assertLess(abs(fix.y_cm - 72.0), 3.0)
+
+    def test_while_the_servos_hold_still_the_distances_pin_the_player_down(self):
+        # Both servos hold an aim 5 degrees off; the distances are exact. Each
+        # aim alone puts the player some 7-10 cm out, but a held aim counts for
+        # less with every reading while the distances count in full, and the
+        # distances cross where the player is.
+        truth = (75.0, 90.0)
+        sample = scanner_sample(*truth, aim_error_deg=5.0)
+        off = max(math.dist(scanner_point(25.0, *sample[0][:2]), truth),
+                  math.dist(scanner_point(125.0, *sample[2][:2]), truth))
+        self.assertGreater(off, 7.0)
+        for k in range(40):
+            fix = self.scan(sample, now_ms=50.0 * k)
+        self.assertLess(math.dist((fix.x_cm, fix.y_cm), truth), 1.0)
+
+    def test_readings_far_from_the_track_are_left_out_then_taken(self):
+        for k in range(10):
+            self.scan(scanner_sample(40.0, 70.0), now_ms=50.0 * k)
+        # One node's readings only, so each update is one outlier.
+        relock = self.config.los_relock_readings
+        for k in range(relock):
+            fix = self.scan(scanner_sample(120.0, 60.0), now_ms=500.0 + 50.0 * k,
+                            fresh=(True, True, False))
+            if k < relock - 1:
+                self.assertLess(fix.x_cm, 60.0, f"outlier {k + 1} of {relock} moved the track")
+        self.assertAlmostEqual(fix.x_cm, 120.0, delta=1.0)
+
+    def test_the_track_is_dropped_when_nothing_usable_arrives(self):
+        self.scan(scanner_sample(40.0, 70.0), now_ms=0.0)
+        lost = [(None, 60, 2), None, (None, 120, 2)]
+        timeout = self.config.los_track_timeout_ms
+        self.assertEqual(self.scan(lost, now_ms=timeout).status, STATUS_OK)
+        self.assertEqual(self.scan(lost, now_ms=timeout + 1).status, STATUS_NO_SIGNAL)
+
+    def test_an_unknown_method_is_refused(self):
+        with self.assertRaises(ValueError):
+            TwoSensorGeometry(method="guess")
+        with self.assertRaises(ValueError):
+            self.geometry.method = "guess"
+
+    def test_the_line_of_sight_is_tight_along_and_loose_across(self):
+        # Straight out from the left node: along is y, across is x.
+        x, y, cov = line_of_sight(25.0, 100.0, 90.0, 0, self.config)
+        self.assertEqual((x, y), (25.0, 100.0))
+        self.assertAlmostEqual(cov[1][1], self.config.los_range_sigma_cm ** 2)
+        across = 100.0 * math.radians(self.config.los_bearing_found_deg)
+        self.assertAlmostEqual(cov[0][0], across ** 2)
+        # Half-found is less sure of its aim than found.
+        _, _, half = line_of_sight(25.0, 100.0, 90.0, 1, self.config)
+        self.assertGreater(half[0][0], cov[0][0])
+        # The same aim again counts a quarter as much across the line, and the
+        # distance along it just as much.
+        _, _, again = line_of_sight(25.0, 100.0, 90.0, 0, self.config, repeats=1)
+        self.assertAlmostEqual(again[0][0], 4 * cov[0][0])
+        self.assertAlmostEqual(again[1][1], cov[1][1])
 
     def test_without_angles_the_nodes_trilaterate(self):
         fix = self.locate(self.geometry.channels(two_sensor_sample(60.0, 80.0)))

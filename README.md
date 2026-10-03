@@ -53,7 +53,7 @@ build_flags =
 
 **Calibration** is the game's sensor-assignment screen: both servos are held still at 90 degrees (`AIM 90`) for the whole screen - through both steps, LEFT then RIGHT - while the operator aims the nodes straight out into the play area by hand and identifies each node with a hand in front of it; each live-readings row shows the angle the node reports, amber if it is not 90; Start Game then lets the nodes scan again (`SCAN`). There is no play-area (corner) calibration: the game plays on the default bounds, rows between 20 and 140 cm in every column. Each game page asks for the hold with `{"type": "nodes:aim", "hold": true}` and releases it with `false`; the servos stay held while any open page is on the calibration screen, so another tab or device on a different screen cannot release them, and a page that closes stops holding.
 
-The game puts each node on the screen edge at the centre of an outer column and turns its distance and angle into a position; with both nodes in bounds the two positions are averaged. A node that sends no `angle` is treated as pointing straight out, and two such nodes are placed by trilateration.
+The game puts each node on the screen edge at the centre of an outer column. In sensor mode, three buttons above the sensor panel pick how the player is placed - **Line of sight** (the default), **Trilateration** or **Average** - and **Compare** draws all three on the board as labelled rings (LOS, TRI, AVG) while the big cursor follows the chosen one; the sensor panel lists all three positions. See *Placing the player* under the filtering pipeline. With no `angle` from either node there is no line of sight, and every method is trilateration.
 
 The board is drawn with the row **nearest the screen at the top**, so stepping towards the screen moves the cursor up. Only the drawing is flipped (`boardRow()` in `game.js`, one switch, `NEAR_ROW_AT_TOP`): grid row `gy = 0` is still the row nearest the screen everywhere else, and left/right is unchanged. The phone control panel's touchpad maps onto the board as drawn.
 
@@ -140,11 +140,80 @@ goes offline), extrapolation capped at 250 ms, extra display lead 0 s until
 the end-to-end latency is measured. Tests are in
 `Website/tests/test_tracking.py` and `Website/tests/test_serverFilter.py`.
 
+### Placing the player: line of sight, trilateration, average
+
+The nodes scan one at a time (the server hands out 1 s turns), so the two
+are never read at the same moment, and a node that has lost the player keeps
+reporting whatever its beam hits while it sweeps. The position methods
+(`solvePositions()` in `game.js`, `TwoSensorGeometry(method=...)` here):
+
+- **Line of sight** (`los`, the default). Each node's reading is a point along
+  its line of sight - its distance along its servo angle - with an
+  uncertainty that is small along the line (3 cm) and grows across it with
+  the distance and with how sure the node is of its aim: 4° when both of its
+  sensors see the player (found), 15° when one does (half-found). Those feed a
+  2D constant-velocity Kalman filter (`LineOfSightTracker`, `losTrack` in the
+  game), one reading at a time as it arrives:
+  - a node's reading is used once, when it is new - never again while the
+    other node takes its turn;
+  - a node that is sweeping (lost) is left out;
+  - its aim counts in full only when it is new (the servo moved, or the node
+    has just started its turn); while the servo holds still each further
+    reading's aim counts less (the k-th repeat 1/(k+1)², about one and a half
+    readings' worth in all), so the same small aim error is not counted again
+    and again, and the two nodes' distances - counted in full every time -
+    pin the player down;
+  - a reading far from where the track expects the player is left out
+    (a 99.9 % gate), and six of those in a row restart the track there;
+  - after 1.5 s with nothing usable there is no position.
+- **Trilateration** (`tri`), the earlier method, kept to compare against:
+  where the two distance circles cross, using each node's latest distance
+  however old, and whatever that node was looking at.
+- **Average** (`avg`): the midpoint of the two.
+
+The phone control panel (`/control`, server started with `CON=1`) has the
+same switch under *Placing the player*, and shows which method is in use; its
+buttons come from the game's status, so a new method appears there by itself.
+In the browser console, `tuneSensor({ losAccelCmS2, losBearingFoundDeg,
+losBearingHalfDeg })` changes the tracker live; `setPositionMethod("tri")`
+switches method. The Python side takes the same through `FilterConfig`
+(`los_*`), and with `SERVER_FILTERING` on the switch is sent to the server
+(`{"type": "position:method", "method": "los"}`).
+
+In simulation - the real `game.js`, two scanner nodes taking 1 s turns, servos
+stepping 3° and sweeping when they lose the player, 15° beams, 2 cm distance
+noise, a player walking the board and pausing - over three seeds:
+
+| Method | Median error | 90th percentile | Right cell |
+|---|---|---|---|
+| Before (main) | 7.0 cm | 24.7 cm | 58 % |
+| Line of sight | 6.3 cm | 16.7 cm | 65 % |
+| Trilateration | 2.3 cm | 26.2 cm | 63 % |
+| Average | 3.5 cm | 20.3 cm | 66 % |
+
+Reproduce it with `node Website/tools/simulate_positions.js` (options:
+`--turn-ms 1000,250,0` - 0 is both nodes at once - `--furniture 140,125`,
+`--seeds`, `--methods`, and `--site` to score another copy of `public/`; the
+"Before" row is main at 247006b scored that way).
+
+Trilateration is the most exact while the player stands still and the worst
+while they move (a distance a turn old is still right for a still player).
+With both nodes read at once, all three are within 2 cm (median). Furniture
+inside the play area fools every method: a scanner "finds" it exactly as it
+finds a player. Check the real rig with Compare.
+
+Each channel also starts again when its node comes back after a silence
+longer than the hold (350 ms) - the other node's turn, as a rule - so the
+median and the gate do not hold the new readings back with where the player
+was a turn ago.
+
 ### Channel smoothing: median → Kalman → FFT
 
-Every sensor channel, in the game (`conditionSensor()` in `game.js`), in its
-Python copy (`ChannelFilter`) and in each node's `filtered_distance` in
-`app.py`, runs:
+Every sensor channel, in the game (`conditionSensor()` in `game.js`) and in
+its Python copy (`ChannelFilter`), runs the five steps below. Each node's
+`filtered_distance` in `app.py` runs steps 2-4 only - median, Kalman, FFT, no
+gate and no hold - and is published in `nodes:update` and `/api/nodes`;
+nothing in the game reads it.
 
 1. **Slew gate** - a jump no person could make is dropped (unchanged).
 2. **Median** of the last 5 readings - kills single-reading spikes.
@@ -152,8 +221,11 @@ Python copy (`ChannelFilter`) and in each node's `filtered_distance` in
    game has a line-for-line port, `kalmanUpdate()`): process noise
    400 cm/s², measurement noise 0.91 cm. Its velocity state follows a walking
    player without the lag an average adds.
-4. **FFT low-pass** over the last 32 Kalman outputs, cut above 3 Hz
-   (readings taken as 20 Hz), read back at the newest reading. The window's
+4. **FFT low-pass** over the last 32 Kalman outputs, cut above 3 Hz, read
+   back at the newest reading. The sample rate is measured from the window's
+   own timestamps: a node sends about 11-12 readings a second while it has its
+   turn, fewer with multi-pulse on, and a window never spans the other node's
+   turn (the channel starts again after a silence). The window's
    straight-line trend is taken out first and added back after, and the rest
    is mirrored at the newest end. Without that, the FFT treats the window as
    a loop: the old version (mean removed only, 64 readings, 2 Hz) put a
@@ -169,18 +241,20 @@ rig. In the browser console, `tuneSensor({ fftWindow: 0 })` turns it off and
 `tuneSensor({ fftCutoffHz: 2 })` / `tuneSensor({ kalmanSigmaA: 200 })` change
 it, from the next reading; the Python side takes the same settings through
 `FilterConfig` (`fft_window`, `fft_cutoff_hz`, `kalman_sigma_a_cm_s2`, ...).
-The game steps its filters once per new `nodes:update`, not on every
-animation frame. On the server a no-echo reading (negative) is skipped rather
-than put into the median. The firmware reports the **settled angle at which**
-each pair was measured, before moving the servo. For `app.py`'s per-node
-`filtered_distance`, a change of angle resets the median, Kalman and FFT
-windows: ranges at different bearings are not samples of the same target.
+The game steps a node's filters only on that node's new readings, not on
+every animation frame. On the server a no-echo reading (negative) is skipped
+rather than put into the median, and the median takes the upper of the two
+middle values, as the game's does. The firmware reports the **settled angle
+at which** each pair was measured, before moving the servo. For `app.py`'s
+per-node `filtered_distance`, a change of angle resets the median, Kalman and
+FFT windows: ranges at different bearings are not samples of the same target.
 Its FFT uses the measured sampling interval and runs only when the current
 window is approximately uniform (within 20%); otherwise the timestamp-aware
 Kalman estimate is published. Both the browser and the optional server
 coordinate pipeline also reset the affected channel (including its slew gate)
 when the reported angle changes; a missed echo at a new angle cannot project
-the old range onto that bearing. Their FFT still assumes a fixed sample rate.
+the old range onto that bearing. Their FFT also takes its rate from the
+window's own timestamps, but runs on an uneven window too.
 
 The chain runs **once per new reading**. When one node reports, only its
 channel gets a new sample; the other channels are marked not fresh and are
@@ -201,7 +275,7 @@ sample ──► Geometry ──► ProximityGuard (RAW) ──► ChannelFilter
 | `ChannelFilter` | Slew gate → median → Kalman → FFT low-pass → hold, for one channel in cm |
 | `ProximityGuard` | Too-close on **raw** readings, confirmed over N frames |
 | `Geometry` | Abstract: sensor data in, position out — the swappable part |
-| `TwoSensorGeometry` | Today's rig: LEFT and RIGHT sensors, placed by basic trilateration |
+| `TwoSensorGeometry` | Today's rig: LEFT and RIGHT scanners, placed by line of sight (`LineOfSightTracker`), trilateration or their average |
 | `UltrasonicArrayGeometry` | The earlier three-sensor rig, one column each (replays V1 logs) |
 | `CartesianGeometry` | A rig that reports `(x, y)` itself, e.g. the servo scanner |
 | `CellStabiliser` | Majority vote over recent cells |
@@ -318,11 +392,10 @@ pipeline = CoordinatePipeline(UltrasonicArrayGeometry(),
                               hold=MajorityWindowHold(FilterConfig()))
 ```
 
-**Call rate.** `game.js` steps its filters once per new `nodes:update`, not on
-every render frame. A node that did not report in that update is still fed its
-last reading again, which the server's `fresh` mask avoids -
-`CoordinatePipeline.update()` should be called once per reading, and only the
-reporting node's channel fed, which is the intended behaviour.
+**Call rate.** `game.js` steps a node's filters only when that node's reading
+is new (its server stamp, `last_seen`, changed), which is what the server's
+`fresh` mask does - `CoordinatePipeline.update()` is called once per reading,
+and only the reporting node's channel is fed.
 
 ### Supporting the scanning rig
 

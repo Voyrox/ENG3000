@@ -383,6 +383,7 @@ let serverFiltering = false;
 // since a restarted server has forgotten both.
 let sentAssignmentKey = null;
 let sentCalibrationKey = null;
+let sentPositionMethod = null;
 
 function sendToServer(message) {
   if (!socket || socket.readyState !== WebSocket.OPEN) return false;
@@ -417,6 +418,12 @@ function syncServerFilterSetup() {
   }
 
   if (!serverFiltering) return;
+
+  // The position switch, so the server's chain places the player the same way.
+  const method = window.getPositionMethod();
+  if (method !== sentPositionMethod && sendToServer({ type: "position:method", method })) {
+    sentPositionMethod = method;
+  }
 
   const perColumn = window.getCapturedCalibration();
   if (perColumn) {
@@ -493,6 +500,12 @@ function handleRemoteCommand(command) {
     case "testMode":
       window.setGameSettings({ testMode: Boolean(command.enabled) });
       break;
+    case "position":
+      // The position switch, as the buttons above the sensor panel do it: line
+      // of sight, trilateration or their average. An unknown method is ignored.
+      window.setPositionMethod(command.method);
+      syncServerFilterSetup();
+      break;
     default:
       return;
   }
@@ -517,6 +530,8 @@ function sendGameStatus() {
     moleType: state.moleType,
     remoteHole: state.remoteHole,
     testMode: window.getGameSettings().testMode,
+    positionMethod: window.getPositionMethod(),
+    positionMethods: window.getPositionMethods(),
   }));
 }
 
@@ -574,6 +589,8 @@ function connectSocket() {
     // No server, no coordinate: the round pauses on "no signal" rather than
     // playing on a frozen one.
     if (serverFiltering) window.setServerCoordinate(null);
+    // A restarted server has forgotten the position method; send it again.
+    sentPositionMethod = null;
     if (reconnectTimer === null) {
       reconnectTimer = window.setTimeout(() => {
         reconnectTimer = null;
@@ -677,6 +694,16 @@ c.addEventListener("click", (event) => {
         screen = "menu";
         stopGameLoop();
       }
+      draw();
+      return;
+    }
+
+    // The position switch above the sensor panel: line of sight,
+    // trilateration or their average, and Compare (sensor mode only).
+    const positionHit = window.getPositionSwitchAtPoint(c, point.x, point.y);
+    if (positionHit) {
+      window.applyPositionSwitch(positionHit);
+      syncServerFilterSetup();
       draw();
       return;
     }

@@ -70,6 +70,7 @@ class ServerFilterStage:
         self.sensor_slots: list = [None] * GRID_SIZE      # node id per L, C, R
         self._latest_cm: dict = {}                        # node id -> raw cm or None
         self._latest_angle: dict = {}                     # node id -> servo angle or None
+        self._latest_state: dict = {}                     # node id -> scan state or None
         self.latest: Optional[FilteredCoordinate] = None
         self.predicted_cm: list = [None] * GRID_SIZE      # L, C, R; cm or None
 
@@ -84,10 +85,19 @@ class ServerFilterStage:
         self.sensor_slots = slots
         self._latest_cm.clear()
         self._latest_angle.clear()
+        self._latest_state.clear()
         self.pipeline.reset()
         self.predictor.reset()
         self.latest = None
         self.predicted_cm = [None] * GRID_SIZE
+
+    def set_position_method(self, method: str) -> None:
+        """The game's position switch: "los" (line of sight), "tri"
+        (trilateration) or "avg" (the two averaged). ValueError otherwise, or
+        if the pipeline's geometry has no methods to choose from."""
+        if not hasattr(self.pipeline.geometry, "method"):
+            raise ValueError("this geometry has no position methods")
+        self.pipeline.geometry.method = method
 
     def set_calibration(self, per_column: Sequence[tuple]) -> None:
         """Apply the calibration as (near_cm, far_cm) per column: the left and
@@ -99,6 +109,7 @@ class ServerFilterStage:
         its track is dropped rather than extrapolated."""
         self._latest_cm.pop(node_id, None)
         self._latest_angle.pop(node_id, None)
+        self._latest_state.pop(node_id, None)
         for channel, slot in enumerate(self.sensor_slots):
             if slot == node_id:
                 self.pipeline.reset_channel(channel)
@@ -106,10 +117,11 @@ class ServerFilterStage:
                 self.predicted_cm[channel] = None
 
     def on_reading(self, node_id, distance_cm: Optional[float],
-                   now_ms: float, angle_deg: Optional[float] = None
-                   ) -> Optional[FilteredCoordinate]:
+                   now_ms: float, angle_deg: Optional[float] = None,
+                   scan_state: Optional[int] = None) -> Optional[FilteredCoordinate]:
         """Run the chain once for one new reading. angle_deg is the servo
-        angle a scanner node read it at (None for a node without one).
+        angle a scanner node read it at and scan_state what its scan made of
+        it (0 found, 1 half-found, 2 lost); None for a node without one.
         Returns None, and runs nothing, if the node is not assigned to a slot."""
         if node_id not in self.sensor_slots:
             return None
@@ -119,10 +131,13 @@ class ServerFilterStage:
             self.predictor.reset_channel(channel)
         self._latest_cm[node_id] = distance_cm
         self._latest_angle[node_id] = angle_deg
+        self._latest_state[node_id] = scan_state
 
         distances = [self._latest_cm.get(slot) for slot in self.sensor_slots]
         angles = [self._latest_angle.get(slot) for slot in self.sensor_slots]
-        sample = [d if a is None else (d, a) for d, a in zip(distances, angles)]
+        states = [self._latest_state.get(slot) for slot in self.sensor_slots]
+        sample = [d if a is None and st is None else (d, a, st)
+                  for d, a, st in zip(distances, angles, states)]
         # A slot with no node, or a node that went offline, is a genuine
         # "no reading" (None), which is safe to pass every time: it never
         # enters a median window. Only the reporting node's channel is fresh.

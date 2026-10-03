@@ -73,7 +73,6 @@ _DISTANCE_CHAIN = FilterConfig()
 MEDIAN_WINDOW = _DISTANCE_CHAIN.median_window
 FFT_WINDOW = _DISTANCE_CHAIN.fft_window
 FFT_MIN_SAMPLES = _DISTANCE_CHAIN.fft_min_samples
-DISTANCE_SAMPLE_RATE_HZ = _DISTANCE_CHAIN.fft_sample_rate_hz
 DISTANCE_CUTOFF_HZ = _DISTANCE_CHAIN.fft_cutoff_hz
 TURN_INTERVAL_SECONDS = 1.0
 MS_PER_SECOND = 1000.0
@@ -84,7 +83,9 @@ SERVER_FILTERING = server_filtering_enabled(os.environ)
 # The phone control panel (/control) only exists when explicitly switched on:
 #   CON=1 python app.py
 CONTROL_ENABLED = os.environ.get("CON") == "1"
-CONTROL_ACTIONS = {"point", "release", "start", "mode", "pause", "resume", "restart", "menu", "testMode"}
+# "position" is the position switch: line of sight, trilateration or their average.
+CONTROL_ACTIONS = {"point", "release", "start", "mode", "pause", "resume", "restart", "menu", "testMode",
+                   "position"}
 # Every raw node reading to logs/raw-*.csv, for the bench noise test
 # (tools/bench_noise.py). Off unless started with REC=1; see sessionRecorder.py.
 recorder = SessionRecorder.from_env(os.environ)
@@ -261,6 +262,19 @@ def parse_angle_deg(payload):
     return angle if np.isfinite(angle) else None
 
 
+def parse_scan_state(payload):
+    """What a scanner node's scan made of its reading: 0 found, 1 half-found,
+    2 lost (sweeping). None for firmware that does not say."""
+    state = payload.get("scanState", payload.get("state"))
+    if isinstance(state, bool):
+        return None
+    try:
+        state = int(state)
+    except (TypeError, ValueError):
+        return None
+    return state if state in (0, 1, 2) else None
+
+
 def parse_distance_cm(payload):
     """The raw distance in a node message, as sent: negative means no echo."""
     distance = payload.get("distance")
@@ -285,6 +299,9 @@ def update_distance(node, payload, now):
     A range at a different bearing describes a different point in space. Never
     carry a median, Kalman velocity or FFT history across a change in bearing.
     The FFT assumes evenly spaced samples, so skip it for irregular scan timing.
+    There is no slew gate or hold here (the game's chain, and filterRules.py's,
+    have both): this value is published in nodes:update and /api/nodes, and
+    nothing in the game reads it.
     """
     distance = parse_distance_cm(payload)
     if distance is None or distance < 0:
@@ -295,6 +312,8 @@ def update_distance(node, payload, now):
     tracker = node["distance_tracker"]
     history = node["distance_samples"]
     times = node["distance_times"]
+    # A new bearing, or a gap (a node waits out the other node's scanning
+    # turn, for one): the Kalman starts a new track and the windows start again.
     if angle != node["distance_angle"] or (tracker.alive and
             now - tracker.t_reading_s > tracker.gap_reset_s):
         medians.clear()
@@ -304,7 +323,10 @@ def update_distance(node, payload, now):
     node["distance_angle"] = angle
 
     medians.append(distance)
-    tracked = tracker.update(float(np.median(medians)), now)
+    # The upper of the two middle values when the window is even, as the
+    # game's median (and filterRules.py's) takes.
+    ordered = sorted(medians)
+    tracked = tracker.update(float(ordered[len(ordered) // 2]), now)
     history.append(tracked)
     times.append(now)
     node["filtered_distance"] = float(tracked)
@@ -360,7 +382,8 @@ def update_node(node_id, message):
             raw_cm = parse_distance_cm(payload)
             if raw_cm is not None:
                 server_filter.on_reading(node_id, raw_cm, now * MS_PER_SECOND,
-                                         angle_deg=parse_angle_deg(payload))
+                                         angle_deg=parse_angle_deg(payload),
+                                         scan_state=parse_scan_state(payload))
     schedule_broadcast_nodes()
 
 
@@ -719,6 +742,9 @@ def apply_filter_event(event):
             elif event.get("type") == "calibration:update":
                 server_filter.set_calibration(
                     [(c["near"], c["far"]) for c in event["perColumn"]])
+            elif event.get("type") == "position:method":
+                # The game's position switch: line of sight, trilateration or both.
+                server_filter.set_position_method(event["method"])
     except (KeyError, TypeError, ValueError) as exc:
         print(f"Ignored bad {event.get('type')} message: {exc}")
 

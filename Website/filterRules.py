@@ -23,6 +23,9 @@ Pipeline, in order:
                                     -> FFT low-pass -> hold)
                                           │
                                           ▼
+                                   Geometry.track() (the line-of-sight tracker)
+                                          │
+                                          ▼
                                    Geometry.locate() ──► (x_cm, y_cm, column)
                                           │
                                           ▼
@@ -38,8 +41,9 @@ Pipeline, in order:
                                    FilteredCoordinate
 
 Geometry is the swappable part. TwoSensorGeometry is today's rig: two servo
-scanner nodes, LEFT and RIGHT, each placing the player by its distance and
-servo angle (basic trilateration for a node that sends no angle). UltrasonicArrayGeometry
+scanner nodes, LEFT and RIGHT, placed by line of sight (a 2D Kalman filter fed
+each node's distance along its servo angle), by trilateration of the two
+distances, or by the average of the two - the game's position switch. UltrasonicArrayGeometry
 is the earlier three-sensor rig, kept so logged V1 sessions still replay
 (tools/chain_replay.py). CartesianGeometry accepts an (x, y) position
 directly, which is the entry point for the servo scanning rig in
@@ -98,16 +102,30 @@ class FilterConfig:
     anchor_ttl_ms: float = 3000.0
 
     # Smoothing after the median (tuning.kalmanSigmaA, tuning.kalmanSigmaR,
-    # tuning.fftWindow, tuning.fftCutoffHz, FFT_MIN_SAMPLES,
-    # FFT_SAMPLE_RATE_HZ). The Kalman is tracking.ConstantVelocityTracker with
-    # its default gap reset and starting velocity; fft_window 0 turns the FFT
-    # stage off.
+    # tuning.fftWindow, tuning.fftCutoffHz, FFT_MIN_SAMPLES). The Kalman is
+    # tracking.ConstantVelocityTracker with its default gap reset and starting
+    # velocity; fft_window 0 turns the FFT stage off. The FFT stage measures
+    # its sample rate from the window's own timestamps.
     kalman_sigma_a_cm_s2: float = DEFAULT_SIGMA_A_CM_S2
     kalman_sigma_r_cm: float = DEFAULT_SIGMA_R_CM
     fft_window: int = 32
     fft_min_samples: int = 8
-    fft_sample_rate_hz: float = 20.0
     fft_cutoff_hz: float = 3.0
+
+    # Line-of-sight tracker (LOS_* in game.js; tuning.losAccelCmS2 and the
+    # tuning.losBearing*Deg). Distances are good along a node's line of sight;
+    # across it the uncertainty is the distance times how far off its aim the
+    # node may be, which depends on its scan state.
+    los_range_sigma_cm: float = 3.0
+    los_v0_sigma_cm_s: float = 100.0
+    los_accel_cm_s2: float = 150.0
+    los_bearing_found_deg: float = 4.0
+    los_bearing_half_deg: float = 15.0
+    los_bearing_unknown_deg: float = 7.0
+    los_gate_nis: float = 13.8          # chi-square, 2 dof, 99.9 %
+    los_relock_readings: int = 6
+    los_track_timeout_ms: float = 1500.0
+    los_both_window_ms: float = 2500.0
 
     # Geometry (COLUMN_MARGIN_CM)
     column_margin_cm: float = 8.0
@@ -134,8 +152,8 @@ class FilterConfig:
             raise ValueError("cell_votes cannot exceed cell_window")
         if self.fft_window < 0:
             raise ValueError("fft_window cannot be negative (0 turns the FFT stage off)")
-        if self.fft_sample_rate_hz <= 0 or self.fft_cutoff_hz < 0:
-            raise ValueError("the FFT stage needs a positive sample rate and a cutoff of 0 or more")
+        if self.fft_cutoff_hz < 0:
+            raise ValueError("the FFT stage needs a cutoff of 0 or more")
 
 
 @dataclass(frozen=True)
@@ -374,13 +392,26 @@ class ChannelFilter:
                                                 sigma_r_cm=cfg.kalman_sigma_r_cm,
                                                 negative_is_missing=False)
         self._smoothed: deque = deque(maxlen=cfg.fft_window)
+        self._smoothed_ms: deque = deque(maxlen=cfg.fft_window)
+        self._stepped_ms = -math.inf
+        self._angle: Optional[float] = None
         self.value: Optional[float] = None
         self._last_good_ms = -math.inf
         self._anchor: Optional[float] = None
         self._anchor_ms = -math.inf
         self.reject_count = 0
 
-    def update(self, raw: Optional[float], now_ms: float) -> Optional[float]:
+    def update(self, raw: Optional[float], now_ms: float,
+               angle: Optional[float] = None) -> Optional[float]:
+        # Back after a silence - the other node's scanning turn, as a rule.
+        # What the channel remembers is where the player was a turn ago, so it
+        # starts again from this reading. A range at a new bearing (the servo
+        # angle it was read at) is not another sample of the old track either.
+        if now_ms - self._stepped_ms > self._cfg.hold_ms or angle != self._angle:
+            self._restart_channel()
+        self._stepped_ms = now_ms
+        self._angle = angle
+
         # An impossible jump is treated exactly like a dropout: it never enters
         # the median window, so it cannot drag the value toward itself.
         if raw is not None and not self._plausible(raw, now_ms):
@@ -391,7 +422,7 @@ class ChannelFilter:
             ordered = sorted(self._samples)
             middle = ordered[len(ordered) // 2]
             tracked = self._tracker.update(middle, now_ms / 1000.0)
-            self.value = self._smooth(tracked)
+            self.value = self._smooth(tracked, now_ms)
             self._last_good_ms = now_ms
             # The gate judges readings against the median, as it always has:
             # the stages after it lag a little, and must not tighten the gate.
@@ -406,16 +437,32 @@ class ChannelFilter:
         self.value = None
         return None
 
-    def _smooth(self, tracked: float) -> float:
-        """One Kalman output into the FFT window; the channel's value."""
+    def _smooth(self, tracked: float, now_ms: float) -> float:
+        """One Kalman output, taken at now_ms, into the FFT window; the
+        channel's value. The window's sample rate is what its timestamps say
+        (smoothWindow() in game.js)."""
         cfg = self._cfg
         if cfg.fft_window <= 0:
             return tracked
         self._smoothed.append(tracked)
-        if len(self._smoothed) < min(cfg.fft_min_samples, cfg.fft_window):
+        self._smoothed_ms.append(now_ms)
+        n = len(self._smoothed)
+        if n < min(cfg.fft_min_samples, cfg.fft_window):
             return tracked
-        return fft_lowpass_last(list(self._smoothed), cfg.fft_sample_rate_hz,
-                                cfg.fft_cutoff_hz)
+        span = (self._smoothed_ms[-1] - self._smoothed_ms[0]) / 1000
+        if not span > 0:
+            return tracked
+        return fft_lowpass_last(list(self._smoothed), (n - 1) / span, cfg.fft_cutoff_hz)
+
+    def _restart_channel(self) -> None:
+        """restartChannel() in game.js: nothing the channel remembers - the
+        windows, the Kalman, the gate's anchor - still describes the player."""
+        self._restart_smoothing()
+        self.value = None
+        self._last_good_ms = -math.inf
+        self._anchor = None
+        self._anchor_ms = -math.inf
+        self._rejects.clear()
 
     def _restart_smoothing(self) -> None:
         """The median onwards starts again from the next reading: after a
@@ -424,6 +471,7 @@ class ChannelFilter:
         self._samples.clear()
         self._tracker.reset()
         self._smoothed.clear()
+        self._smoothed_ms.clear()
 
     def _plausible(self, raw: float, now_ms: float) -> bool:
         cfg = self._cfg
@@ -512,6 +560,17 @@ class Geometry(ABC):
         when the column is reported but hysteresis must not advance."""
         return None
 
+    def channel_angles(self) -> list:
+        """The bearing each channel was read at in the last channels() call,
+        None for none. A channel starts again when its bearing changes."""
+        return [None] * self.channel_count
+
+    def track(self, filtered: Sequence[Optional[float]], fresh: Sequence[bool],
+              now_ms: float, area: PlayArea, config: FilterConfig) -> None:
+        """Advance any tracker the geometry keeps, once per update and before
+        the proximity check. fresh marks the channels carrying a new reading.
+        Most geometries keep none."""
+
     def reset(self) -> None:
         """Clear any state carried between updates. Override if stateful."""
 
@@ -584,87 +643,307 @@ class UltrasonicArrayGeometry(Geometry):
                    column=column, distance_cm=best)
 
 
-class TwoSensorGeometry(Geometry):
-    """Two nodes, LEFT and RIGHT, on the screen line at the centres of the
-    outer columns. Port of locateNodes() and readSensorCoordinate() in game.js.
+POSITION_METHODS = ("los", "tri", "avg")
+SCAN_LOST = 2          # scanState: sweeping, the player is not in its line of sight
 
-    Each node is a servo scanner (src/scanning.cpp) that reports its distance
-    to the player and the servo angle it was read at: 90 is straight out into
-    the play area, larger turns towards screen-left. That puts the player at
-    a point from each node; with both nodes in bounds the two points are
-    averaged, with one it is used alone, and with none in bounds the nearer
-    reading still gives a position for the out-of-bounds message.
 
-    A node that reports no angle (firmware from before the scanner) falls
-    back to basic trilateration: each distance is a circle around its node,
-    and where the two circles cross is the player. When only one reading is
-    inside its own column's play area, or the circles miss each other, the
-    nearer node places the player straight in front of itself.
+def _mat_mul(a, b):
+    """matMul() in game.js: rows times columns, summed in the same order."""
+    out = []
+    for i in range(len(a)):
+        row = []
+        for j in range(len(b[0])):
+            total = 0.0
+            for k in range(len(b)):
+                total += a[i][k] * b[k][j]
+            row.append(total)
+        out.append(row)
+    return out
 
-    Sample: [left, centre, right]. Each entry is a distance in cm, or a
-    (distance_cm, angle_deg) pair from a scanner; None where there is no
-    reading. The centre is ignored: there is no centre node. Three slots are
-    kept so the browser's [left, centre, right] assignment carries over.
+
+def _mat_transpose(a):
+    return [[row[j] for row in a] for j in range(len(a[0]))]
+
+
+def _mat_add(a, b):
+    return [[value + b[i][j] for j, value in enumerate(row)] for i, row in enumerate(a)]
+
+
+def line_of_sight(node_x_cm: float, distance_cm: float, angle_deg: float,
+                  scan_state: Optional[float], config: FilterConfig,
+                  repeats: int = 0) -> tuple:
+    """lineOfSight() in game.js: one node's reading as (x_cm, y_cm, cov) - the
+    point along its line of sight and that point's 2x2 covariance, small along
+    the line and the distance times the bearing uncertainty across it.
+
+    repeats is how many readings in a row have already used this same aim: a
+    servo that holds still repeats the same small aim error, so the k-th
+    repeat counts 1/(k+1)^2 as much across the line (a held aim adds up to
+    about one and a half readings' worth) while the distance counts in full."""
+    phi = (angle_deg - 90) * math.pi / 180
+    along = [-math.sin(phi), math.cos(phi)]
+    across = [math.cos(phi), math.sin(phi)]
+    if scan_state == 0:
+        bearing_deg = config.los_bearing_found_deg
+    elif scan_state == 1:
+        bearing_deg = config.los_bearing_half_deg
+    else:
+        bearing_deg = config.los_bearing_unknown_deg
+    radial = config.los_range_sigma_cm * config.los_range_sigma_cm
+    sideways = distance_cm * bearing_deg * math.pi / 180 * (repeats + 1)
+    tangential = sideways * sideways
+    cov = [[radial * along[i] * along[j] + tangential * across[i] * across[j]
+            for j in range(2)] for i in range(2)]
+    return node_x_cm - distance_cm * math.sin(phi), distance_cm * math.cos(phi), cov
+
+
+class LineOfSightTracker:
+    """The line-of-sight 2D Kalman filter: port of losTrack and the los*()
+    functions in game.js, operation for operation.
+
+    State [x, y, vx, vy] in cm and cm/s, constant velocity with white-noise
+    acceleration. Each node reading that has the player in its line of sight
+    (new, with a distance and an angle, not sweeping) is used once, when it
+    arrives. While a node's servo holds still its aim counts for less with
+    every reading (line_of_sight(repeats=...)): the aim repeats the same small
+    error, and taking it in full again and again would drown the other node's
+    distance. Readings far from where the track expects the player are left
+    out; los_relock_readings of those in a row restart the track there.
     """
 
     LEFT = 0
     RIGHT = 2
 
     def __init__(self):
+        self.reset()
+
+    def reset(self) -> None:
+        self.x: Optional[list] = None
+        self.P: Optional[list] = None
+        self.t = 0.0
+        self.updated_ms = -math.inf
+        self.fed_ms = [-math.inf] * GRID_SIZE
+        self.aimed_at = [None] * GRID_SIZE
+        self.aim_repeats = [0] * GRID_SIZE
+        self.last_slot: Optional[int] = None
+        self.outliers = 0
+
+    def step(self, filtered, angles, states, fresh, now_ms: float,
+             area: PlayArea, config: FilterConfig) -> None:
+        """stepLosTrack(): feed this update's readings, then drop a track that
+        has taken nothing for too long."""
+        for slot in (self.LEFT, self.RIGHT):
+            angle, state = angles[slot], states[slot]
+            if (not fresh[slot] or filtered[slot] is None or angle is None
+                    or state == SCAN_LOST):
+                continue
+            new_aim = (self.x is None or angle != self.aimed_at[slot]
+                       or now_ms - self.fed_ms[slot] > config.hold_ms)
+            repeats = 0 if new_aim else self.aim_repeats[slot] + 1
+            m = line_of_sight(area.column_centre_cm(slot), filtered[slot], angle, state,
+                              config, repeats)
+            if self._observe(m, slot, now_ms, config):
+                self.aimed_at[slot] = angle
+                self.aim_repeats[slot] = repeats
+        if self.x is not None and now_ms - self.updated_ms > config.los_track_timeout_ms:
+            self.reset()
+
+    def fix(self, now_ms: float, config: FilterConfig) -> Optional[tuple]:
+        """losFix(): (x_cm, y_cm), or None when the track has taken nothing
+        for too long."""
+        if self.x is None or now_ms - self.updated_ms > config.los_track_timeout_ms:
+            return None
+        return self.x[0], self.x[1]
+
+    # -- internals -------------------------------------------------------------
+
+    def _took(self, slot: int, now_ms: float) -> None:
+        self.updated_ms = now_ms
+        self.fed_ms[slot] = now_ms
+        self.last_slot = slot
+
+    def _start(self, m, slot, now_ms, config) -> None:
+        v0 = config.los_v0_sigma_cm_s * config.los_v0_sigma_cm_s
+        mx, my, cov = m
+        self.x = [mx, my, 0, 0]
+        self.P = [[cov[0][0], cov[0][1], 0, 0],
+                  [cov[1][0], cov[1][1], 0, 0],
+                  [0, 0, v0, 0],
+                  [0, 0, 0, v0]]
+        self.t = now_ms / 1000
+        self.outliers = 0
+        self._took(slot, now_ms)
+
+    def _predict(self, t: float, config: FilterConfig) -> None:
+        dt = t - self.t
+        if dt <= 0:
+            return
+        q = config.los_accel_cm_s2 * config.los_accel_cm_s2
+        dt2 = dt * dt
+        a = q * dt2 * dt2 / 4
+        b = q * dt2 * dt / 2
+        c = q * dt2
+        F = [[1, 0, dt, 0], [0, 1, 0, dt], [0, 0, 1, 0], [0, 0, 0, 1]]
+        Q = [[a, 0, b, 0], [0, a, 0, b], [b, 0, c, 0], [0, b, 0, c]]
+        x = self.x
+        self.x = [x[0] + x[2] * dt, x[1] + x[3] * dt, x[2], x[3]]
+        self.P = _mat_add(_mat_mul(_mat_mul(F, self.P), _mat_transpose(F)), Q)
+        self.t = t
+
+    def _outlier(self, m, slot, now_ms, config) -> bool:
+        self.outliers += 1
+        if self.outliers < config.los_relock_readings:
+            return False
+        self._start(m, slot, now_ms, config)
+        return True
+
+    def _apply(self, K, nu, H, R, slot, now_ms) -> None:
+        P = self.P
+        new_x = []
+        for i, value in enumerate(self.x):
+            total = 0
+            for j, gain in enumerate(K[i]):
+                total = total + gain * nu[j]
+            new_x.append(value + total)
+        self.x = new_x
+        KH = _mat_mul(K, H)
+        A = [[(1 if i == j else 0) - value for j, value in enumerate(row)]
+             for i, row in enumerate(KH)]
+        self.P = _mat_add(_mat_mul(_mat_mul(A, P), _mat_transpose(A)),
+                          _mat_mul(_mat_mul(K, R), _mat_transpose(K)))
+        self.outliers = 0
+        self._took(slot, now_ms)
+
+    def _observe(self, m, slot, now_ms, config) -> bool:
+        if self.x is None:
+            self._start(m, slot, now_ms, config)
+            return True
+        self._predict(now_ms / 1000, config)
+        P = self.P
+        mx, my, cov = m
+        nu = [mx - self.x[0], my - self.x[1]]
+        s00 = P[0][0] + cov[0][0]
+        s01 = P[0][1] + cov[0][1]
+        s10 = P[1][0] + cov[1][0]
+        s11 = P[1][1] + cov[1][1]
+        det = s00 * s11 - s01 * s10
+        if not det > 0:
+            return False
+        Si = [[s11 / det, -s01 / det], [-s10 / det, s00 / det]]
+        nis = (nu[0] * (Si[0][0] * nu[0] + Si[0][1] * nu[1])
+               + nu[1] * (Si[1][0] * nu[0] + Si[1][1] * nu[1]))
+        if nis > config.los_gate_nis:
+            return self._outlier(m, slot, now_ms, config)
+        K = _mat_mul([[row[0], row[1]] for row in P], Si)
+        self._apply(K, nu, [[1, 0, 0, 0], [0, 1, 0, 0]], cov, slot, now_ms)
+        return True
+
+
+class TwoSensorGeometry(Geometry):
+    """Two nodes, LEFT and RIGHT, on the screen line at the centres of the
+    outer columns. Port of the positioning in game.js (solvePositions() and
+    readSensorCoordinate()).
+
+    Each node is a servo scanner (src/scanning.cpp) that reports its distance
+    to the player, the servo angle it was read at (90 is straight out into the
+    play area, larger turns towards screen-left) and its scan state (0 found,
+    1 half-found, 2 lost and sweeping). method picks how that becomes a
+    position, as the game's position switch does:
+
+      "los" - line of sight: LineOfSightTracker, fed by track() once per
+              update. The default.
+      "tri" - trilateration of the two distances alone: each distance is a
+              circle around its node, and where the two circles cross is the
+              player. When only one reading is inside its own column's play
+              area, or the circles miss each other, the nearer node places
+              the player straight in front of itself.
+      "avg" - the midpoint of the two.
+
+    With no angle from either node (firmware from before the scanner) there is
+    no line of sight, and every method is trilateration.
+
+    Sample: [left, centre, right]. Each entry is a distance in cm, a
+    (distance_cm, angle_deg) pair, or a (distance_cm, angle_deg, scan_state)
+    triple; None where there is no reading. The centre is ignored: there is no
+    centre node. Three slots are kept so the browser's [left, centre, right]
+    assignment carries over.
+    """
+
+    LEFT = 0
+    RIGHT = 2
+
+    def __init__(self, method: str = "los"):
+        self.method = method
+        self._los = LineOfSightTracker()
         self._last_column: Optional[int] = None
         self._angles: list = [None] * GRID_SIZE
+        self._states: list = [None] * GRID_SIZE
+        self._now_ms = -math.inf
+        self._config: Optional[FilterConfig] = None
+
+    @property
+    def method(self) -> str:
+        return self._method
+
+    @method.setter
+    def method(self, value: str) -> None:
+        if value not in POSITION_METHODS:
+            raise ValueError(f"method must be one of {POSITION_METHODS}, not {value!r}")
+        self._method = value
 
     @property
     def channel_count(self) -> int:
         return GRID_SIZE
 
     def reset(self) -> None:
+        self._los.reset()
         self._last_column = None
         self._angles = [None] * GRID_SIZE
+        self._states = [None] * GRID_SIZE
+        self._now_ms = -math.inf
 
     def channels(self, sample) -> list:
-        # Distances are filtered as channels; each node's angle is kept for
-        # locate(), which runs on the same update.
+        # Distances are filtered as channels; each node's angle and scan state
+        # are kept for track() and locate(), which run on the same update.
         values = list(sample) + [None] * GRID_SIZE
         out = [None] * GRID_SIZE
         self._angles = [None] * GRID_SIZE
+        self._states = [None] * GRID_SIZE
         for slot in (self.LEFT, self.RIGHT):
-            distance, angle = _split_reading(values[slot])
+            distance, angle, state = _split_reading(values[slot])
             out[slot] = _valid_cm(distance)
             self._angles[slot] = _finite(angle)
+            self._states[slot] = _finite(state)
         return out
 
     def nearest_raw_cm(self, raw_channels) -> Optional[float]:
         present = [v for v in raw_channels if v is not None]
         return min(present) if present else None
 
-    def position(self, filtered, area) -> Optional[tuple]:
-        """(x_cm, y_cm) from the filtered distances, or None with no reading.
-        Pure: touches no state. x is not yet clamped to the board."""
+    def channel_angles(self) -> list:
+        return list(self._angles)
+
+    def track(self, filtered, fresh, now_ms, area, config) -> None:
+        self._now_ms = now_ms
+        self._config = config
+        self._los.step(filtered, self._angles, self._states, fresh, now_ms, area, config)
+
+    def fixes(self, filtered, area) -> dict:
+        """Every method's position: {"los", "tri", "avg"} -> (x_cm, y_cm) or
+        None. Pure apart from reading the tracker."""
+        tri = self._trilaterate(filtered, area)
         if self._angles[self.LEFT] is None and self._angles[self.RIGHT] is None:
-            return self._trilaterate(filtered, area)
-        return self._from_scanners(filtered, area)
+            return {"los": tri, "tri": tri, "avg": tri}
+        los = self._los.fix(self._now_ms, self._config) if self._config else None
+        avg = los or tri
+        if los and tri:
+            avg = ((los[0] + tri[0]) / 2, (los[1] + tri[1]) / 2)
+        return {"los": los, "tri": tri, "avg": avg}
 
-    def _from_scanners(self, filtered, area) -> Optional[tuple]:
-        points = []
-        for slot in (self.LEFT, self.RIGHT):
-            distance = filtered[slot]
-            if distance is None:
-                continue
-            x, y = scanner_point(area.column_centre_cm(slot), distance, self._angles[slot])
-            inside = area.contains(area.column_at(_clamp(x, 0.0, area.width_cm)), y)
-            points.append((x, y, distance, inside))
-
-        in_bounds = [p for p in points if p[3]]
-        if len(in_bounds) == 2:
-            a, b = in_bounds
-            return (a[0] + b[0]) / 2, (a[1] + b[1]) / 2
-        pool = in_bounds or points
-        if not pool:
-            return None
-        # The nearer reading; left wins a tie, as in the JS.
-        x, y, _, _ = min(pool, key=lambda p: p[2])
-        return x, y
+    def position(self, filtered, area) -> Optional[tuple]:
+        """(x_cm, y_cm) by the chosen method, or None. x is not yet clamped
+        to the board."""
+        return self.fixes(filtered, area)[self.method]
 
     def _trilaterate(self, filtered, area) -> Optional[tuple]:
         d_left, d_right = filtered[self.LEFT], filtered[self.RIGHT]
@@ -938,8 +1217,10 @@ class CoordinatePipeline:
         raw = self.geometry.channels(sample)
         if fresh is None:
             fresh = [True] * len(raw)
-        filtered = [ch.update(v, now_ms) if is_fresh else ch.value
-                    for ch, v, is_fresh in zip(self._channels, raw, fresh)]
+        angles = self.geometry.channel_angles()
+        filtered = [ch.update(v, now_ms, a) if is_fresh else ch.value
+                    for ch, v, a, is_fresh in zip(self._channels, raw, angles, fresh)]
+        self.geometry.track(filtered, fresh, now_ms, self.area, self.config)
 
         # Safety first, on raw values, before anything is smoothed.
         nearest = self.geometry.nearest_raw_cm(raw)
@@ -1018,10 +1299,14 @@ def scanner_point(node_x_cm: float, distance_cm: float,
 
 
 def _split_reading(entry) -> tuple:
-    """A sample entry as (distance, angle): a plain distance has no angle."""
-    if isinstance(entry, (list, tuple)) and len(entry) == 2:
-        return entry[0], entry[1]
-    return entry, None
+    """A sample entry as (distance, angle, scan_state): a plain distance has
+    neither, a (distance, angle) pair no scan state."""
+    if isinstance(entry, (list, tuple)):
+        if len(entry) == 3:
+            return entry[0], entry[1], entry[2]
+        if len(entry) == 2:
+            return entry[0], entry[1], None
+    return entry, None, None
 
 
 def _finite(value) -> Optional[float]:

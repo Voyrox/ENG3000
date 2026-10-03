@@ -213,7 +213,7 @@ class BrokerTestCase(unittest.TestCase):
 class FftFilterTests(unittest.TestCase):
     """`fft_filter_ultrasonic` is a pure function, so it is tested as one."""
 
-    RATE = app.DISTANCE_SAMPLE_RATE_HZ
+    RATE = 20.0   # a sample rate to test the pure function at
 
     def tone(self, hz, n=app.FFT_WINDOW, mean=10.0, amplitude=2.0):
         t = np.arange(n) / self.RATE
@@ -530,7 +530,7 @@ class ReadingPipelineTests(BrokerTestCase):
         t = 100.0
         for value in readings:
             window = (window + [value])[-app.MEDIAN_WINDOW:]
-            expected = tracker.update(float(np.median(window)), t)
+            expected = tracker.update(float(sorted(window)[len(window) // 2]), t)
             app.update_distance(node, {"avg": value}, t)
             t += self.STEP_S
 
@@ -543,8 +543,9 @@ class ReadingPipelineTests(BrokerTestCase):
         self.feed_at(node, readings)
 
         self.assertEqual(len(node["distance_samples"]), app.FFT_MIN_SAMPLES)
+        # The window's rate, from its own times: one reading every STEP_S.
         expected = app.fft_filter_ultrasonic(list(node["distance_samples"]),
-                                             app.DISTANCE_SAMPLE_RATE_HZ,
+                                             1 / self.STEP_S,
                                              app.DISTANCE_CUTOFF_HZ)[-1]
         self.assertAlmostEqual(node["filtered_distance"], float(expected), places=12)
         # ...which is not simply the Kalman output any more.
@@ -593,6 +594,30 @@ class ReadingPipelineTests(BrokerTestCase):
             app.update_distance(node, {"avg": bad, "angle": 110}, 100.05)
         self.assertEqual(node["distance_angle"], 90)
         self.assertEqual(node["filtered_distance"], 50)
+
+    def test_the_fft_cutoff_follows_the_real_reading_rate(self):
+        """The same readings arriving twice as fast are twice the frequency:
+        a swing that passes the cutoff at one rate is cut at the other."""
+        swing = [100.0 + (4.0 if i % 4 < 2 else -4.0) for i in range(app.FFT_WINDOW)]
+        slow, fast = self.add_node()[1], self.add_node(address=("10.0.0.2", 1001))[1]
+        t = 100.0
+        for value in swing:          # 2.5 Hz swing at 10 readings/s: kept
+            app.update_distance(slow, {"avg": value}, t)
+            t += 0.1
+        t = 100.0
+        for value in swing:          # 10 Hz swing at 40 readings/s: cut
+            app.update_distance(fast, {"avg": value}, t)
+            t += 0.025
+        slow_swing = abs(slow["filtered_distance"] - 100.0)
+        fast_swing = abs(fast["filtered_distance"] - 100.0)
+        self.assertLess(fast_swing, slow_swing)
+
+    def test_the_median_takes_the_upper_middle_value_like_the_game(self):
+        _, node = self.add_node()
+        self.feed_at(node, [10.0, 30.0])
+        self.assertEqual(node["median_samples"][-1], 30.0)
+        # [10, 30] -> 30 (the game's rule), not 20 (the mean of the two).
+        self.assertEqual(sorted(node["median_samples"])[1], 30.0)
 
     def test_a_no_echo_reading_leaves_the_distance_alone(self):
         _, node = self.add_node()
@@ -1510,6 +1535,47 @@ class NodePulsesTests(BrokerTestCase):
             asyncio.run(app.browser_handler(socket))
         self.assertEqual(node["conn"].sent, ["PULSES 3\n"])
         self.assertEqual(app.nodes_pulse_count, 3)
+
+
+class FakeControlSocket(FakeBrowserSocket):
+    """The slice of a connection that `control_handler` uses."""
+
+    remote_address = ("10.0.0.50", 5000)
+
+
+class ControlPanelTests(BrokerTestCase):
+    """The phone control panel's commands reach the game browsers."""
+
+    def relayed(self, *events):
+        phone = FakeControlSocket(path="/control", incoming=[json.dumps(e) for e in events])
+        with mock.patch.object(app, "broadcast") as broadcast, \
+                mock.patch("builtins.print"):
+            asyncio.run(app.control_handler(phone))
+        return [json.loads(call.args[1]) for call in broadcast.call_args_list]
+
+    def test_the_position_switch_is_relayed_to_the_game(self):
+        sent = self.relayed({"action": "position", "method": "tri"})
+        self.assertEqual(sent, [{"action": "position", "method": "tri", "type": "remote:command"}])
+
+    def test_an_unknown_action_is_not_relayed(self):
+        self.assertEqual(self.relayed({"action": "selfDestruct"}), [])
+
+
+class ScanStateTests(unittest.TestCase):
+    """What a scanner node's scan made of a reading, from its message."""
+
+    def test_the_three_states_are_read(self):
+        for state in (0, 1, 2):
+            self.assertEqual(app.parse_scan_state({"scanState": state}), state)
+        self.assertEqual(app.parse_scan_state({"scanState": "1"}), 1)
+
+    def test_older_firmware_sent_state(self):
+        self.assertEqual(app.parse_scan_state({"state": 2}), 2)
+
+    def test_anything_else_is_none(self):
+        for payload in ({}, {"scanState": None}, {"scanState": 7}, {"scanState": "lost"},
+                        {"scanState": True}):
+            self.assertIsNone(app.parse_scan_state(payload), payload)
 
 
 class ScannerAngleTests(unittest.TestCase):
