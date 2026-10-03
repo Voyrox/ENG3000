@@ -127,6 +127,11 @@ class FilterConfig:
     los_track_timeout_ms: float = 1500.0
     los_both_window_ms: float = 2500.0
 
+    # Trilateration's beam check (tuning.triBeamHalfDeg): a crossing of the two
+    # distance circles counts only within this many degrees of where each
+    # node's servo points. The sensors' beam is under 15 degrees wide.
+    tri_beam_half_deg: float = 7.5
+
     # Geometry (COLUMN_MARGIN_CM)
     column_margin_cm: float = 8.0
 
@@ -644,6 +649,11 @@ class UltrasonicArrayGeometry(Geometry):
 
 
 POSITION_METHODS = ("los", "tri", "avg")
+
+# The sensors' datasheet range (HC-SR04; the RCWL-1601 is a pin-compatible
+# copy): a distance outside it is not a reading. SENSOR_*_CM in game.js.
+SENSOR_MIN_CM = 2.0
+SENSOR_MAX_CM = 400.0
 SCAN_LOST = 2          # scanState: sweeping, the player is not in its line of sight
 
 
@@ -852,11 +862,14 @@ class TwoSensorGeometry(Geometry):
 
       "los" - line of sight: LineOfSightTracker, fed by track() once per
               update. The default.
-      "tri" - trilateration of the two distances alone: each distance is a
-              circle around its node, and where the two circles cross is the
-              player. When only one reading is inside its own column's play
-              area, or the circles miss each other, the nearer node places
-              the player straight in front of itself.
+      "tri" - trilateration of the two distances: each distance is a circle
+              around its node, and where the two circles cross is the player,
+              if the crossing lies inside both nodes' beams (in_beam(), within
+              tri_beam_half_deg of each servo's aim). When only one reading is
+              inside its own column's play area, the circles miss each other,
+              or the crossing is outside a beam, the nearer node places the
+              player by its distance along its servo angle (scanner_point()),
+              straight in front of itself if it sends no angle.
       "avg" - the midpoint of the two.
 
     With no angle from either node (firmware from before the scanner) there is
@@ -946,27 +959,36 @@ class TwoSensorGeometry(Geometry):
         return self.fixes(filtered, area)[self.method]
 
     def _trilaterate(self, filtered, area) -> Optional[tuple]:
-        d_left, d_right = filtered[self.LEFT], filtered[self.RIGHT]
+        config = self._config or FilterConfig()
+        d_left = filtered[self.LEFT] if in_sensor_range(filtered[self.LEFT]) else None
+        d_right = filtered[self.RIGHT] if in_sensor_range(filtered[self.RIGHT]) else None
         in_left = d_left is not None and area.contains(self.LEFT, d_left)
         in_right = d_right is not None and area.contains(self.RIGHT, d_right)
 
         if in_left and in_right:
             x_left = area.column_centre_cm(self.LEFT)
-            base = area.column_centre_cm(self.RIGHT) - x_left
+            x_right = area.column_centre_cm(self.RIGHT)
+            base = x_right - x_left
             along = (d_left * d_left - d_right * d_right + base * base) / (2 * base)
             h2 = d_left * d_left - along * along
             if h2 >= 0:
-                return x_left + along, math.sqrt(h2)
+                x = x_left + along
+                y = math.sqrt(h2)
+                half = config.tri_beam_half_deg
+                if (in_beam(x_left, self._angles[self.LEFT], x, y, half)
+                        and in_beam(x_right, self._angles[self.RIGHT], x, y, half)):
+                    return x, y
 
         # One sensor on its own: the nearer in-bounds reading, or failing that
-        # the nearer reading of any kind. Left wins a tie, as in the JS.
+        # the nearer reading of any kind, along its servo angle. Left wins a
+        # tie, as in the JS.
         candidates = [(self.LEFT, d_left, in_left), (self.RIGHT, d_right, in_right)]
         candidates = [c for c in candidates if c[1] is not None]
         pool = [c for c in candidates if c[2]] or candidates
         if not pool:
             return None
         column, distance, _ = min(pool, key=lambda c: c[1])
-        return area.column_centre_cm(column), distance
+        return scanner_point(area.column_centre_cm(column), distance, self._angles[column])
 
     def nearest_column(self, filtered, area) -> Optional[int]:
         where = self.position(filtered, area)
@@ -1296,6 +1318,28 @@ def scanner_point(node_x_cm: float, distance_cm: float,
     """
     phi = ((90.0 if angle_deg is None else angle_deg) - 90) * math.pi / 180
     return node_x_cm - distance_cm * math.sin(phi), distance_cm * math.cos(phi)
+
+
+def in_sensor_range(distance_cm: Optional[float]) -> bool:
+    """inSensorRange() in game.js: a distance the sensors can measure."""
+    return distance_cm is not None and SENSOR_MIN_CM <= distance_cm <= SENSOR_MAX_CM
+
+
+def in_beam(node_x_cm: float, angle_deg: Optional[float], x_cm: float, y_cm: float,
+            half_beam_deg: float) -> bool:
+    """inBeam() in game.js: whether (x_cm, y_cm) lies within half_beam_deg of
+    where the node at node_x_cm points its servo (angle_deg, as in
+    scanner_point()). Compares cosines, operation for operation as the JS does,
+    so the two agree to the last bit. No angle means no beam to check."""
+    if angle_deg is None:
+        return True
+    phi = (angle_deg - 90) * math.pi / 180
+    dx = x_cm - node_x_cm
+    reach = math.sqrt(dx * dx + y_cm * y_cm)
+    if reach == 0:
+        return True
+    half_beam = half_beam_deg * math.pi / 180
+    return -math.sin(phi) * dx + math.cos(phi) * y_cm >= reach * math.cos(half_beam)
 
 
 def _split_reading(entry) -> tuple:

@@ -43,6 +43,8 @@ from filterRules import (  # noqa: E402
     TwoSensorGeometry,
     UltrasonicArrayGeometry,
     fft_lowpass_last,
+    in_beam,
+    in_sensor_range,
     line_of_sight,
     scanner_point,
 )
@@ -150,6 +152,16 @@ class ChannelFilterRules(unittest.TestCase):
         for t in range(3 * self.cfg.fft_window):
             out = self.ch.update(70.0, t * 20)
         self.assertAlmostEqual(out, 70.0, places=9)
+
+    def test_a_new_bearing_starts_the_channel_again(self):
+        # Five readings at 90 degrees, then the servo turns: the 120 cm at the
+        # new bearing is not another sample of the 50 cm track, so neither the
+        # slew gate nor the median holds it back.
+        for t in range(5):
+            self.ch.update(50.0, t * 20, angle=90.0)
+        self.assertEqual(self.ch.update(120.0, 100, angle=110.0), 120.0)
+        # The same bearing again is the same track: a jump is gated as ever.
+        self.assertEqual(self.ch.update(200.0, 120, angle=110.0), 120.0)
 
     def test_a_steady_walk_is_followed_without_wrap_lag(self):
         # 1 cm per reading. The median lags a ramp by two readings; the Kalman
@@ -484,17 +496,76 @@ class TwoSensorGeometryBehaviour(unittest.TestCase):
         x, y = scanner_point(125.0, *sample[2][:2])
         self.assertAlmostEqual(fix.x_cm, x)
         self.assertAlmostEqual(fix.y_cm, y)
-        # Trilateration has no way to know, and takes the furniture's distance.
+        # Trilateration does not know the node is lost. Here the circles cross
+        # inside both beams (the left one points close to the crossing), so
+        # even the beam check lets it take the furniture's distance.
         tri = self.scan(sample, geometry=TwoSensorGeometry(method="tri"))
         self.assertGreater(math.dist((tri.x_cm, tri.y_cm), (80.0, 95.0)), 10.0)
 
-    def test_trilateration_uses_the_distances_alone(self):
+    def test_trilateration_crosses_the_distances_inside_both_beams(self):
         geometry = TwoSensorGeometry(method="tri")
-        # Angles that point somewhere else entirely do not matter to it.
-        sample = [(math.hypot(60 - 25, 80), 150, 0), None, (math.hypot(60 - 125, 80), 150, 0)]
+        # 5 degrees off each aim is inside the 7.5-degree half-beam: the
+        # crossing of the two distances is taken, not the angles.
+        fix = self.scan(scanner_sample(60.0, 80.0, aim_error_deg=5.0), geometry=geometry)
+        self.assertAlmostEqual(fix.x_cm, 60.0)
+        self.assertAlmostEqual(fix.y_cm, 80.0)
+
+    def test_trilateration_refuses_a_crossing_outside_a_beam(self):
+        geometry = TwoSensorGeometry(method="tri")
+        # Both servos point somewhere else entirely: the crossing is not where
+        # either is looking, so the nearer node (left, 87 cm) places the player
+        # by its own distance along its own aim instead.
+        d_left = math.hypot(60 - 25, 80)
+        sample = [(d_left, 120, 0), None, (math.hypot(60 - 125, 80), 120, 0)]
+        fix = self.scan(sample, geometry=geometry)
+        x, y = scanner_point(25.0, d_left, 120)
+        self.assertAlmostEqual(fix.x_cm, max(0.0, x))
+        self.assertAlmostEqual(fix.y_cm, y)
+
+    def test_one_node_aimed_away_leaves_the_crossing_to_the_other(self):
+        # The right node looks 10 degrees past the player (furniture, say):
+        # the crossing is refused, and the left node - nearer, and aimed at
+        # the player - puts them where it sees them.
+        geometry = TwoSensorGeometry(method="tri")
+        sample = scanner_sample(60.0, 80.0)
+        sample[2] = (sample[2][0], sample[2][1] + 10.0, 0)
         fix = self.scan(sample, geometry=geometry)
         self.assertAlmostEqual(fix.x_cm, 60.0)
         self.assertAlmostEqual(fix.y_cm, 80.0)
+
+    def test_trilateration_without_angles_uses_the_distances_alone(self):
+        # Firmware from before the scanner sends no angle: nothing to check.
+        geometry = TwoSensorGeometry(method="tri")
+        fix = self.scan(two_sensor_sample(60.0, 80.0), geometry=geometry)
+        self.assertAlmostEqual(fix.x_cm, 60.0)
+        self.assertAlmostEqual(fix.y_cm, 80.0)
+
+    def test_the_half_beam_is_tunable(self):
+        geometry = TwoSensorGeometry(method="tri")
+        sample = scanner_sample(60.0, 80.0, aim_error_deg=5.0)
+        narrow = FilterConfig(tri_beam_half_deg=4.0)
+        readings = geometry.channels(sample)
+        geometry.track(readings, [True] * 3, 0.0, self.area, narrow)
+        fix = geometry.locate(readings, self.area, narrow)
+        # 5 degrees off is outside 4: the left node's own aim, not the crossing.
+        x, y = scanner_point(25.0, *sample[0][:2])
+        self.assertAlmostEqual(fix.x_cm, x)
+        self.assertAlmostEqual(fix.y_cm, y)
+
+    def test_in_beam_measures_the_angle_off_the_aim(self):
+        # Straight out (90) from x = 25: a point 7 degrees off is in, 8 is out.
+        for off_deg, inside in ((0, True), (7, True), (-7, True), (8, False), (-8, False)):
+            x = 25.0 - 100 * math.sin(math.radians(off_deg))
+            y = 100 * math.cos(math.radians(off_deg))
+            self.assertEqual(in_beam(25.0, 90, x, y, 7.5), inside, off_deg)
+        self.assertTrue(in_beam(25.0, None, 140.0, 5.0, 7.5))   # no angle, no check
+
+    def test_a_distance_outside_the_sensor_range_is_not_a_reading(self):
+        self.assertFalse(in_sensor_range(None))
+        self.assertFalse(in_sensor_range(1.5))
+        self.assertTrue(in_sensor_range(2.0))
+        self.assertTrue(in_sensor_range(400.0))
+        self.assertFalse(in_sensor_range(400.5))
 
     def test_average_is_the_midpoint_of_the_other_two(self):
         sample = scanner_sample(80.0, 95.0)

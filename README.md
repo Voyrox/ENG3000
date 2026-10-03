@@ -166,13 +166,21 @@ reporting whatever its beam hits while it sweeps. The position methods
   - a reading far from where the track expects the player is left out
     (a 99.9 % gate), and six of those in a row restart the track there;
   - after 1.5 s with nothing usable there is no position.
-- **Trilateration** (`tri`), the earlier method, kept to compare against:
-  where the two distance circles cross, using each node's latest distance
-  however old, and whatever that node was looking at.
+- **Trilateration** (`tri`): where the two distance circles cross, using
+  each node's latest distance however old. The servo angles only check the
+  crossing: it must lie inside both sensors' beams - within 7.5° of where each
+  servo points, from the datasheet's beam of under 15° (HC-SR04; the supplied
+  RCWL-1601 is a pin-compatible copy) - and each distance must be inside the
+  sensors' 2-400 cm range. A crossing outside a beam means one node is looking
+  at something else (furniture, as a rule), so it is refused, and the nearer
+  node places the player by its own distance along its servo angle, as it
+  does when only one node has a reading. `tuneSensor({ triBeamHalfDeg: 10 })`
+  widens the beam live; Python: `FilterConfig(tri_beam_half_deg=...)`.
 - **Average** (`avg`): the midpoint of the two.
 
-The phone control panel (`/control`, server started with `CON=1`) has the
-same switch under *Placing the player*, and shows which method is in use; its
+The game's **Options** screen has the same switch under *Placing the
+Player*. The phone control panel (`/control`, server started with `CON=1`)
+has it under *Placing the player*, and shows which method is in use; its
 buttons come from the game's status, so a new method appears there by itself.
 In the browser console, `tuneSensor({ losAccelCmS2, losBearingFoundDeg,
 losBearingHalfDeg })` changes the tracker live; `setPositionMethod("tri")`
@@ -187,9 +195,18 @@ noise, a player walking the board and pausing - over three seeds:
 | Method | Median error | 90th percentile | Right cell |
 |---|---|---|---|
 | Before (main) | 7.0 cm | 24.7 cm | 58 % |
-| Line of sight | 6.3 cm | 16.7 cm | 65 % |
-| Trilateration | 2.3 cm | 26.2 cm | 63 % |
-| Average | 3.5 cm | 20.3 cm | 66 % |
+| Line of sight | 6.3 cm | 16.8 cm | 65 % |
+| Trilateration | 2.3 cm | 22.8 cm | 63 % |
+| Average | 3.8 cm | 19.1 cm | 63 % |
+
+With furniture at (60, 100) cm (`--furniture 60,100`), same turns:
+
+| Method | Median error | 90th percentile | Right cell |
+|---|---|---|---|
+| Line of sight | 10.6 cm | 58.4 cm | 56 % |
+| Trilateration | 3.7 cm | 31.9 cm | 61 % |
+| Trilateration, no beam check | 13.0 cm | 40.0 cm | 61 % |
+| Average | 7.7 cm | 37.4 cm | 62 % |
 
 Reproduce it with `node Website/tools/simulate_positions.js` (options:
 `--turn-ms 1000,250,0` - 0 is both nodes at once - `--furniture 140,125`,
@@ -199,8 +216,14 @@ Reproduce it with `node Website/tools/simulate_positions.js` (options:
 Trilateration is the most exact while the player stands still and the worst
 while they move (a distance a turn old is still right for a still player).
 With both nodes read at once, all three are within 2 cm (median). Furniture
-inside the play area fools every method: a scanner "finds" it exactly as it
-finds a player. Check the real rig with Compare.
+inside the play area fools a scanner: it "finds" it exactly as it finds a
+player. Trilateration's beam check catches most of that: the crossing of the
+furniture's distance with the player's is not where both nodes point. What a
+refused crossing falls back to matters as much. Placing the player straight
+in front of the nearer node, with no angle, scored worse than no check at all
+(median 51.5 cm with furniture), so the fallback takes the node's servo angle.
+The 7.5° beam is the datasheet's; the rig's is not measured. Check the real
+rig with Compare.
 
 Each channel also starts again when its node comes back after a silence
 longer than the hold (350 ms) - the other node's turn, as a rule - so the

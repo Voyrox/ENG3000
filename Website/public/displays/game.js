@@ -178,6 +178,11 @@
     losBearingFoundDeg: 4,
     losBearingHalfDeg: 15,
     losBearingUnknownDeg: 7,
+    // Trilateration's beam check (see inBeam()): a crossing of the two
+    // distance circles counts only if it lies within this many degrees of
+    // where each node's servo points. The sensors' beam is under 15 degrees
+    // wide, 7.5 either side. Python: FilterConfig tri_beam_half_deg.
+    triBeamHalfDeg: 7.5,
   };
 
   window.tuneSensor = function tuneSensor(partial) {
@@ -1238,10 +1243,14 @@
   //           read at the same moment: each reading is used once, when it
   //           arrives, and a node that is sweeping for the player (lost) is not
   //           used at all - what its beam hits is not the player.
-  //   "tri" - trilateration of the two distances alone (trilaterate()), the
-  //           earlier method, kept to compare against. It pairs each node's
-  //           distance with the other node's latest one, however old, and
-  //           whatever that node was looking at.
+  //   "tri" - trilateration of the two distances (trilaterate()): each is a
+  //           circle around its node, and the player is where they cross. It
+  //           pairs each node's distance with the other node's latest one,
+  //           however old. The servo angles check the crossing: it must lie
+  //           inside both sensors' beams (inBeam()), or one node is looking
+  //           at something else and the crossing is not used. Then, as when
+  //           only one node has a reading, the nearer node places the player
+  //           by its own distance along its servo angle.
   //   "avg" - the midpoint of the two.
   //
   // All three are worked out on every update, so the board can show them side
@@ -1261,27 +1270,60 @@
     return window.isWithinPlayArea ? window.isWithinPlayArea(column, distance) : true;
   }
 
-  // Where the player is, from the filtered [left, centre, right] distances.
+  // The sensors' datasheet range (HC-SR04; the RCWL-1601 is a pin-compatible
+  // copy): a distance outside it is not a reading. filterRules.py SENSOR_*_CM.
+  const SENSOR_MIN_CM = 2;
+  const SENSOR_MAX_CM = 400;
+
+  function inSensorRange(distance) {
+    return distance !== null && distance >= SENSOR_MIN_CM && distance <= SENSOR_MAX_CM;
+  }
+
+  // Whether the point (x, y) lies inside the beam of the node at nodeX whose
+  // servo is at angle: within tuning.triBeamHalfDeg of where it points.
+  // Compares cosines (the aim dotted with the point) rather than angles, with
+  // the same sin and cos as scannerPoint(), so in_beam() in filterRules.py
+  // agrees to the last bit. A node that sends no angle has no beam to check.
+  function inBeam(nodeX, angle, x, y) {
+    if (angle === null) return true;
+    const phi = (angle - 90) * Math.PI / 180;
+    const dx = x - nodeX;
+    const reach = Math.sqrt(dx * dx + y * y);
+    if (reach === 0) return true;
+    const halfBeam = tuning.triBeamHalfDeg * Math.PI / 180;
+    return -Math.sin(phi) * dx + Math.cos(phi) * y >= reach * Math.cos(halfBeam);
+  }
+
+  // Where the player is, from the filtered [left, centre, right] distances and
+  // the servo angles they were read at (null where a node sends none).
   // Returns { x, y, source } in cm, or null when neither sensor has a reading.
   // source is "both" for a trilaterated fix, else the one sensor used. Pure:
   // no hysteresis state is touched, and x is not yet clamped to the board.
   //
   // A reading only counts toward the crossing if it is inside its own
-  // column's play area. When only one does, or the circles miss each other
-  // (one sensor is seeing something else), the nearer sensor places the
-  // player straight in front of itself.
-  function trilaterate(filtered) {
-    const dL = filtered[LEFT_SENSOR];
-    const dR = filtered[RIGHT_SENSOR];
+  // column's play area. When only one does, the circles miss each other, or
+  // the crossing is outside either node's beam (one sensor is seeing
+  // something else), the nearer sensor places the player by its distance
+  // along its servo angle - straight in front of itself if it sends none.
+  function trilaterate(filtered, angles = [null, null, null]) {
+    const dL = inSensorRange(filtered[LEFT_SENSOR]) ? filtered[LEFT_SENSOR] : null;
+    const dR = inSensorRange(filtered[RIGHT_SENSOR]) ? filtered[RIGHT_SENSOR] : null;
     const inL = dL !== null && isInPlay(LEFT_SENSOR, dL);
     const inR = dR !== null && isInPlay(RIGHT_SENSOR, dR);
 
     if (inL && inR) {
       const xLeft = columnCentreCm(LEFT_SENSOR);
-      const base = columnCentreCm(RIGHT_SENSOR) - xLeft;
+      const xRight = columnCentreCm(RIGHT_SENSOR);
+      const base = xRight - xLeft;
       const along = (dL * dL - dR * dR + base * base) / (2 * base);
       const h2 = dL * dL - along * along;
-      if (h2 >= 0) return { x: xLeft + along, y: Math.sqrt(h2), source: "both" };
+      if (h2 >= 0) {
+        const x = xLeft + along;
+        const y = Math.sqrt(h2);
+        if (inBeam(xLeft, angles[LEFT_SENSOR], x, y) && inBeam(xRight, angles[RIGHT_SENSOR], x, y)) {
+          return { x, y, source: "both" };
+        }
+      }
     }
 
     // One sensor on its own: the nearer in-bounds reading, or failing that the
@@ -1297,11 +1339,8 @@
       if (best === null || candidate.distance < best.distance) best = candidate;
     });
     if (best === null) return null;
-    return {
-      x: columnCentreCm(best.column),
-      y: best.distance,
-      source: best.column === LEFT_SENSOR ? "left" : "right",
-    };
+    const point = scannerPoint(columnCentreCm(best.column), best.distance, angles[best.column]);
+    return { x: point.x, y: point.y, source: best.column === LEFT_SENSOR ? "left" : "right" };
   }
 
   // Where one scanner node's reading puts the player. angle is the servo angle:
@@ -1522,7 +1561,7 @@
   // from either node there is no line of sight, and every method is
   // trilateration, as it always was for that firmware.
   function solvePositions(filtered, angles, now) {
-    const tri = trilaterate(filtered);
+    const tri = trilaterate(filtered, angles);
     if (angles[LEFT_SENSOR] === null && angles[RIGHT_SENSOR] === null) {
       return { los: tri, tri, avg: tri };
     }
