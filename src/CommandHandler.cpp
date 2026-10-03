@@ -46,6 +46,12 @@ void CommandHandler::handle(const String& line) {
         int degrees = line.substring(4).toInt();
         scanner_.holdAt(degrees);
         Serial.printf("Servo held at %d\n", degrees);
+    } else if (line.startsWith("LOOK ")) {
+        // The other node is confident where the player is: turn towards them
+        // and track from there. Unlike AIM, the servo is not held.
+        int degrees = line.substring(5).toInt();
+        scanner_.lookAt(degrees);
+        Serial.printf("Looking towards %d\n", degrees);
     } else if (line == "SCAN") {
         scanner_.resumeScanning();
         Serial.println("Scanning resumed");

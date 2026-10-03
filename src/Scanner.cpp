@@ -79,6 +79,17 @@ void Scanner::resumeScanning() {
     restart();
 }
 
+void Scanner::lookAt(int degrees) {
+    if (servo_.isHeld()) {
+        return;
+    }
+    int before = servo_.angleDeg();
+    servo_.stepBy(degrees - before);
+    lookStartMs_ = millis();
+    lookSettleMs_ = abs(servo_.angleDeg() - before) * config::LOOK_SETTLE_MS_PER_DEG;
+    restart();
+}
+
 void Scanner::setPulsesPerAngle(int count) {
     pulsesPerAngle_ = constrain(count, 1, config::MAX_PULSES_PER_ANGLE);
 }
@@ -99,6 +110,10 @@ bool Scanner::readPair(PulsePair& pair) {
     // rig was never at, so it cannot be compared with - or triangulated against -
     // a reading from a settled horn. Wait the horn out first.
     if (!servo_.isSettled()) {
+        return false;
+    }
+    // A LOOK swing is longer than a scan step, so it is waited out in full.
+    if (millis() - lookStartMs_ < lookSettleMs_) {
         return false;
     }
 

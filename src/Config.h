@@ -94,6 +94,11 @@ constexpr unsigned long SIDE_GAP_MS = 50;
 // anything is read through it. A reading taken while the horn is still
 // travelling describes some angle the rig was never at.
 constexpr unsigned long SERVO_SETTLE_MS = 40;
+// The server's LOOK <deg> can swing the servo much further than a scan step, so
+// after one, no pair is read for this long per degree swung. An SG90 is quoted
+// at about 1.7 ms per degree at 4.8 V; it is slower on the 3.3 V the PCB gives
+// it, hence the margin.
+constexpr unsigned long LOOK_SETTLE_MS_PER_DEG = 4;
 
 // The servo is centred at boot and given this long to get there.
 constexpr unsigned long BOOT_SETTLE_MS = 5000;

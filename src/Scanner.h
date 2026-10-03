@@ -59,6 +59,12 @@ public:
     void holdAt(int degrees);
     void resumeScanning();
 
+    // The server's LOOK <deg>: the other node is confident where the player is,
+    // and this is the bearing from here to them. Turns there (within this
+    // mount's limits) and tracks from there as usual - unlike holdAt() it does
+    // not hold. Ignored while held for calibration.
+    void lookAt(int degrees);
+
     // 1 turns multi-pulse off. Clamped to 1..config::MAX_PULSES_PER_ANGLE.
     void setPulsesPerAngle(int count);
     int pulsesPerAngle() const { return pulsesPerAngle_; }
@@ -86,6 +92,11 @@ private:
     UltrasonicSensor& leftSensor_;
     UltrasonicSensor& rightSensor_;
     ScannerServo& servo_;
+
+    // After a lookAt() swing, no pair is read until lookSettleMs_ has passed
+    // since lookStartMs_.
+    unsigned long lookStartMs_ = 0;
+    unsigned long lookSettleMs_ = 0;
 
     // The pair being read.
     bool readLeftNext_ = true;
