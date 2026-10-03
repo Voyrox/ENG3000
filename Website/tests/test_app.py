@@ -558,6 +558,42 @@ class ReadingPipelineTests(BrokerTestCase):
         self.feed_at(node, walk)
         self.assertLess(abs(walk[-1] - node["filtered_distance"]), 7.0)
 
+    def test_a_servo_turn_starts_a_new_range_track(self):
+        _, node = self.add_node()
+        for i in range(app.FFT_WINDOW):
+            app.update_distance(node, {"avg": 40, "angle": 90}, 100 + i * self.STEP_S)
+        app.update_distance(node, {"avg": 120, "angle": 110}, 100 + app.FFT_WINDOW * self.STEP_S)
+        self.assertEqual(node["filtered_distance"], 120.0)
+        self.assertEqual(list(node["median_samples"]), [120.0])
+        self.assertEqual(len(node["distance_samples"]), 1)
+        self.assertEqual(len(node["distance_times"]), 1)
+        self.assertEqual(node["distance_angle"], 110.0)
+
+    def test_fft_uses_actual_uniform_sample_rate(self):
+        _, node = self.add_node()
+        period = 0.1  # 10 Hz, not the 20 Hz nominal browser setting
+        for i in range(app.FFT_MIN_SAMPLES):
+            app.update_distance(node, {"avg": 60 + (i % 3) * 4, "angle": 90},
+                                100 + i * period)
+        expected = app.fft_filter_ultrasonic(
+            node["distance_samples"], 1 / period, app.DISTANCE_CUTOFF_HZ)[-1]
+        self.assertAlmostEqual(node["filtered_distance"], expected, places=9)
+
+    def test_irregular_samples_skip_fft(self):
+        _, node = self.add_node()
+        for i in range(app.FFT_MIN_SAMPLES):
+            now = 100 + i * self.STEP_S + (0.035 if i == 4 else 0)
+            app.update_distance(node, {"avg": 60 + (i % 3) * 4, "angle": 90}, now)
+        self.assertEqual(node["filtered_distance"], node["distance_samples"][-1])
+
+    def test_invalid_distance_does_not_poison_the_track(self):
+        _, node = self.add_node()
+        app.update_distance(node, {"avg": 50, "angle": 90}, 100)
+        for bad in (float("nan"), float("inf"), -1):
+            app.update_distance(node, {"avg": bad, "angle": 110}, 100.05)
+        self.assertEqual(node["distance_angle"], 90)
+        self.assertEqual(node["filtered_distance"], 50)
+
     def test_a_no_echo_reading_leaves_the_distance_alone(self):
         _, node = self.add_node()
         t = self.feed_at(node, [50.0] * 3)

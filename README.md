@@ -171,7 +171,14 @@ it, from the next reading; the Python side takes the same settings through
 `FilterConfig` (`fft_window`, `fft_cutoff_hz`, `kalman_sigma_a_cm_s2`, ...).
 The game steps its filters once per new `nodes:update`, not on every
 animation frame. On the server a no-echo reading (negative) is skipped rather
-than put into the median.
+than put into the median. The firmware reports the **settled angle at which**
+each pair was measured, before moving the servo. For `app.py`'s per-node
+`filtered_distance`, a change of angle resets the median, Kalman and FFT
+windows: ranges at different bearings are not samples of the same target.
+Its FFT uses the measured sampling interval and runs only when the current
+window is approximately uniform (within 20%); otherwise the timestamp-aware
+Kalman estimate is published. The browser/`ChannelFilter` pipeline retains
+its own existing filtering rules and fixed sample-rate assumption.
 
 The chain runs **once per new reading**. When one node reports, only its
 channel gets a new sample; the other channels are marked not fresh and are

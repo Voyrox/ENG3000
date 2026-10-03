@@ -66,9 +66,9 @@ NODE_STALE_SECONDS = 5
 RPS_WINDOW_SECONDS = 1
 HANDSHAKE_READ_LIMIT = 64
 HANDSHAKE_TIMEOUT_SECONDS = 1
-# Each node's filtered_distance: median -> Kalman -> FFT low-pass, with the same
-# settings as the game's per-sensor chain (filterRules.FilterConfig, and the
-# tuning block in game.js). The Kalman is tracking.ConstantVelocityTracker.
+# Each node's filtered_distance: median -> Kalman -> FFT low-pass. Noise and
+# cutoff settings match the game's chain; unlike the browser, this per-node
+# chain resets on a bearing change and uses measured timing for the FFT.
 _DISTANCE_CHAIN = FilterConfig()
 MEDIAN_WINDOW = _DISTANCE_CHAIN.median_window
 FFT_WINDOW = _DISTANCE_CHAIN.fft_window
@@ -119,6 +119,8 @@ def new_node(address, device_id=None):
         "median_samples": deque(maxlen=MEDIAN_WINDOW),
         "distance_tracker": new_distance_tracker(),
         "distance_samples": deque(maxlen=FFT_WINDOW),
+        "distance_times": deque(maxlen=FFT_WINDOW),
+        "distance_angle": None,
         "filtered_distance": None,
         "rps": 0.0,
         "conn": None,
@@ -206,6 +208,8 @@ def reuse_or_register_node(address, claimed_node_id, device_id=None, conn=None):
             node["median_samples"].clear()
             node["distance_tracker"].reset()
             node["distance_samples"].clear()
+            node["distance_times"].clear()
+            node["distance_angle"] = None
             node["filtered_distance"] = None
             node["synced"] = False
             node["has_turn"] = False
@@ -267,7 +271,7 @@ def parse_distance_cm(payload):
             distance = float(distance)
         except (TypeError, ValueError):
             distance = None
-    return distance
+    return distance if distance is None or np.isfinite(distance) else None
 
 
 def new_distance_tracker():
@@ -276,33 +280,47 @@ def new_distance_tracker():
 
 
 def update_distance(node, payload, now):
-    """One reading into the node's filtered_distance: median, then Kalman,
-    then the FFT low-pass once FFT_MIN_SAMPLES Kalman outputs are in. `now` is
-    the reading's time in seconds (time.monotonic())."""
+    """Condition one echo at its measured servo angle, then publish its range.
+
+    A range at a different bearing describes a different point in space. Never
+    carry a median, Kalman velocity or FFT history across a change in bearing.
+    The FFT assumes evenly spaced samples, so skip it for irregular scan timing.
+    """
     distance = parse_distance_cm(payload)
-    # No distance, or no echo (negative): nothing to filter, and the last value
-    # stands. A -1 in the median window would drag it towards zero.
     if distance is None or distance < 0:
         return
 
+    angle = parse_angle_deg(payload)
     medians = node["median_samples"]
     tracker = node["distance_tracker"]
     history = node["distance_samples"]
-    # After a gap the Kalman starts a new track (a node waits out the other
-    # node's scanning turn, for one); the windows before it start again too.
-    if tracker.alive and now - tracker.t_reading_s > tracker.gap_reset_s:
+    times = node["distance_times"]
+    if angle != node["distance_angle"] or (tracker.alive and
+            now - tracker.t_reading_s > tracker.gap_reset_s):
         medians.clear()
+        tracker.reset()
         history.clear()
+        times.clear()
+    node["distance_angle"] = angle
 
     medians.append(distance)
-    smoothed = float(np.median(medians))
-    tracked = tracker.update(smoothed, now)
+    tracked = tracker.update(float(np.median(medians)), now)
     history.append(tracked)
-    if len(history) >= FFT_MIN_SAMPLES:
-        filtered = fft_filter_ultrasonic(history, DISTANCE_SAMPLE_RATE_HZ, DISTANCE_CUTOFF_HZ)
-        node["filtered_distance"] = float(filtered[-1])
-    else:
-        node["filtered_distance"] = float(tracked)
+    times.append(now)
+    node["filtered_distance"] = float(tracked)
+    if len(history) < FFT_MIN_SAMPLES:
+        return
+
+    intervals = np.diff(times)
+    # A missed pulse or a changed reporting rate breaks the uniformly sampled
+    # FFT model. Kalman still uses the actual timestamps in that case.
+    if np.any(intervals <= 0):
+        return
+    period = float(np.median(intervals))
+    if np.any(np.abs(intervals - period) > 0.2 * period):
+        return
+    node["filtered_distance"] = float(fft_filter_ultrasonic(
+        history, 1.0 / period, DISTANCE_CUTOFF_HZ)[-1])
 
 
 def ms_since_turn(node, now):
