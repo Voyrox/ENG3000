@@ -336,7 +336,10 @@ function syncNodesPulses() {
 // while they are still learning is ignored rather than starting over.
 function learnRoom() {
   if (window.getGameRoomStatus() === "learning") return;
-  if (sendToServer({ type: "nodes:room", action: "learn" })) console.info("[scan] Learning the room");
+  if (sendToServer({ type: "nodes:room", action: "learn" })) {
+    window.noteGameRoomRequested();
+    console.info("[scan] Learning the room");
+  }
 }
 
 // The loop keeps running across the game <-> alert boundary so the sensors are

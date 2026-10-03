@@ -501,7 +501,7 @@
   // `canvas` and `orderedNodes` are only needed in sensor mode; orderedNodes is
   // [left, centre, right] in calibration slot order.
   window.updateGame = function updateGame(now, canvas, orderedNodes) {
-    roomStatus = readRoomStatus(orderedNodes);
+    updateRoomStatus(orderedNodes);
     if (gameState.inputMode === "sensor" && canvas) {
       if (serverCoordinateActive) {
         applyServerCoordinate(canvas, orderedNodes);
@@ -875,6 +875,26 @@
   }
 
   window.getGameRoomStatus = () => roomStatus;
+
+  // A press shows as learning straight away: the nodes' first learning reading
+  // takes a second or two to arrive, and a second press would start the sweep
+  // over. Once a node reports learning, its readings take over.
+  const ROOM_REQUEST_GRACE_MS = 5000;
+  let roomRequestedAt = -Infinity;
+
+  window.noteGameRoomRequested = function noteGameRoomRequested() {
+    roomRequestedAt = performance.now();
+    roomStatus = "learning";
+  };
+
+  function updateRoomStatus(orderedNodes) {
+    roomStatus = readRoomStatus(orderedNodes);
+    if (roomStatus === "learning") {
+      roomRequestedAt = -Infinity;
+    } else if (performance.now() - roomRequestedAt < ROOM_REQUEST_GRACE_MS) {
+      roomStatus = "learning";
+    }
+  }
 
   // --- Per-sensor conditioning ----------------------------------------------
 
@@ -2048,7 +2068,7 @@
     let detail = "";
     if (roomStatus === "learning") {
       message = "Learning the room";
-      detail = "Keep the play area clear until the button stops flashing";
+      detail = "Keep the play area clear until the Room button says learned";
     } else if (status === "no-signal") {
       // Nothing seen at all: nobody is on the board.
       message = "Out of bounds";
