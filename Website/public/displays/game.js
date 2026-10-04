@@ -200,6 +200,16 @@
     // steady, and past that line of sight wins, then trilateration, then the
     // average. Python: FilterConfig dynamic_steady_ms.
     dynamicSteadyMs: 1000,
+    // Neither node has found the player (both of its heads hearing them) for
+    // this long (ms), and both still do not (half-found or lost): nobody is
+    // on the board, and the game says Out of bounds at once, without riding
+    // it out on the last cell (holdReadings, holdTimeoutMs). Half-found does
+    // not count as seeing the player: with nobody there the nodes half-find
+    // the floor and furniture (a third of the readings in the empty room on
+    // 4 Oct). Aaron: 1-2 s; he chose 2 s, which in that run's replay said Out
+    // of bounds for 72 % of the empty room and never at a still spot. Python:
+    // FilterConfig nobody_found_ms.
+    nobodyFoundMs: 2000,
   };
 
   window.tuneSensor = function tuneSensor(partial) {
@@ -1298,6 +1308,7 @@
     resetDynamic();
     lastSeenStamp.fill(null);
     heardAt.fill(-Infinity);
+    foundAt.fill(-Infinity);
     closeStreak = 0;
     lastColumn = null;
     lastSeenFrameSeq = sensorFrameSeq;
@@ -1479,9 +1490,10 @@
   const LOS_RANGE_SIGMA_CM = 3;           // a filtered distance, along the line of sight
   const LOS_V0_SIGMA_CM_S = 100;          // a new track's velocity uncertainty
   const LOS_GATE_NIS = 13.8;              // chi-square, 2 dof, 99.9 %: further off is an outlier
-  const LOS_RELOCK_READINGS = 6;          // outliers in a row that move the track instead
+  const LOS_RELOCK_READINGS = 6;          // one node's outliers in a row that move the track instead
   const LOS_TRACK_TIMEOUT_MS = 1500;      // no usable reading for this long: no position
   const LOS_BOTH_WINDOW_MS = 2500;        // both nodes fed the track within this: source "both"
+  const SCAN_FOUND = 0;                   // scanState: both heads hear the player
   const SCAN_LOST = 2;                    // scanState: sweeping, the player is not in sight
 
   // Small dense matrices as arrays of rows, multiplied in a fixed order so the
@@ -1550,7 +1562,7 @@
       aimedAt: [null, null, null],          // the servo angle each slot's aim was last taken at
       aimRepeats: [0, 0, 0],                // readings in a row that have used that aim since
       lastSlot: null,
-      outliers: 0,                          // readings in a row that failed the gate
+      outliers: [0, 0, 0],                  // each slot's readings in a row that failed the gate
     };
   }
 
@@ -1577,7 +1589,7 @@
       [0, 0, 0, v0],
     ];
     losTrack.t = now / 1000;
-    losTrack.outliers = 0;
+    losTrack.outliers = [0, 0, 0];
     losTook(slot, now);
   }
 
@@ -1598,12 +1610,15 @@
     losTrack.t = t;
   }
 
-  // A reading the gate turned away. LOS_RELOCK_READINGS of those in a row mean
-  // the player is somewhere else, and the track restarts at this reading.
+  // A reading the gate turned away. LOS_RELOCK_READINGS of those in a row from
+  // one node mean the player is somewhere else, and the track restarts at this
+  // reading. Counted per node: the other node's readings can pass the gate on
+  // the slack across its line (the player's width) while this node's distance
+  // keeps saying the track is wrong, and must not keep it from moving.
   // Returns whether it did.
   function losOutlier(m, slot, now) {
-    losTrack.outliers += 1;
-    if (losTrack.outliers < LOS_RELOCK_READINGS) return false;
+    losTrack.outliers[slot] += 1;
+    if (losTrack.outliers[slot] < LOS_RELOCK_READINGS) return false;
     losStart(m, slot, now);
     return true;
   }
@@ -1617,7 +1632,7 @@
     const KH = matMul(K, H);
     const A = KH.map((row, i) => row.map((value, j) => (i === j ? 1 : 0) - value));
     losTrack.P = matAdd(matMul(matMul(A, P), matTranspose(A)), matMul(matMul(K, R), matTranspose(K)));
-    losTrack.outliers = 0;
+    losTrack.outliers[slot] = 0;
     losTook(slot, now);
   }
 
@@ -1808,6 +1823,7 @@
   // `fresh` mask serverFilter.py hands filterRules.py.
   const lastSeenStamp = [null, null, null];
   const heardAt = [-Infinity, -Infinity, -Infinity];   // ms, a slot's last new reading
+  const foundAt = [-Infinity, -Infinity, -Infinity];   // ms, its last new one with both heads on the player
 
   function freshSlots(list, raw, isNewReading, now) {
     return raw.map((value, slot) => {
@@ -1819,6 +1835,22 @@
       if (isNew && value !== null) heardAt[slot] = now;
       return isNew;
     });
+  }
+
+  // Whether neither node has been finding the player: each node's latest
+  // reading is half-found or lost (not both of its heads hear the player),
+  // and neither node has found them in tuning.nobodyFoundMs. The nodes take
+  // turns, so the one waiting for its turn still says what it saw on its last
+  // one. A node that sends no scan state never counts. Notes this update's
+  // new readings that found the player first. TwoSensorGeometry._nobody_found()
+  // in filterRules.py.
+  function neitherNodeFinds(scans, fresh, now) {
+    [LEFT_SENSOR, RIGHT_SENSOR].forEach((slot) => {
+      if (fresh[slot] && scans[slot].state === SCAN_FOUND) foundAt[slot] = now;
+    });
+    const searching = (slot) => scans[slot].state !== null && scans[slot].state !== SCAN_FOUND;
+    return searching(LEFT_SENSOR) && searching(RIGHT_SENSOR) &&
+      now - Math.max(foundAt[LEFT_SENSOR], foundAt[RIGHT_SENSOR]) >= tuning.nobodyFoundMs;
   }
 
   // Input:  [left, centre, right] node records, nulls allowed (calibration order).
@@ -1841,6 +1873,9 @@
   //               the middle of the player, bodyCentreCm(), turned by its servo
   //               angle) - what corner calibration captures,
   //   scans:      [l, c, r] each node's scanner fields, see readScan(),
+  //   nobodyFound: neither node has found the player in tuning.nobodyFoundMs
+  //               (neitherNodeFinds()) - "no-signal", shown as Out of bounds
+  //               with no hold,
   //   configured: how many sensors currently have a usable value
   // }
   function readSensorCoordinate(orderedNodes) {
@@ -1863,6 +1898,7 @@
     const filtered = raw.map((value, slot) =>
       fresh[slot] ? conditionSensor(sensorFilters[slot], value, now, angles[slot]) : sensorFilters[slot].value);
     if (isNewReading) stepLosTrack(filtered, scans, fresh, now);
+    const nobodyFound = neitherNodeFinds(scans, fresh, now);
     const fixes = solvePositions(filtered, angles, now);
     if (isNewReading) stepDynamic(fixes, now);
     const following = dynamicLeader(fixes, now);
@@ -1876,7 +1912,7 @@
 
     const base = {
       raw, filtered, depth, scans, configured, isNewReading, fresh, heardMsAgo,
-      fixes, method: positioning.method, placedBy,
+      fixes, method: positioning.method, placedBy, nobodyFound: false,
       column: null, distanceCm: null, xCm: null, yCm: null, source: null,
     };
 
@@ -1903,6 +1939,15 @@
     if (tooClose) {
       const column = position ? columnAtCm(x) : null;
       return { ...base, column, distanceCm: rawMin, status: "too-close" };
+    }
+
+    // Neither node has found the player for a while (neitherNodeFinds()):
+    // nobody is on the board, whatever any method still makes of old or
+    // stray readings. nobodyFound tells updateSensorCursor() not to ride it
+    // out on the last cell.
+    if (nobodyFound) {
+      lastColumn = null;
+      return { ...base, status: "no-signal", nobodyFound: true };
     }
 
     if (position === null) {
@@ -2161,11 +2206,12 @@
 
     // Ride out a short burst of bad readings on the last known-good cell. A
     // handful of rejects in a row is normal for unfiltered ultrasonics and must
-    // not throw the player out of the game.
+    // not throw the player out of the game. Not when neither node has found
+    // the player for tuning.nobodyFoundMs: that wait was the grace.
     const withinBudget = badReadingStreak <= tuning.holdReadings;
     const withinTimeout = now - sensorHold.lastOkAt <= tuning.holdTimeoutMs;
 
-    if (sensorHold.grid && withinBudget && withinTimeout) {
+    if (sensorHold.grid && withinBudget && withinTimeout && !fix.nobodyFound) {
       const held = sensorHold.grid;
       // While held, the fix belongs to the BAD reading, so the last good
       // position is the one shown - exactly as the last good cell is.

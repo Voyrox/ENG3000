@@ -156,6 +156,18 @@ function buildStream() {
     push(scanned(SENSOR_X_CM[0], 120, 60), scanned(SENSOR_X_CM[1], 120, 60));
   }
 
+  // 16. Both scanners lose the player for 3 s: the cursor rides it out until
+  //     neither has found them for tuning.nobodyFoundMs (2 s), then nobody is
+  //     on the board at once, with no hold - even while, for the second half,
+  //     the left one half-finds furniture (one head hears it), which is not
+  //     the player. Then both find the player again.
+  for (let i = 0; i < 40; i++) push(scanned(SENSOR_X_CM[0], 70, 90), scanned(SENSOR_X_CM[1], 70, 90));
+  for (let i = 0; i < 150; i++) {
+    const sweep = 40 + ((i * 15) % 120);
+    push(i < 75 ? [NO_ECHO, sweep, 2] : [jitter(120, 2), 70, 1], [NO_ECHO, 180 - sweep, 2]);
+  }
+  for (let i = 0; i < 40; i++) push(scanned(SENSOR_X_CM[0], 70, 90), scanned(SENSOR_X_CM[1], 70, 90));
+
   return steps;
 }
 

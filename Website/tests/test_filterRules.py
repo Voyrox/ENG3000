@@ -802,11 +802,26 @@ class TwoSensorGeometryBehaviour(unittest.TestCase):
         self.assertAlmostEqual(fix.x_cm, 120.0, delta=1.0)
 
     def test_the_track_is_dropped_when_nothing_usable_arrives(self):
+        # The track's own timeout, so not the nobody-found rule, which would
+        # otherwise end it at the same moment.
+        self.config = FilterConfig(nobody_found_ms=math.inf)
         self.scan(scanner_sample(40.0, 70.0), now_ms=0.0)
         lost = [(None, 60, 2), None, (None, 120, 2)]
         timeout = self.config.los_track_timeout_ms
         self.assertEqual(self.scan(lost, now_ms=timeout).status, STATUS_OK)
         self.assertEqual(self.scan(lost, now_ms=timeout + 1).status, STATUS_NO_SIGNAL)
+
+    def test_one_nodes_readings_turned_away_restart_the_track(self):
+        # Both nodes report at once. When the player turns up somewhere else,
+        # the left node's new reading can still pass the gate on the slack
+        # across its line (the player's width) while the right node's distance
+        # says the track is far off. The right node's turned-away readings are
+        # counted on their own, so the track moves within a few updates.
+        for k in range(20):
+            self.scan(scanner_sample(80.0, 95.0), now_ms=50.0 * k)
+        for k in range(self.config.los_relock_readings + 2):
+            fix = self.scan(scanner_sample(120.0, 60.0), now_ms=1000.0 + 50.0 * k)
+        self.assertLess(math.dist((fix.x_cm, fix.y_cm), (120.0, 60.0)), 5.0)
 
     def test_an_unknown_method_is_refused(self):
         with self.assertRaises(ValueError):
@@ -837,6 +852,96 @@ class TwoSensorGeometryBehaviour(unittest.TestCase):
         fix = self.locate(self.geometry.channels(two_sensor_sample(60.0, 80.0)))
         self.assertAlmostEqual(fix.x_cm, 60.0)
         self.assertAlmostEqual(fix.y_cm, 80.0)
+
+
+class NobodyFound(unittest.TestCase):
+    """Neither node finding the player (both heads) for nobody_found_ms:
+    nobody is on the board (no-signal, shown as Out of bounds), with no
+    hold."""
+
+    STEP_MS = 50.0
+
+    def run_for(self, pipe, sample, start_ms, ms):
+        """Feeds the same sample every STEP_MS from start_ms; the last result."""
+        result = None
+        k = 0
+        while k * self.STEP_MS <= ms:
+            result = pipe.update(sample, start_ms + k * self.STEP_MS)
+            k += 1
+        return result
+
+    def lost(self, left_echo=None):
+        return [(left_echo, 60, 2), None, (None, 120, 2)]
+
+    def test_after_nobody_found_ms_nobody_is_on_the_board(self):
+        for method in ("los", "tri", "avg"):
+            pipe = CoordinatePipeline(TwoSensorGeometry(method=method))
+            found = self.run_for(pipe, scanner_sample(75.0, 80.0), 0.0, 1000.0)
+            self.assertEqual(found.status, STATUS_OK, method)
+            wait = pipe.config.nobody_found_ms
+            # Just short of it, the player is still on the board (the track, or
+            # the last cell ridden out).
+            riding = self.run_for(pipe, self.lost(), 1000.0 + self.STEP_MS, wait - 2 * self.STEP_MS)
+            self.assertEqual(riding.status, STATUS_OK, method)
+            # From nobody_found_ms after the last reading that found the player:
+            # nobody, and not held, though the hold's budget is far from spent.
+            gone = pipe.update(self.lost(), 1000.0 + wait)
+            self.assertEqual(gone.status, STATUS_NO_SIGNAL, method)
+            self.assertFalse(gone.held, method)
+            # Found again: back at once.
+            back = self.run_for(pipe, scanner_sample(75.0, 80.0), 1000.0 + wait + self.STEP_MS, 500.0)
+            self.assertEqual(back.status, STATUS_OK, method)
+            self.assertFalse(back.held, method)
+
+    def test_half_found_on_stray_echoes_is_still_nobody(self):
+        # With nobody there the nodes half-find the floor and furniture: one
+        # head hears something. That is not the player.
+        pipe = CoordinatePipeline(TwoSensorGeometry())
+        self.run_for(pipe, scanner_sample(75.0, 80.0), 0.0, 500.0)
+        stray = [(120.0, 60, 1), None, (90.0, 120, 1)]
+        wait = pipe.config.nobody_found_ms
+        self.assertEqual(self.run_for(pipe, stray, 550.0, wait - 200.0).status, STATUS_OK)
+        self.assertEqual(self.run_for(pipe, stray, 500.0 + wait, 0.0).status, STATUS_NO_SIGNAL)
+
+    def test_a_stray_echo_while_both_sweep_is_still_nobody(self):
+        # The left node's beam finds furniture while it sweeps: trilateration
+        # would place it, but a sweeping node is saying it does not see the
+        # player.
+        pipe = CoordinatePipeline(TwoSensorGeometry(method="tri"))
+        self.run_for(pipe, scanner_sample(75.0, 80.0), 0.0, 500.0)
+        result = self.run_for(pipe, self.lost(left_echo=120.0), 550.0, pipe.config.nobody_found_ms)
+        self.assertEqual(result.status, STATUS_NO_SIGNAL)
+
+    def test_one_node_still_finding_the_player_is_not_nobody_found(self):
+        pipe = CoordinatePipeline(TwoSensorGeometry())
+        sample = scanner_sample(100.0, 70.0)
+        sample[0] = (None, 60, 2)
+        result = self.run_for(pipe, sample, 0.0, 3000.0)
+        self.assertEqual(result.status, STATUS_OK)
+        self.assertFalse(result.held)
+
+    def test_the_node_waiting_for_its_turn_counts_by_its_last_reading(self):
+        # Turns: the right node found the player on its last turn, so while
+        # the left one sweeps alone, the right one is not lost yet.
+        pipe = CoordinatePipeline(TwoSensorGeometry())
+        self.run_for(pipe, scanner_sample(75.0, 80.0), 0.0, 500.0)
+        right_found = scanner_sample(75.0, 80.0)[2]
+        result = None
+        for k in range(1, 61):       # 3 s of the left node's turn
+            result = pipe.update([(None, 60, 2), None, right_found], 500.0 + 50.0 * k,
+                                 fresh=[True, False, False])
+        self.assertNotEqual(result.status, STATUS_NO_SIGNAL)
+
+    def test_nodes_without_a_scan_state_never_count_as_lost(self):
+        geometry = TwoSensorGeometry()
+        geometry.channels([(None, 60), None, (None, 120)])
+        geometry.track([None] * 3, [True] * 3, 10_000.0, PlayArea.default(), FilterConfig())
+        self.assertFalse(geometry._nobody_found(FilterConfig()))
+
+    def test_the_wait_is_tunable(self):
+        pipe = CoordinatePipeline(TwoSensorGeometry(), config=FilterConfig(nobody_found_ms=400.0))
+        self.run_for(pipe, scanner_sample(75.0, 80.0), 0.0, 500.0)
+        self.assertEqual(pipe.update(self.lost(), 900.0).status, STATUS_NO_SIGNAL)
 
 
 class CartesianGeometryBehaviour(unittest.TestCase):

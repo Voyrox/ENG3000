@@ -225,6 +225,40 @@ test("every method's fix comes with its ring on the board, the method in use and
   assert.deepStrictEqual(JSON.parse(JSON.stringify(after.fixes)).avg, { ...after.fixes.avg });
 });
 
+test("both nodes sweeping and finding nobody: Out of bounds after nobodyFoundMs, not ridden out", () => {
+  const w = loadWindow();
+  w.setGameInputMode("sensor");
+  w.resetGame();
+  const nobodyFoundMs = w.tuneSensor({}).nobodyFoundMs;
+  const sweeping = [0, 1, 2].map((slot) => ({
+    id: slot + 1,
+    online: true,
+    latest: JSON.stringify({ avg: -1, angle: slot === 0 ? 60 : 120, scanState: 2 }),
+  }));
+  // One clock across the phases, so the wait is measured from the last
+  // reading that found the player.
+  let t = 0;
+  const step = (nodes, ms) => {
+    for (const end = t + ms; t < end;) {
+      t += FRAME_MS;
+      w.performance.now = () => t;
+      w.markSensorFrame();
+      w.updateGame(t, CANVAS, nodes);
+    }
+    return w.getGameState().sensor;
+  };
+  assert.strictEqual(step(scannersSeeing(75, 80), 2000).status, "ok");
+  const lostAt = t;
+  const riding = step(sweeping, nobodyFoundMs - 3 * FRAME_MS);
+  assert.strictEqual(riding.status, "ok", "the player is still on the board just short of it");
+  const gone = step(sweeping, lostAt + nobodyFoundMs + FRAME_MS - t);
+  assert.strictEqual(gone.status, "no-signal", "shown as Out of bounds");
+  assert.strictEqual(gone.nobodyFound, true);
+  assert.strictEqual(gone.held, false, "not ridden out on the last cell");
+  assert.strictEqual(w.getGameCursorStatus(CANVAS).board, null);
+  assert.strictEqual(step(scannersSeeing(75, 80), 500).status, "ok", "back as soon as a node finds them");
+});
+
 test("a ring off the side of the board stays at the board's edge; no signal has no fixes", () => {
   const w = loadWindow();
   w.setGameInputMode("sensor");

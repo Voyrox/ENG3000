@@ -148,6 +148,11 @@ class FilterConfig:
     # (DynamicPicker).
     dynamic_steady_ms: float = 1000.0
 
+    # Neither node has found the player (both heads) for this long, and both
+    # still do not (half-found or lost): nobody is on the board, no-signal at
+    # once, with no hold (tuning.nobodyFoundMs; TwoSensorGeometry._nobody_found()).
+    nobody_found_ms: float = 2000.0
+
     # Geometry (COLUMN_MARGIN_CM)
     column_margin_cm: float = 8.0
 
@@ -313,6 +318,7 @@ class Fix:
     x_cm: Optional[float] = None
     y_cm: Optional[float] = None
     column: Optional[int] = None
+    nobody_found: bool = False  # no-signal because neither node finds the player: no hold
     distance_cm: Optional[float] = None
 
 
@@ -674,6 +680,7 @@ OFF_BOARD = -1         # DynamicPicker: a position off the board is a square too
 # copy): a distance outside it is not a reading. SENSOR_*_CM in game.js.
 SENSOR_MIN_CM = 2.0
 SENSOR_MAX_CM = 400.0
+SCAN_FOUND = 0         # scanState: both heads hear the player
 SCAN_LOST = 2          # scanState: sweeping, the player is not in its line of sight
 
 
@@ -743,7 +750,7 @@ class LineOfSightTracker:
     every reading (line_of_sight(repeats=...)): the aim repeats the same
     error, and taking it in full again and again would drown the other node's
     distance. Readings far from where the track expects the player are left
-    out; los_relock_readings of those in a row restart the track there.
+    out; los_relock_readings of those in a row from one node restart the track there.
     """
 
     LEFT = 0
@@ -761,7 +768,7 @@ class LineOfSightTracker:
         self.aimed_at = [None] * GRID_SIZE
         self.aim_repeats = [0] * GRID_SIZE
         self.last_slot: Optional[int] = None
-        self.outliers = 0
+        self.outliers = [0] * GRID_SIZE   # each slot's readings in a row that failed the gate
 
     def step(self, filtered, angles, states, fresh, now_ms: float,
              area: PlayArea, config: FilterConfig) -> None:
@@ -807,7 +814,7 @@ class LineOfSightTracker:
                   [0, 0, v0, 0],
                   [0, 0, 0, v0]]
         self.t = now_ms / 1000
-        self.outliers = 0
+        self.outliers = [0] * GRID_SIZE
         self._took(slot, now_ms)
 
     def _predict(self, t: float, config: FilterConfig) -> None:
@@ -827,8 +834,11 @@ class LineOfSightTracker:
         self.t = t
 
     def _outlier(self, m, slot, now_ms, config) -> bool:
-        self.outliers += 1
-        if self.outliers < config.los_relock_readings:
+        # Counted per node, as losOutlier() does: the other node's readings can
+        # pass the gate on the slack across its line while this one's distance
+        # keeps saying the track is wrong.
+        self.outliers[slot] += 1
+        if self.outliers[slot] < config.los_relock_readings:
             return False
         self._start(m, slot, now_ms, config)
         return True
@@ -847,7 +857,7 @@ class LineOfSightTracker:
              for i, row in enumerate(KH)]
         self.P = _mat_add(_mat_mul(_mat_mul(A, P), _mat_transpose(A)),
                           _mat_mul(_mat_mul(K, R), _mat_transpose(K)))
-        self.outliers = 0
+        self.outliers[slot] = 0
         self._took(slot, now_ms)
 
     def _observe(self, m, slot, now_ms, config) -> bool:
@@ -992,6 +1002,7 @@ class TwoSensorGeometry(Geometry):
         self._last_column: Optional[int] = None
         self._angles: list = [None] * GRID_SIZE
         self._states: list = [None] * GRID_SIZE
+        self._found_ms = [-math.inf] * GRID_SIZE
         self._now_ms = -math.inf
         self._config: Optional[FilterConfig] = None
 
@@ -1015,6 +1026,7 @@ class TwoSensorGeometry(Geometry):
         self._last_column = None
         self._angles = [None] * GRID_SIZE
         self._states = [None] * GRID_SIZE
+        self._found_ms = [-math.inf] * GRID_SIZE
         self._now_ms = -math.inf
 
     def channels(self, sample) -> list:
@@ -1042,7 +1054,21 @@ class TwoSensorGeometry(Geometry):
         self._now_ms = now_ms
         self._config = config
         self._los.step(filtered, self._angles, self._states, fresh, now_ms, area, config)
+        for slot in (self.LEFT, self.RIGHT):
+            if fresh[slot] and self._states[slot] == SCAN_FOUND:
+                self._found_ms[slot] = now_ms
         self._dynamic.step(self._picked_from(filtered, area), now_ms, area)
+
+    def _nobody_found(self, config) -> bool:
+        """neitherNodeFinds() in game.js: each node's latest reading is
+        half-found or lost (not both of its heads hear the player) and neither
+        node has found the player in nobody_found_ms. A node that sends no scan
+        state never counts."""
+        searching = [self._states[slot] is not None and self._states[slot] != SCAN_FOUND
+                     for slot in (self.LEFT, self.RIGHT)]
+        return (all(searching)
+                and self._now_ms - max(self._found_ms[self.LEFT], self._found_ms[self.RIGHT])
+                >= config.nobody_found_ms)
 
     def _picked_from(self, filtered, area) -> dict:
         """The positions Dynamic picks between: {"los", "tri", "avg"} ->
@@ -1123,6 +1149,11 @@ class TwoSensorGeometry(Geometry):
         return area.column_at(_clamp(where[0], 0.0, area.width_cm))
 
     def locate(self, filtered, area, config) -> Fix:
+        # Neither node has found the player for a while: nobody is on the
+        # board, whatever any method still makes of old or stray readings.
+        if self._nobody_found(config):
+            self._last_column = None
+            return Fix(STATUS_NO_SIGNAL, nobody_found=True)
         where = self.position(filtered, area)
         if where is None:
             self._last_column = None
@@ -1411,7 +1442,8 @@ class CoordinatePipeline:
 
         self.hold.record(False)
         within_timeout = now_ms - self._last_ok_ms <= self.config.hold_timeout_ms
-        if self._held_cell is not None and self.hold.keep_holding() and within_timeout:
+        if (self._held_cell is not None and self.hold.keep_holding() and within_timeout
+                and not fix.nobody_found):
             gx, gy = self._held_cell
             x, y = self._held_xy
             return FilteredCoordinate(STATUS_OK, x_cm=x, y_cm=y, gx=gx, gy=gy,
