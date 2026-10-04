@@ -75,7 +75,7 @@ constexpr double SOUND_CM_PER_US = 0.034;
 // A reading inside this range is taken to be the player; outside it there is no
 // target.
 constexpr float MIN_TARGET_CM = 10;
-constexpr float MAX_TARGET_CM = 180;
+constexpr float MAX_TARGET_CM = 230;
 
 // How long a reading may wait for its echo. pulseIn() counts from the trigger,
 // not from the start of the echo pulse, and the HC-SR04 only raises ECHO about
