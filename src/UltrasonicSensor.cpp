@@ -13,6 +13,7 @@ void UltrasonicSensor::begin() {
 
 float UltrasonicSensor::readCm() {
     // A clean 10 us trigger pulse.
+    noInterrupts();
     digitalWrite(trigPin_, LOW);
     delayMicroseconds(2);
     digitalWrite(trigPin_, HIGH);
@@ -21,7 +22,8 @@ float UltrasonicSensor::readCm() {
 
     // The echo pin's high time is the round trip, in microseconds.
     unsigned long durationUs = pulseIn(echoPin_, HIGH, config::ECHO_TIMEOUT_US);
-
+    interrupts(); // let the echo pin's pulse happen
+    
     // A timeout reads as zero, which would come out as a distance of 0 cm - a
     // target pressed against the sensor. Report silence as silence instead.
     if (durationUs == 0) {
