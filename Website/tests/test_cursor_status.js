@@ -196,18 +196,20 @@ test("every method's fix comes with its ring on the board, the method in use and
   run(w, scannersSeeing(75, 80));
 
   const sensor = w.getGameCursorStatus(CANVAS).sensor;
-  assert.strictEqual(sensor.method, "los", "line of sight is the default");
+  assert.strictEqual(sensor.method, "dyn", "Dynamic is the default");
+  assert.ok(["los", "tri", "avg"].includes(sensor.placedBy), `Dynamic follows ${sensor.placedBy}`);
   assert.strictEqual(sensor.compare, true, "Compare starts on");
-  ["los", "tri", "avg"].forEach((method) => {
+  ["dyn", "los", "tri", "avg"].forEach((method) => {
     const fix = sensor.fixes[method];
     assert.ok(fix, `${method} has a fix`);
     assert.ok(Math.hypot(fix.xCm - 75, fix.yCm - 80) < 3, `${method} at ${fix.xCm}, ${fix.yCm}`);
     // 80 cm deep in the centre column is the centre of the board.
     assert.ok(Math.abs(fix.nx - 0.5) < 0.03 && Math.abs(fix.ny - 0.5) < 0.03, `${method} ${fix.nx}, ${fix.ny}`);
   });
-  // The cursor's own (x, y) is the method in use.
-  assert.strictEqual(sensor.xCm, sensor.fixes.los.xCm);
-  assert.strictEqual(sensor.yCm, sensor.fixes.los.yCm);
+  // The cursor's own (x, y) is Dynamic's, which is the method it follows.
+  assert.strictEqual(sensor.xCm, sensor.fixes.dyn.xCm);
+  assert.strictEqual(sensor.yCm, sensor.fixes.dyn.yCm);
+  assert.strictEqual(sensor.xCm, sensor.fixes[sensor.placedBy].xCm);
 
   // Switching method and turning Compare off both show up in the status.
   w.setPositionMethod("tri");
@@ -215,6 +217,7 @@ test("every method's fix comes with its ring on the board, the method in use and
   run(w, scannersSeeing(75, 80), 2);
   const after = w.getGameCursorStatus(CANVAS).sensor;
   assert.strictEqual(after.method, "tri");
+  assert.strictEqual(after.placedBy, "tri");
   assert.strictEqual(after.compare, false);
   assert.strictEqual(after.xCm, after.fixes.tri.xCm);
 
@@ -238,5 +241,14 @@ test("a ring off the side of the board stays at the board's edge; no signal has 
   silent.resetGame();
   run(silent, [1, 2, 3].map((id) => ({ id, online: true, latest: JSON.stringify({ avg: -1 }) })));
   const none = silent.getGameCursorStatus(CANVAS).sensor.fixes;
-  assert.strictEqual(JSON.stringify(none), JSON.stringify({ los: null, tri: null, avg: null }));
+  assert.strictEqual(JSON.stringify(none), JSON.stringify({ dyn: null, los: null, tri: null, avg: null }));
+});
+
+test("the switch offers Dynamic first, and picking another method turns it off", () => {
+  const w = loadWindow();
+  assert.strictEqual(JSON.stringify(w.getPositionMethods().map((m) => m.id)), JSON.stringify(["dyn", "los", "tri", "avg"]));
+  assert.strictEqual(w.getPositionMethod(), "dyn");
+  assert.strictEqual(w.setPositionMethod("los"), "los");
+  assert.strictEqual(w.setPositionMethod("dyn"), "dyn");
+  assert.strictEqual(w.setPositionMethod("steady"), "dyn", "an unknown method is ignored");
 });

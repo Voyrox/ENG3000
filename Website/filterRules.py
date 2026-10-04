@@ -143,6 +143,11 @@ class FilterConfig:
     body_radius_cm: float = 15.0
     body_half_width_cm: float = 20.0
 
+    # Dynamic, the default position method (tuning.dynamicSteadyMs): a method
+    # that has kept the player in one square this long counts as fully steady
+    # (DynamicPicker).
+    dynamic_steady_ms: float = 1000.0
+
     # Geometry (COLUMN_MARGIN_CM)
     column_margin_cm: float = 8.0
 
@@ -659,7 +664,11 @@ class UltrasonicArrayGeometry(Geometry):
                    column=column, distance_cm=best)
 
 
-POSITION_METHODS = ("los", "tri", "avg")
+POSITION_METHODS = ("dyn", "los", "tri", "avg")
+# The methods Dynamic picks between, in the order that breaks a tie
+# (DYNAMIC_METHODS in game.js).
+DYNAMIC_METHODS = ("los", "tri", "avg")
+OFF_BOARD = -1         # DynamicPicker: a position off the board is a square too
 
 # The sensors' datasheet range (HC-SR04; the RCWL-1601 is a pin-compatible
 # copy): a distance outside it is not a reading. SENSOR_*_CM in game.js.
@@ -866,6 +875,75 @@ class LineOfSightTracker:
         return True
 
 
+class DynamicPicker:
+    """Dynamic, the "dyn" position method: which of line of sight,
+    trilateration and the average has kept the player in one square of the
+    board the longest. Port of stepDynamic() and dynamicLeader() in game.js.
+
+    A method whose square keeps changing (bouncing between columns, say)
+    never builds up any time, so it is passed over while another holds still.
+    Time in a square counts up to dynamic_steady_ms. Past that a method is
+    fully steady, and of two fully steady methods the first in
+    DYNAMIC_METHODS wins: line of sight, then trilateration, then the
+    average. So a method stuck on something that never moves can lead only
+    until line of sight has held its own square that long.
+
+    A square is a cell of the board (gx * 3 + gy), or OFF_BOARD. A method
+    with no position has no square and is out of the running until it has
+    one again.
+    """
+
+    def __init__(self):
+        self.reset()
+
+    def reset(self) -> None:
+        self._square = dict.fromkeys(DYNAMIC_METHODS)
+        self._since = dict.fromkeys(DYNAMIC_METHODS)
+
+    @staticmethod
+    def square_of(fix: Optional[tuple], area: PlayArea) -> Optional[int]:
+        """squareOf() in game.js: the square a position (x_cm, y_cm) is in,
+        or None for no position. No hysteresis: a position that flicks back
+        and forth across a boundary changes square every time."""
+        if fix is None:
+            return None
+        x, y = fix
+        if not 0.0 <= x <= area.width_cm:
+            return OFF_BOARD
+        column = area.column_at(x)
+        if not area.contains(column, y):
+            return OFF_BOARD
+        return column * GRID_SIZE + area.row_for(column, y)
+
+    def step(self, fixes: dict, now_ms: float, area: PlayArea) -> None:
+        """Once per update: each method's square, and since when it has been
+        in it."""
+        for method in DYNAMIC_METHODS:
+            square = self.square_of(fixes[method], area)
+            if square is None:
+                self._square[method] = None
+                self._since[method] = None
+            elif square != self._square[method]:
+                self._square[method] = square
+                self._since[method] = now_ms
+
+    def leader(self, fixes: dict, now_ms: float, config: FilterConfig) -> Optional[str]:
+        """The method Dynamic follows now, or None when none has a position.
+        A position not yet stepped (just after a reset) has been held for no
+        time."""
+        leader = None
+        best = -math.inf
+        for method in DYNAMIC_METHODS:
+            if fixes[method] is None:
+                continue
+            since = self._since[method]
+            held = 0.0 if since is None else min(now_ms - since, config.dynamic_steady_ms)
+            if held > best:
+                best = held
+                leader = method
+        return leader
+
+
 class TwoSensorGeometry(Geometry):
     """Two nodes, LEFT and RIGHT, on the screen line at the centres of the
     outer columns. Port of the positioning in game.js (solvePositions() and
@@ -879,8 +957,11 @@ class TwoSensorGeometry(Geometry):
     first (body_centre_cm()). method picks how that becomes a position, as the
     game's position switch does:
 
+      "dyn" - Dynamic, the default: whichever of the other three has kept the
+              player in one square the longest (DynamicPicker, stepped by
+              track() once per update).
       "los" - line of sight: LineOfSightTracker, fed by track() once per
-              update. The default.
+              update.
       "tri" - trilateration of the two distances: each distance is a circle
               around its node, and where the two circles cross is the player,
               if the crossing lies inside both nodes' beams (in_beam(), within
@@ -892,7 +973,7 @@ class TwoSensorGeometry(Geometry):
       "avg" - the midpoint of the two.
 
     With no angle from either node (firmware from before the scanner) there is
-    no line of sight, and every method is trilateration.
+    no line of sight, and line of sight and the average are trilateration.
 
     Sample: [left, centre, right]. Each entry is a distance in cm, a
     (distance_cm, angle_deg) pair, or a (distance_cm, angle_deg, scan_state)
@@ -904,9 +985,10 @@ class TwoSensorGeometry(Geometry):
     LEFT = 0
     RIGHT = 2
 
-    def __init__(self, method: str = "los"):
+    def __init__(self, method: str = "dyn"):
         self.method = method
         self._los = LineOfSightTracker()
+        self._dynamic = DynamicPicker()
         self._last_column: Optional[int] = None
         self._angles: list = [None] * GRID_SIZE
         self._states: list = [None] * GRID_SIZE
@@ -929,6 +1011,7 @@ class TwoSensorGeometry(Geometry):
 
     def reset(self) -> None:
         self._los.reset()
+        self._dynamic.reset()
         self._last_column = None
         self._angles = [None] * GRID_SIZE
         self._states = [None] * GRID_SIZE
@@ -959,10 +1042,11 @@ class TwoSensorGeometry(Geometry):
         self._now_ms = now_ms
         self._config = config
         self._los.step(filtered, self._angles, self._states, fresh, now_ms, area, config)
+        self._dynamic.step(self._picked_from(filtered, area), now_ms, area)
 
-    def fixes(self, filtered, area) -> dict:
-        """Every method's position: {"los", "tri", "avg"} -> (x_cm, y_cm) or
-        None. Pure apart from reading the tracker."""
+    def _picked_from(self, filtered, area) -> dict:
+        """The positions Dynamic picks between: {"los", "tri", "avg"} ->
+        (x_cm, y_cm) or None (solvePositions() in game.js)."""
         tri = self._trilaterate(filtered, area)
         if self._angles[self.LEFT] is None and self._angles[self.RIGHT] is None:
             return {"los": tri, "tri": tri, "avg": tri}
@@ -971,6 +1055,26 @@ class TwoSensorGeometry(Geometry):
         if los and tri:
             avg = ((los[0] + tri[0]) / 2, (los[1] + tri[1]) / 2)
         return {"los": los, "tri": tri, "avg": avg}
+
+    def _leader(self, picked_from: dict) -> Optional[str]:
+        return self._dynamic.leader(picked_from, self._now_ms, self._config or FilterConfig())
+
+    def fixes(self, filtered, area) -> dict:
+        """Every method's position: {"dyn", "los", "tri", "avg"} ->
+        (x_cm, y_cm) or None. Pure apart from reading the tracker and the
+        picker."""
+        fixes = self._picked_from(filtered, area)
+        leader = self._leader(fixes)
+        fixes["dyn"] = fixes[leader] if leader else None
+        return fixes
+
+    def placed_by(self, filtered, area) -> Optional[str]:
+        """placedBy in game.js: "los", "tri" or "avg", the method the
+        position comes from - the one switched on, or the one Dynamic
+        follows (None when no method has a position)."""
+        if self.method != "dyn":
+            return self.method
+        return self._leader(self._picked_from(filtered, area))
 
     def position(self, filtered, area) -> Optional[tuple]:
         """(x_cm, y_cm) by the chosen method, or None. x is not yet clamped

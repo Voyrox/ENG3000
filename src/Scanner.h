@@ -3,6 +3,7 @@
 #include <Arduino.h>
 
 #include "Config.h"
+#include "DeadZoneAlarm.h"
 #include "RoomMap.h"
 #include "ScannerServo.h"
 #include "UltrasonicSensor.h"
@@ -51,9 +52,12 @@ struct ScanReading {
 // button), an echo from the room - a chair, a desk, the wall - counts as no
 // echo, so the scan sweeps past furniture instead of locking on to it. See
 // RoomMap.h.
+//
+// Dead zone: every pair the scan acts on (the room taken out) also goes to the
+// dead-zone alarm, with the angle it was read at. See DeadZoneAlarm.h.
 class Scanner {
 public:
-    Scanner(UltrasonicSensor& left, UltrasonicSensor& right, ScannerServo& servo);
+    Scanner(UltrasonicSensor& left, UltrasonicSensor& right, ScannerServo& servo, DeadZoneAlarm& deadZone);
 
     void begin();
 
@@ -110,6 +114,7 @@ private:
     UltrasonicSensor& leftSensor_;
     UltrasonicSensor& rightSensor_;
     ScannerServo& servo_;
+    DeadZoneAlarm& deadZone_;
 
     // The pair being read.
     bool readLeftNext_ = true;

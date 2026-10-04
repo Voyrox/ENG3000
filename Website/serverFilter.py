@@ -92,8 +92,9 @@ class ServerFilterStage:
         self.predicted_cm = [None] * GRID_SIZE
 
     def set_position_method(self, method: str) -> None:
-        """The game's position switch: "los" (line of sight), "tri"
-        (trilateration) or "avg" (the two averaged). ValueError otherwise, or
+        """The game's position switch: "dyn" (Dynamic, the steadiest of the
+        other three), "los" (line of sight), "tri" (trilateration) or "avg"
+        (the two averaged). ValueError otherwise, or
         if the pipeline's geometry has no methods to choose from."""
         if not hasattr(self.pipeline.geometry, "method"):
             raise ValueError("this geometry has no position methods")

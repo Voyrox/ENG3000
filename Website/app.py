@@ -83,7 +83,7 @@ SERVER_FILTERING = server_filtering_enabled(os.environ)
 # The phone control panel (/control) only exists when explicitly switched on:
 #   CON=1 python app.py
 CONTROL_ENABLED = os.environ.get("CON") == "1"
-# "position" is the position switch: line of sight, trilateration or their average.
+# "position" is the position switch: Dynamic, line of sight, trilateration or their average.
 CONTROL_ACTIONS = {"point", "release", "start", "mode", "pause", "resume", "restart", "menu", "testMode",
                    "position"}
 # Every raw node reading to logs/raw-*.csv, for the bench noise test
@@ -767,7 +767,7 @@ def apply_filter_event(event):
                 server_filter.set_calibration(
                     [(c["near"], c["far"]) for c in event["perColumn"]])
             elif event.get("type") == "position:method":
-                # The game's position switch: line of sight, trilateration or both.
+                # The game's position switch: Dynamic, line of sight, trilateration or both.
                 server_filter.set_position_method(event["method"])
     except (KeyError, TypeError, ValueError) as exc:
         print(f"Ignored bad {event.get('type')} message: {exc}")

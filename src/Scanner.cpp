@@ -35,8 +35,8 @@ ScanState ScanReading::classify(float leftCm, float rightCm) {
 
 // --- Scanner ----------------------------------------------------------------
 
-Scanner::Scanner(UltrasonicSensor& left, UltrasonicSensor& right, ScannerServo& servo)
-    : leftSensor_(left), rightSensor_(right), servo_(servo) {}
+Scanner::Scanner(UltrasonicSensor& left, UltrasonicSensor& right, ScannerServo& servo, DeadZoneAlarm& deadZone)
+    : leftSensor_(left), rightSensor_(right), servo_(servo), deadZone_(deadZone) {}
 
 void Scanner::begin() {
     leftSensor_.begin();
@@ -57,6 +57,7 @@ bool Scanner::update() {
     // From here on an echo from the room is no echo: it is not the player.
     PulsePair pair = {withoutRoom(Side::Left, heard.leftCm), withoutRoom(Side::Right, heard.rightCm)};
     logPair(heard, pair);
+    deadZone_.hear(pair.leftCm, pair.rightCm, servo_.angleDeg());
 
     if (pulseCount_ < config::MAX_PULSES_PER_ANGLE) {
         pulses_[pulseCount_++] = pair;

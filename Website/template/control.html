@@ -106,9 +106,10 @@
         gameCursor.id = "gameCursor";
         pad.appendChild(gameCursor);
 
-        // Compare, as on the game board: a ring for where each position method
-        // puts the player, in the game's colours. The cursor above follows the
-        // method in use, eased; the rings are where each method is right now.
+        // Compare, as on the game board: a ring for where line of sight,
+        // trilateration and the average put the player, in the game's colours.
+        // The cursor above follows the one placing the player (with Dynamic on,
+        // the one Dynamic follows), eased; the rings are where each is right now.
         const METHOD_STYLES = {
             los: { short: "LOS", colour: "#22d3ee" },
             tri: { short: "TRI", colour: "#e879f9" },
@@ -193,11 +194,13 @@
             });
         });
 
-        // The position switch: how the sensors place the player - line of
-        // sight, trilateration or their average. The game sends the methods it
+        // The position switch: how the sensors place the player - Dynamic (the
+        // steadiest of the other three), line of sight, trilateration or their
+        // average. The game sends the methods it
         // has, and the one in use, with its status, so a new method shows up
         // here without changing this page.
         const DEFAULT_POSITION_METHODS = [
+            { id: "dyn", label: "Dynamic" },
             { id: "los", label: "Line of sight" },
             { id: "tri", label: "Trilateration" },
             { id: "avg", label: "Average" },
@@ -302,7 +305,7 @@
                 const fix = fixes[method];
                 const on = show && Boolean(fix) && fix.nx != null && fix.ny != null;
                 ring.classList.toggle("on", on);
-                ring.classList.toggle("inUse", Boolean(sensor) && sensor.method === method);
+                ring.classList.toggle("inUse", Boolean(sensor) && placedBy(sensor) === method);
                 if (!on) return;
                 const clamp = (v) => Math.min(1, Math.max(0, v));
                 ring.style.left = `${clamp(fix.nx) * 100}%`;
@@ -310,8 +313,14 @@
             });
         }
 
+        // The method placing the player: the one switched on, or the one
+        // Dynamic follows. A game from before Dynamic sends only the method.
+        function placedBy(sensor) {
+            return sensor.placedBy || sensor.method;
+        }
+
         // Every method's (x, y) side by side, as the game's sensor panel lists
-        // them; the one in use is bold.
+        // them; the one placing the player is bold.
         function renderMethodFixes(sensor) {
             const box = $("methodFixes");
             if (!sensor || !sensor.fixes) {
@@ -322,7 +331,7 @@
                 const fix = sensor.fixes[method];
                 const item = document.createElement("span");
                 item.style.color = fix ? style.colour : "#63736f";
-                item.classList.toggle("inUse", sensor.method === method);
+                item.classList.toggle("inUse", placedBy(sensor) === method);
                 item.textContent = `${style.short} ${fix ? `(${fix.xCm.toFixed(0)}, ${fix.yCm.toFixed(0)})` : "--"}`;
                 return item;
             }));

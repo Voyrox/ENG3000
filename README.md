@@ -53,7 +53,7 @@ build_flags =
 
 **Calibration** is the game's sensor-assignment screen: both servos are held still at 90 degrees (`AIM 90`) for the whole screen - through both steps, LEFT then RIGHT - while the operator aims the nodes straight out into the play area by hand and identifies each node with a hand in front of it; each live-readings row shows the angle the node reports, amber if it is not 90; Start Game then lets the nodes scan again (`SCAN`). There is no play-area (corner) calibration: the game plays on the default bounds, rows between 20 and 140 cm in every column. Each game page asks for the hold with `{"type": "nodes:aim", "hold": true}` and releases it with `false`; the servos stay held while any open page is on the calibration screen, so another tab or device on a different screen cannot release them, and a page that closes stops holding.
 
-The game puts each node on the screen edge at the centre of an outer column. In sensor mode, three buttons above the sensor panel pick how the player is placed - **Line of sight** (the default), **Trilateration** or **Average** (the same switch is on the **Options** screen, under *Placing the Player*, and on the phone's `/control` page) - and **Compare** draws all three on the board as labelled rings (LOS, TRI, AVG) while the big cursor follows the chosen one; the sensor panel lists all three positions. See *Placing the player* under the filtering pipeline. With no `angle` from either node there is no line of sight, and every method is trilateration.
+The game puts each node on the screen edge at the centre of an outer column. In sensor mode, four buttons above the sensor panel pick how the player is placed - **Dynamic** (the default), **LOS** (line of sight), **TRI** (trilateration) or **AVG** (their average); the same switch is on the **Options** screen, under *Placing the Player*, and on the phone's `/control` page. Picking LOS, TRI or AVG turns Dynamic off. **Compare** draws line of sight, trilateration and the average on the board as labelled rings (LOS, TRI, AVG) while the big cursor follows the one placing the player (the thick ring); with Dynamic on, its button says which one it is following (e.g. `DYN TRI`). The sensor panel lists all three positions. See *Placing the player* under the filtering pipeline. With no `angle` from either node there is no line of sight, and every method is trilateration.
 
 The board is drawn with the row **nearest the screen at the top**, so stepping towards the screen moves the cursor up. Only the drawing is flipped (`boardRow()` in `game.js`, one switch, `NEAR_ROW_AT_TOP`): grid row `gy = 0` is still the row nearest the screen everywhere else, and left/right is unchanged. The phone control panel's touchpad maps onto the board as drawn.
 
@@ -140,14 +140,32 @@ goes offline), extrapolation capped at 250 ms, extra display lead 0 s until
 the end-to-end latency is measured. Tests are in
 `Website/tests/test_tracking.py` and `Website/tests/test_serverFilter.py`.
 
-### Placing the player: line of sight, trilateration, average
+### Placing the player: Dynamic, line of sight, trilateration, average
 
 The nodes scan one at a time (the server hands out 1 s turns), so the two
 are never read at the same moment, and a node that has lost the player keeps
 reporting whatever its beam hits while it sweeps. The position methods
 (`solvePositions()` in `game.js`, `TwoSensorGeometry(method=...)` here):
 
-- **Line of sight** (`los`, the default). Each node's reading is a point along
+- **Dynamic** (`dyn`, the default): whichever of the other three has kept the
+  player in one square of the board the longest (`dynamicLeader()`,
+  `DynamicPicker` here). A method whose square keeps changing - bouncing
+  between columns - builds up no time, so it is passed over while another
+  holds still. Time in a square counts up to 1 s (`tuneSensor({
+  dynamicSteadyMs })`, Python `FilterConfig(dynamic_steady_ms=...)`); past
+  that a method is fully steady, and of two fully steady methods line of
+  sight wins, then trilateration, then the average. So a method stuck on
+  furniture can lead only until line of sight has held its own square for
+  1 s. A square is a cell, or off the board (out of bounds counts as a
+  square); a method with no position is out of the running. Replaying the
+  4 Oct centre run (`logs/centre-20261004-154946`) through `filterRules.py`,
+  Dynamic changed column least on every spot (C-120: 23 times, against 29-33
+  for the others; walk-centre: 22 against 27-32) and kept x in the spot's
+  column as often as the best single method, or more (walk-centre 77 %,
+  against 61-73 %) - except at R-80, where every method was poor (servo aims
+  ~15° off) and Dynamic held steady in the wrong column (4 %, line of sight
+  37 % with 24 column changes).
+- **Line of sight** (`los`). Each node's reading is a point along
   its line of sight - its distance along its servo angle - with an
   uncertainty that is small along the line (3 cm) and grows across it with
   the distance and with how sure the node is of its aim: 4° when both of its
@@ -182,7 +200,8 @@ The game's **Options** screen has the same switch under *Placing the
 Player*. The phone control panel (`/control`, server started with `CON=1`)
 has it under *Placing the player*, and shows which method is in use. Its pad
 also draws Compare's rings (LOS, TRI, AVG) where each method puts the player,
-lists each method's (x, y), and its Sensors table gives each node's servo
+lists each method's (x, y) - the one placing the player, or Dynamic is
+following, in bold - and its Sensors table gives each node's servo
 angle and scan state (found, half, lost) from the node's latest message. Its
 buttons come from the game's status, so a new method appears there by itself.
 In the browser console, `tuneSensor({ losAccelCmS2, losBearingFoundDeg,

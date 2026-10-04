@@ -5,6 +5,7 @@
 
 #include "CommandHandler.h"
 #include "Config.h"
+#include "DeadZoneAlarm.h"
 #include "NodeConnection.h"
 #include "Scanner.h"
 #include "ScannerServo.h"
@@ -14,7 +15,8 @@
 UltrasonicSensor leftSensor(config::LEFT_TRIG_PIN, config::LEFT_ECHO_PIN);
 UltrasonicSensor rightSensor(config::RIGHT_TRIG_PIN, config::RIGHT_ECHO_PIN);
 ScannerServo scannerServo(config::SERVO_PIN);
-Scanner scanner(leftSensor, rightSensor, scannerServo);
+DeadZoneAlarm deadZone(config::BUZZER_PIN);
+Scanner scanner(leftSensor, rightSensor, scannerServo, deadZone);
 
 NodeConnection connection;
 CommandHandler commands(connection, scanner);
@@ -22,11 +24,17 @@ CommandHandler commands(connection, scanner);
 void setup() {
     Serial.begin(config::SERIAL_BAUD);
     Serial.println("ESP32 Node is starting...");
+    // First, so the buzzer is held quiet through the Wi-Fi connect.
+    deadZone.begin();
     connection.begin();
     scanner.begin();
 }
 
 void loop() {
+    // Every loop, so a buzzer that went on before a HALT or a dropped connection
+    // still goes off.
+    deadZone.update();
+
     if (!connection.isReady()) {
         commands.reset();
         connection.reconnect();

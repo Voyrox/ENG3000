@@ -3,8 +3,9 @@ centre_test.py - rig test for the centre column, where the player's x keeps
 bouncing back.
 
 Logs every scanner-node reading and the game's own position (the x and y the
-cursor is drawn from, its cell, and where each method - line of sight,
-trilateration, average - puts the player) while someone stands on spots marked
+cursor is drawn from, its cell, where each method - Dynamic, line of sight,
+trilateration, average - puts the player, and which one Dynamic followed)
+while someone stands on spots marked
 on the floor. Then it reports, for each spot, where each node on its own puts
 the player, how often each node was lost, whether the servo can turn far
 enough to face the spot, and what was happening each time x left the column.
@@ -86,7 +87,7 @@ SERVO_LIMITS = {"LEFT": (40.0, 160.0), "RIGHT": (30.0, 140.0)}
 AT_LIMIT_DEG = 2.0          # an angle this close to the inward limit is "at the limit"
 FOUND, HALF, LOST = 0, 1, 2
 STATE_NAMES = {FOUND: "found", HALF: "half", LOST: "lost"}
-METHODS = ("los", "tri", "avg")
+METHODS = ("dyn", "los", "tri", "avg")
 
 WS_PORT = 8765
 DEFAULT_SERVER = "127.0.0.1"
@@ -119,9 +120,9 @@ CELL_LAG_S = 1.0            # the mole cell's vote trails x by up to this
 
 READING_COLUMNS = ("t_s", "step", "phase", "node_id", "has_turn", "turn_ms",
                    "left_cm", "right_cm", "avg_cm", "angle_deg", "scan_state", "room")
-GAME_COLUMNS = ("t_s", "step", "phase", "screen", "mode", "round", "method", "status",
-                "held", "source", "x_cm", "y_cm", "gx", "gy", "board_nx", "board_ny",
-                "los_x", "los_y", "tri_x", "tri_y", "avg_x", "avg_y")
+GAME_COLUMNS = ("t_s", "step", "phase", "screen", "mode", "round", "method", "placed_by",
+                "status", "held", "source", "x_cm", "y_cm", "gx", "gy", "board_nx", "board_ny",
+                "dyn_x", "dyn_y", "los_x", "los_y", "tri_x", "tri_y", "avg_x", "avg_y")
 TURN_COLUMNS = ("t_s", "step", "phase", "node_id", "has_turn")
 
 
@@ -344,6 +345,7 @@ class RunLog:
             "t_s": t, "step": self.step, "phase": self.phase,
             "screen": event.get("screen"), "mode": event.get("mode"), "round": event.get("status"),
             "method": sensor.get("method") or event.get("positionMethod"),
+            "placed_by": sensor.get("placedBy"),
             "status": sensor.get("status"),
             "held": sensor.get("held") if sensor else None,
             "source": sensor.get("source"),
@@ -633,6 +635,9 @@ class GameRow:
     gx: Optional[int]
     gy: Optional[int]
     fixes: dict
+    # The method the position came from: the one switched on, or the one
+    # Dynamic followed. None in a run from before Dynamic.
+    placed_by: Optional[str] = None
 
 
 @dataclass
@@ -672,7 +677,9 @@ def load_run(folder):
         t=_num(r["t_s"]) or 0.0, step=r["step"], phase=r["phase"], screen=r["screen"],
         mode=r["mode"], method=r["method"], status=r["status"], held=r["held"] == "1",
         source=r["source"], x=_num(r["x_cm"]), y=_num(r["y_cm"]), gx=_int(r["gx"]), gy=_int(r["gy"]),
-        fixes={m: (_num(r[f"{m}_x"]), _num(r[f"{m}_y"])) for m in METHODS},
+        # A run from before Dynamic has no dyn_x, dyn_y or placed_by.
+        fixes={m: (_num(r.get(f"{m}_x")), _num(r.get(f"{m}_y"))) for m in METHODS},
+        placed_by=r.get("placed_by") or None,
     ) for r in _rows(folder / "game.csv")]
     turns = [(_num(r["t_s"]) or 0.0, _int(r["node_id"]), r["has_turn"] == "1")
              for r in _rows(folder / "turns.csv")]
@@ -928,6 +935,7 @@ class GameStats:
     method_used: Optional[str]
     expected_n: int = 0         # samples a visible game page sends in the time
     bounces: list = field(default_factory=list)
+    followed: dict = field(default_factory=dict)   # with Dynamic on: method -> % of samples
 
     @property
     def covered(self):
@@ -955,6 +963,9 @@ def game_stats(rows, step, start_s, readings, turns, roles, seconds=0.0):
                                                            len(mx)),
                            len(mx))
     used = [g.method for g in sensor if g.method]
+    dynamic = [g.placed_by for g in sensor if g.method == "dyn" and g.placed_by]
+    followed = {m: pct(dynamic.count(m), len(dynamic)) for m in sorted(set(dynamic), key=dynamic.count,
+                                                                       reverse=True)}
     return GameStats(
         n=len(rows), sensor_n=len(sensor),
         ok_pct=pct(sum(1 for g in sensor if g.status == "ok" and not g.held), len(sensor)),
@@ -973,6 +984,7 @@ def game_stats(rows, step, start_s, readings, turns, roles, seconds=0.0):
         method_used=max(set(used), key=used.count) if used else None,
         expected_n=int(seconds * GAME_RATE_HZ),
         bounces=[] if column is None else find_bounces(with_x, column, start_s, readings, turns, roles),
+        followed=followed,
     )
 
 
@@ -1251,13 +1263,15 @@ def format_report(run, result):
                          "angle med", "angle needed", "reachable", "limit %", "dist med",
                          "dist true", "x med", "x p10..p90", "y med", "x in col %"], rows))
 
-    lines += ["", "## Each method", "", "x median and share in the spot's column, per method.", ""]
+    lines += ["", "## Each method", "", "x median and share in the spot's column, per method,",
+              "and which method Dynamic followed (with Dynamic on).", ""]
     rows = []
     for r in result["steps"]:
         g = r["game"]
+        follows = ", ".join(f"{m} {p:.0f}%" for m, p in g.followed.items()) or "--"
         rows.append([r["step"].name] + [f"{_f(g.methods[m][0])} / {_f(g.methods[m][1])}%"
-                                        for m in METHODS])
-    lines.append(_table(["spot"] + list(METHODS), rows))
+                                        for m in METHODS] + [follows])
+    lines.append(_table(["spot"] + list(METHODS) + ["dyn follows"], rows))
 
     for r in result["steps"]:
         bounces = r["game"].bounces

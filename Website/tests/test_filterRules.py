@@ -35,8 +35,10 @@ from filterRules import (  # noqa: E402
     CellStabiliser,
     ChannelFilter,
     CoordinatePipeline,
+    DynamicPicker,
     FilterConfig,
     MajorityWindowHold,
+    OFF_BOARD,
     PlayArea,
     ProximityGuard,
     StreakHold,
@@ -102,6 +104,10 @@ class ParityWithGameJs(unittest.TestCase):
             if got.status == STATUS_OK:
                 self.assertAlmostEqual(got.x_cm, expected["x"], delta=2e-6, msg=f"{where}, x")
                 self.assertAlmostEqual(got.y_cm, expected["y"], delta=2e-6, msg=f"{where}, y")
+            # And which method placed them: the run's own, or the one Dynamic
+            # followed.
+            self.assertEqual(pipeline.geometry.placed_by(got.filtered, area),
+                             run["placedBy"][i], f"{where}, placed by")
         return len(run["steps"])
 
     def test_default_bounds(self):
@@ -115,6 +121,18 @@ class ParityWithGameJs(unittest.TestCase):
 
     def test_average_of_line_of_sight_and_trilateration(self):
         self.assertGreater(self._replay("average"), 0)
+
+    def test_dynamic(self):
+        self.assertGreater(self._replay("dynamic"), 0)
+
+    def test_dynamic_on_calibrated_bounds(self):
+        self.assertGreater(self._replay("dynamicCalibrated"), 0)
+
+    def test_dynamic_follows_every_method_somewhere_on_the_recorded_stream(self):
+        # Otherwise the parity above would not show the picker agreeing.
+        for run in ("dynamic", "dynamicCalibrated"):
+            followed = set(self.trace["runs"][run]["placedBy"])
+            self.assertEqual(followed, {"los", "tri", "avg"}, run)
 
     def test_the_methods_really_differ_on_the_recorded_stream(self):
         runs = self.trace["runs"]
@@ -416,6 +434,116 @@ def two_sensor_sample(x_cm, depth_cm):
     of the outer columns (25 and 125 cm)."""
     return [math.hypot(x_cm - 25.0, depth_cm) - BODY_RADIUS_CM, None,
             math.hypot(x_cm - 125.0, depth_cm) - BODY_RADIUS_CM]
+
+
+class DynamicPickerBehaviour(unittest.TestCase):
+    """Dynamic: the method that has held its square longest places the player."""
+
+    # Squares on the default board (columns 50 cm wide, rows 40 cm deep from
+    # 20 cm out): A is the near-left cell, B the middle, C the far-right.
+    A = (25.0, 40.0)
+    B = (75.0, 80.0)
+    C = (125.0, 120.0)
+
+    def setUp(self):
+        self.picker = DynamicPicker()
+        self.area = PlayArea.default()
+        self.config = FilterConfig()
+
+    def at(self, now_ms, los, tri, avg):
+        """Steps the picker with these positions and returns its leader."""
+        fixes = {"los": los, "tri": tri, "avg": avg}
+        self.picker.step(fixes, now_ms, self.area)
+        return self.picker.leader(fixes, now_ms, self.config)
+
+    def test_squares_are_the_cells_of_the_board(self):
+        self.assertEqual(DynamicPicker.square_of(self.A, self.area), 0)
+        self.assertEqual(DynamicPicker.square_of(self.B, self.area), 4)
+        self.assertEqual(DynamicPicker.square_of(self.C, self.area), 8)
+        self.assertIsNone(DynamicPicker.square_of(None, self.area))
+
+    def test_off_the_board_is_a_square_of_its_own(self):
+        for where in ((-5.0, 80.0), (155.0, 80.0), (75.0, 400.0)):
+            self.assertEqual(DynamicPicker.square_of(where, self.area), OFF_BOARD, where)
+
+    def test_follows_the_method_that_has_held_its_square_longest(self):
+        self.at(0, self.A, self.A, self.A)
+        # Line of sight moves; the other two have held A for 200 ms, and
+        # trilateration comes before the average.
+        self.assertEqual(self.at(200, self.B, self.A, self.A), "tri")
+        self.assertEqual(self.at(300, self.B, self.A, self.B), "tri")
+
+    def test_a_method_that_keeps_changing_square_is_passed_over(self):
+        self.at(0, self.A, self.C, self.B)
+        for step in range(1, 20):
+            los = self.B if step % 2 else self.A   # bounces every 100 ms
+            self.assertEqual(self.at(step * 100, los, self.C, self.B), "tri", step)
+
+    def test_past_the_steady_time_line_of_sight_wins(self):
+        self.at(0, self.A, self.C, self.C)
+        self.at(500, self.B, self.C, self.C)
+        # Trilateration has held C 1.4 s, but counts only 1 s; line of sight
+        # has held B 0.9 s.
+        self.assertEqual(self.at(1400, self.B, self.C, self.C), "tri")
+        # Both fully steady: line of sight first.
+        self.assertEqual(self.at(1500, self.B, self.C, self.C), "los")
+        self.assertEqual(self.at(9000, self.B, self.C, self.C), "los")
+
+    def test_the_steady_time_is_tunable(self):
+        self.config = FilterConfig(dynamic_steady_ms=2000.0)
+        self.at(0, self.A, self.C, self.C)
+        self.at(500, self.B, self.C, self.C)
+        self.assertEqual(self.at(1500, self.B, self.C, self.C), "tri")
+        self.assertEqual(self.at(2500, self.B, self.C, self.C), "los")
+
+    def test_a_method_with_no_position_is_out_of_the_running(self):
+        self.at(0, self.A, self.C, self.C)
+        self.assertEqual(self.at(300, None, self.C, self.C), "tri")
+        # Back in A, line of sight starts its time again from 400 ms.
+        self.assertEqual(self.at(400, self.A, self.C, self.C), "tri")
+        self.assertEqual(self.at(1300, self.A, self.C, self.C), "tri")
+        self.assertEqual(self.at(1400, self.A, self.C, self.C), "los")
+        self.assertIsNone(self.at(1500, None, None, None))
+
+    def test_an_unstepped_position_has_been_held_for_no_time(self):
+        # As just after a reset: line of sight first, as on a tie.
+        fixes = {"los": self.A, "tri": self.C, "avg": self.B}
+        self.assertEqual(self.picker.leader(fixes, 0, self.config), "los")
+        fixes["los"] = None
+        self.assertEqual(self.picker.leader(fixes, 0, self.config), "tri")
+
+    def test_reset_forgets_every_square(self):
+        self.at(0, self.A, self.C, self.C)
+        self.at(500, self.B, self.C, self.C)
+        self.picker.reset()
+        self.assertEqual(self.at(600, self.B, self.C, self.C), "los")
+
+
+class DynamicPositionMethod(unittest.TestCase):
+    """TwoSensorGeometry's "dyn": the position comes from the method it follows."""
+
+    def test_dynamic_is_the_default(self):
+        self.assertEqual(TwoSensorGeometry().method, "dyn")
+
+    def test_an_unknown_method_is_refused(self):
+        with self.assertRaises(ValueError):
+            TwoSensorGeometry(method="steady")
+
+    def test_the_position_is_the_one_dynamic_follows(self):
+        pipe = CoordinatePipeline(TwoSensorGeometry(method="dyn"))
+        geometry = pipe.geometry
+        for step in range(40):
+            got = pipe.update(scanner_sample(70.0 + (step % 3), 90.0), step * 50.0)
+            fixes = geometry.fixes(got.filtered, pipe.area)
+            follows = geometry.placed_by(got.filtered, pipe.area)
+            self.assertIn(follows, ("los", "tri", "avg"), step)
+            self.assertEqual(fixes["dyn"], fixes[follows], step)
+            if got.status == STATUS_OK and not got.held:
+                self.assertAlmostEqual(got.x_cm, min(max(fixes[follows][0], 0.0), 150.0), msg=step)
+
+    def test_another_method_is_placed_by_itself(self):
+        geometry = TwoSensorGeometry(method="tri")
+        self.assertEqual(geometry.placed_by([None] * 3, PlayArea.default()), "tri")
 
 
 class TwoSensorGeometryBehaviour(unittest.TestCase):

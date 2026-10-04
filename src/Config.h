@@ -61,6 +61,8 @@ constexpr uint8_t LEFT_ECHO_PIN = 18;
 constexpr uint8_t RIGHT_TRIG_PIN = 16;
 constexpr uint8_t RIGHT_ECHO_PIN = 17;
 constexpr uint8_t SERVO_PIN = 32;
+// The dead-zone buzzer (D13 on the board).
+constexpr uint8_t BUZZER_PIN = 13;
 
 // --- Ultrasonic sensors ---------------------------------------------------
 // Returned when no echo came back. Distinct from a reading of 0 cm, which is
@@ -149,6 +151,28 @@ constexpr float ROOM_MARGIN_CM = 15;
 // ROOM_STEP_DEG of it - is within this of it. One stray echo would otherwise
 // hide everything behind it in that direction for good.
 constexpr float ROOM_MATCH_CM = 10;
+
+// --- Dead zone --------------------------------------------------------------
+// The buzzer sounds while the player is less than DEAD_ZONE_CM in front of the
+// line the nodes stand on. That is measured straight out from the line, not
+// along the beam, so it takes the servo angle into account: see DeadZoneAlarm.h.
+// The brief's dead zone ends 60 cm from the wall, so this is 60 minus how far
+// the nodes stand from the wall: 10 for nodes 50 cm out.
+constexpr float DEAD_ZONE_CM = 10;
+// Pairs in a row with an echo in the dead zone before the buzzer sounds, so one
+// stray echo does not.
+constexpr int DEAD_ZONE_PAIRS = 2;
+// Once it sounds, the nearest echo must be this much further out than
+// DEAD_ZONE_CM to silence it, so a player standing on the line does not make it
+// chatter.
+constexpr float DEAD_ZONE_CLEAR_CM = 3;
+// It stops by itself this long after the last pair in the dead zone. A node
+// reads nothing while the other node has the scanning turn (1 s), so this is
+// longer than a turn and the buzzer sounds on through it.
+constexpr unsigned long DEAD_ZONE_HOLD_MS = 1500;
+// 0 for an active buzzer, which beeps by itself on a steady HIGH. A passive one
+// only clicks on that: give it a tone in Hz instead (2000-4000 is loudest).
+constexpr unsigned int BUZZER_TONE_HZ = 0;
 
 // --- Servo ----------------------------------------------------------------
 // 90 points straight out into the play area; larger turns towards screen-left.

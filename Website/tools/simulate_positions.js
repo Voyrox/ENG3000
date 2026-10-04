@@ -5,7 +5,7 @@
 // is from where they really are, for each position method:
 //
 //     node Website/tools/simulate_positions.js
-//     node Website/tools/simulate_positions.js --methods los,tri --turn-ms 1000,250
+//     node Website/tools/simulate_positions.js --methods dyn,los --turn-ms 1000,250
 //     node Website/tools/simulate_positions.js --site path/to/other/public --seeds 5
 //
 // The rig: nodes at x = 25 and 125 cm on the screen line, their servo angles
@@ -37,7 +37,7 @@ const option = (name, fallback) => {
   return at === -1 ? fallback : args[at + 1];
 };
 const SITE = option("site", path.join(__dirname, "..", "public"));
-const METHODS = option("methods", "los,tri,avg").split(",");
+const METHODS = option("methods", "dyn,los,tri,avg").split(",");
 const TURNS_MS = option("turn-ms", "1000,0").split(",").map(Number);   // 0 = both nodes at once
 const SEEDS = Number(option("seeds", "3"));
 const DURATION_S = Number(option("duration", "45"));
@@ -132,7 +132,11 @@ function run(method, turnMs, seed) {
   const { game, setClock } = loadGame();
   const rand = lcg(seed);
   const canvas = { clientWidth: 1280, clientHeight: 720, width: 1280, height: 720 };
-  if (game.setPositionMethod) game.setPositionMethod(method);
+  // An older game (--site) without this method would quietly keep its own and
+  // be scored under the wrong name.
+  if (game.setPositionMethod && game.setPositionMethod(method) !== method) {
+    throw new Error(`this game has no position method "${method}"`);
+  }
   if (Object.keys(TUNE).length) game.tuneSensor(TUNE);
   game.setGameInputMode("sensor");
   game.resetGame();

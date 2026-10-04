@@ -195,6 +195,11 @@
     // spots. Python: FilterConfig body_radius_cm, body_half_width_cm.
     bodyRadiusCm: 15,
     bodyHalfWidthCm: 20,
+    // Dynamic, the default position method (see dynamicLeader()): a method
+    // that has kept the player in one square this long counts as fully
+    // steady, and past that line of sight wins, then trilateration, then the
+    // average. Python: FilterConfig dynamic_steady_ms.
+    dynamicSteadyMs: 1000,
   };
 
   window.tuneSensor = function tuneSensor(partial) {
@@ -782,6 +787,7 @@
         gx: hasCell ? sensor.gx : null,
         gy: hasCell ? sensor.gy : null,
         method: positioning.method,
+        placedBy: sensor.placedBy || null,
         // Compare's rings: drawn on the board only while Compare is on and
         // the browser places the player itself (renderPositionMarkers()).
         compare: positioning.compare && !serverCoordinateActive,
@@ -790,7 +796,7 @@
     };
   };
 
-  // Every method's position as Compare draws it: { los, tri, avg }, each
+  // Every method's position as Compare draws it: { dyn, los, tri, avg }, each
   // { xCm, yCm, nx, ny } or null. xCm and yCm are as the method placed the
   // player; nx and ny are its ring on the board, as fractions like board above
   // (x clamped to the board first, as the ring is).
@@ -1289,6 +1295,7 @@
       filter.angle = null;
     });
     resetLosTrack();
+    resetDynamic();
     lastSeenStamp.fill(null);
     heardAt.fill(-Infinity);
     closeStreak = 0;
@@ -1316,10 +1323,13 @@
   // --- Placing the player ----------------------------------------------------
   // The two nodes sit on the screen line at the centres of the outer columns.
   // Each is a servo scanner that reports its distance to the player and the
-  // servo angle it read at. Three ways to turn that into a position, switched
-  // with the buttons above the sensor panel (positioning.method):
+  // servo angle it read at. Three ways to turn that into a position, and a
+  // fourth that picks between them, switched with the buttons above the sensor
+  // panel (positioning.method):
   //
-  //   "los" - line of sight, the default. Each node's reading is a point along
+  //   "dyn" - Dynamic, the default: whichever of the other three has kept the
+  //           player in one square of the board the longest (dynamicLeader()).
+  //   "los" - line of sight. Each node's reading is a point along
   //           its line of sight (its distance along its servo angle), with an
   //           uncertainty that is small along the line - the distance is good
   //           - and grows across it with the distance, with how sure the node
@@ -1342,8 +1352,8 @@
   //           by its own distance along its servo angle.
   //   "avg" - the midpoint of the two.
   //
-  // All three are worked out on every update, so the board can show them side
-  // by side (Compare). Every method places the middle of the player: each
+  // All of them are worked out on every update, so the board can show them
+  // side by side (Compare). Every method places the middle of the player: each
   // distance has tuning.bodyRadiusCm added first (bodyCentreCm()). x picks the
   // column (the centre one included) and y, the depth from the screen, picks
   // the row. filterRules.py (TwoSensorGeometry) is the parity-tested Python
@@ -1692,11 +1702,84 @@
     return { los, tri, avg };
   }
 
+  // --- Dynamic: the steadiest method ------------------------------------------
+  // "dyn" places the player by whichever of line of sight, trilateration and
+  // the average has kept them in one square of the board the longest. A
+  // method whose square keeps changing - bouncing between columns, say -
+  // never builds up any time, so it is passed over while another holds still.
+  //
+  // Time in a square counts up to tuning.dynamicSteadyMs (1 s). Past that a
+  // method is fully steady, and of two fully steady methods the first in
+  // DYNAMIC_METHODS wins: line of sight, then trilateration, then the average.
+  // So a method stuck on something that never moves (furniture, say) can lead
+  // only until line of sight has held its own square for that long.
+  //
+  // A square is a cell of the board, or off it: out of bounds is a square too.
+  // A method with no position has no square and is out of the running until
+  // it has one again. Python: DynamicPicker in filterRules.py.
+  const DYNAMIC_METHODS = ["los", "tri", "avg"];
+  const OFF_BOARD = -1;
+  const dynamic = {
+    square: { los: null, tri: null, avg: null },   // gx * 3 + gy, OFF_BOARD, or null
+    since: { los: null, tri: null, avg: null },    // ms: when it entered that square
+  };
+
+  function resetDynamic() {
+    DYNAMIC_METHODS.forEach((method) => {
+      dynamic.square[method] = null;
+      dynamic.since[method] = null;
+    });
+  }
+
+  // The square a method's position is in, as above. No hysteresis: a position
+  // that flicks back and forth across a boundary changes square every time.
+  function squareOf(fix) {
+    if (!fix) return null;
+    if (fix.x < 0 || fix.x > PLAY_WIDTH_CM) return OFF_BOARD;
+    const column = columnAtCm(fix.x);
+    const grid = window.rawToGrid(column, fix.y, null);
+    if (!grid || !grid.inside) return OFF_BOARD;
+    return column * 3 + grid.gy;
+  }
+
+  // Once per new reading: each method's square, and since when it has been in
+  // it.
+  function stepDynamic(fixes, now) {
+    DYNAMIC_METHODS.forEach((method) => {
+      const square = squareOf(fixes[method]);
+      if (square === null) {
+        dynamic.square[method] = null;
+        dynamic.since[method] = null;
+      } else if (square !== dynamic.square[method]) {
+        dynamic.square[method] = square;
+        dynamic.since[method] = now;
+      }
+    });
+  }
+
+  // The method Dynamic follows right now, or null when none has a position. A
+  // position not yet stepped (just after a reset) has been held for no time.
+  function dynamicLeader(fixes, now) {
+    let leader = null;
+    let best = -Infinity;
+    DYNAMIC_METHODS.forEach((method) => {
+      if (!fixes[method]) return;
+      const since = dynamic.since[method];
+      const held = since === null ? 0 : Math.min(now - since, tuning.dynamicSteadyMs);
+      if (held > best) {
+        best = held;
+        leader = method;
+      }
+    });
+    return leader;
+  }
+
   // --- Which method places the player ----------------------------------------
-  const POSITION_METHODS = ["los", "tri", "avg"];
+  // In switch order. Choosing any but Dynamic turns Dynamic off.
+  const POSITION_METHODS = ["dyn", "los", "tri", "avg"];
   const positioning = {
-    method: "los",   // what drives the cursor and the game
-    compare: true,   // draw all three on the board
+    method: "dyn",   // what drives the cursor and the game
+    compare: true,   // draw line of sight, trilateration and the average on the board
   };
 
   window.getPositionMethod = function getPositionMethod() {
@@ -1749,8 +1832,11 @@
   //   filtered:   [l, c, r] after median, Kalman, FFT and hold,
   //   fresh:      [l, c, r] whether each slot brought a new reading this update,
   //   heardMsAgo: [l, c, r] ms since each node's last new reading,
-  //   fixes:      { los, tri, avg } - every method's position, see solvePositions(),
-  //   method:     the method the position above came from,
+  //   fixes:      { dyn, los, tri, avg } - every method's position, see
+  //               solvePositions() and dynamicLeader(),
+  //   method:     the method switched on,
+  //   placedBy:   "los" | "tri" | "avg" - the method the position above came
+  //               from: the method switched on, or the one Dynamic follows,
   //   depth:      [l, c, r] each node's own depth reading (filtered distance to
   //               the middle of the player, bodyCentreCm(), turned by its servo
   //               angle) - what corner calibration captures,
@@ -1778,6 +1864,10 @@
       fresh[slot] ? conditionSensor(sensorFilters[slot], value, now, angles[slot]) : sensorFilters[slot].value);
     if (isNewReading) stepLosTrack(filtered, scans, fresh, now);
     const fixes = solvePositions(filtered, angles, now);
+    if (isNewReading) stepDynamic(fixes, now);
+    const following = dynamicLeader(fixes, now);
+    fixes.dyn = following ? fixes[following] : null;
+    const placedBy = positioning.method === "dyn" ? following : positioning.method;
     const configured = filtered.filter((d) => d !== null).length;
     const depth = filtered.map((distance, slot) =>
       distance === null || slot === 1 ? null
@@ -1786,7 +1876,7 @@
 
     const base = {
       raw, filtered, depth, scans, configured, isNewReading, fresh, heardMsAgo,
-      fixes, method: positioning.method,
+      fixes, method: positioning.method, placedBy,
       column: null, distanceCm: null, xCm: null, yCm: null, source: null,
     };
 
@@ -2560,8 +2650,9 @@
     { index: RIGHT_SENSOR, label: "R", source: "right" },
   ];
   const SOURCE_LABELS = { both: "L+R", left: "L only", right: "R only" };
-  // The three ways of placing the player, as the switch and the board show them.
+  // The ways of placing the player, as the switch and the board show them.
   const METHOD_STYLES = {
+    dyn: { label: "Dynamic", short: "DYN", colour: "#a3e635" },
     los: { label: "Line of sight", short: "LOS", colour: "#22d3ee" },
     tri: { label: "Trilateration", short: "TRI", colour: "#e879f9" },
     avg: { label: "Average", short: "AVG", colour: "#f8fafc" },
@@ -2682,13 +2773,14 @@
       ctx.fillText("x --  y -- cm", x + 16, posY);
     }
 
-    // Every method's position side by side; the one in use is bold.
+    // Every method's position side by side; the one placing the player (the
+    // one Dynamic follows, with Dynamic on) is bold.
     const compareY = posY + 18;
     const fixes = sensor.fixes || {};
-    POSITION_METHODS.forEach((method, k) => {
+    DYNAMIC_METHODS.forEach((method, k) => {
       const style = METHOD_STYLES[method];
       const fix = fixes[method];
-      const inUse = method === positioning.method;
+      const inUse = method === sensor.placedBy;
       ctx.font = `${inUse ? "bold " : ""}11px monospace`;
       ctx.fillStyle = fix ? style.colour : "#63736f";
       const where = fix ? `${fix.x.toFixed(0)},${fix.y.toFixed(0)}` : "--";
@@ -2725,20 +2817,30 @@
   }
 
   // --- Position switch ---------------------------------------------------------
-  // Sensor mode only: three buttons above the sensor panel pick the method that
-  // places the player, and Compare shows all three on the board.
+  // Sensor mode only: buttons above the sensor panel pick the method that
+  // places the player, and Compare shows line of sight, trilateration and the
+  // average on the board. The buttons share the width of the panel equally.
+  const POSITION_SWITCH_GAP = 4;   // px between buttons
 
   function getPositionSwitchLayout(canvas) {
     const height = canvas.clientHeight || canvas.height;
     const y = height - HUD_EDGE - SENSOR_PANEL_H - HUD_GAP - POSITION_SWITCH_H;
-    const buttons = [];
-    let x = HUD_EDGE;
-    POSITION_METHODS.forEach((method) => {
-      buttons.push({ kind: "method", method, x, y, width: 100, height: POSITION_SWITCH_H });
-      x += 104;
+    const count = POSITION_METHODS.length + 1;
+    const width = (SENSOR_PANEL_W - (count - 1) * POSITION_SWITCH_GAP) / count;
+    const buttons = POSITION_METHODS.map((method) => ({ kind: "method", method }));
+    buttons.push({ kind: "compare" });
+    buttons.forEach((b, k) => {
+      Object.assign(b, { x: HUD_EDGE + k * (width + POSITION_SWITCH_GAP), y, width, height: POSITION_SWITCH_H });
     });
-    buttons.push({ kind: "compare", x, y, width: HUD_EDGE + SENSOR_PANEL_W - x, height: POSITION_SWITCH_H });
     return { top: y, buttons };
+  }
+
+  // A method button's label: short, to fit, and Dynamic says which method it
+  // is following while it is on.
+  function positionButtonLabel(method) {
+    if (method !== "dyn") return METHOD_STYLES[method].short;
+    const following = gameState.sensor && gameState.sensor.placedBy;
+    return positioning.method === "dyn" && following ? `DYN ${METHOD_STYLES[following].short}` : "Dynamic";
   }
 
   // The button under (x, y), while a sensor-mode round is playing, or null.
@@ -2768,21 +2870,21 @@
       ctx.textAlign = "center";
       ctx.font = "bold 11px monospace";
       ctx.fillStyle = on ? "#13131c" : colour;
-      const label = b.kind === "method" ? METHOD_STYLES[b.method].label : "Compare";
+      const label = b.kind === "method" ? positionButtonLabel(b.method) : "Compare";
       ctx.fillText(label, b.x + b.width / 2, b.y + b.height / 2 + 4);
     });
     ctx.textAlign = "start";
   }
 
-  // Compare: each method's position as a small labelled ring on the board. The
-  // big cursor is the method in use, eased by the spring; these are where each
-  // method puts the player right now.
+  // Compare: where line of sight, trilateration and the average put the player
+  // right now, each a small labelled ring on the board. The big cursor follows
+  // the one placing the player (thick ring), eased by the spring.
   const MARKER_LABEL_OFFSET = { los: [0, -13], tri: [0, 22], avg: [16, 4] };
 
   function renderPositionMarkers(ctx, canvas) {
     const fixes = gameState.sensor && gameState.sensor.fixes;
     if (!positioning.compare || !fixes) return;
-    POSITION_METHODS.forEach((method) => {
+    DYNAMIC_METHODS.forEach((method) => {
       const fix = fixes[method];
       if (!fix) return;
       const x = Math.max(0, Math.min(PLAY_WIDTH_CM, fix.x));
@@ -2791,7 +2893,7 @@
       const style = METHOD_STYLES[method];
       ctx.save();
       ctx.strokeStyle = style.colour;
-      ctx.lineWidth = method === positioning.method ? 3 : 2;
+      ctx.lineWidth = method === gameState.sensor.placedBy ? 3 : 2;
       ctx.beginPath();
       ctx.arc(point.x, point.y, 7, 0, Math.PI * 2);
       ctx.stroke();

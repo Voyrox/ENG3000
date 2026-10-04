@@ -514,8 +514,9 @@ function handleRemoteCommand(command) {
       window.setGameSettings({ testMode: Boolean(command.enabled) });
       break;
     case "position":
-      // The position switch, as the buttons above the sensor panel do it: line
-      // of sight, trilateration or their average. An unknown method is ignored.
+      // The position switch, as the buttons above the sensor panel do it:
+      // Dynamic, line of sight, trilateration or their average. An unknown
+      // method is ignored.
       window.setPositionMethod(command.method);
       syncServerFilterSetup();
       break;

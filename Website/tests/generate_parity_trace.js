@@ -204,6 +204,9 @@ function runJs(stream, calibration, method) {
   const nodes = [node(1), null, node(3)];
 
   const out = [];
+  // The method that placed the player at each step: the run's own, or the one
+  // Dynamic followed.
+  const placedBy = [];
   let stamp = 0;
   stream.forEach((reading, i) => {
     clock = (i + 1) * STEP_MS;
@@ -237,8 +240,9 @@ function runJs(stream, calibration, method) {
       s.status === "ok" ? round6(s.xCm) : null,
       s.status === "ok" ? round6(s.yCm) : null,
     ]);
+    placedBy.push(s.placedBy ?? null);
   });
-  return { calibration: effective, steps: out };
+  return { calibration: effective, steps: out, placedBy };
 }
 
 const FIELDS = ["status", "gx", "gy", "rawGx", "rawGy", "column", "held", "heldFor", "filtered",
@@ -254,12 +258,14 @@ const trace = {
   fields: FIELDS,
   stream,
   // One run per position method (the game's switch), on the default bounds,
-  // plus line of sight on calibrated bounds.
+  // plus line of sight and Dynamic on calibrated bounds.
   runs: {
     default: { method: "los", ...runJs(stream, null, "los") },
     calibrated: { method: "los", ...runJs(stream, calibrated, "los") },
     trilateration: { method: "tri", ...runJs(stream, null, "tri") },
     average: { method: "avg", ...runJs(stream, null, "avg") },
+    dynamic: { method: "dyn", ...runJs(stream, null, "dyn") },
+    dynamicCalibrated: { method: "dyn", ...runJs(stream, calibrated, "dyn") },
   },
 };
 

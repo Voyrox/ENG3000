@@ -55,7 +55,8 @@ window.getOptionsLayout = function getOptionsLayout(canvas) {
   // /control page, so all three always agree.
   const positionMethods = window.getPositionMethods
     ? window.getPositionMethods()
-    : [{ id: "los", label: "Line of sight" }, { id: "tri", label: "Trilateration" }, { id: "avg", label: "Average" }];
+    : [{ id: "dyn", label: "Dynamic" }, { id: "los", label: "Line of sight" },
+      { id: "tri", label: "Trilateration" }, { id: "avg", label: "Average" }];
   const positionWidth = 150;
   const positionTotal = positionMethods.length * positionWidth + (positionMethods.length - 1) * buttonGap;
   const positionButtons = positionMethods.map((method, index) => ({
