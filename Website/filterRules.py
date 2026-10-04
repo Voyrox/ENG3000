@@ -129,8 +129,19 @@ class FilterConfig:
 
     # Trilateration's beam check (tuning.triBeamHalfDeg): a crossing of the two
     # distance circles counts only within this many degrees of where each
-    # node's servo points. The sensors' beam is under 15 degrees wide.
+    # node's servo points, widened by body_half_width_cm either side. The
+    # sensors' beam is under 15 degrees wide.
     tri_beam_half_deg: float = 7.5
+
+    # The player is a body, not a point (tuning.bodyRadiusCm,
+    # tuning.bodyHalfWidthCm). An echo comes back off the side of the player
+    # nearest the node, so each distance falls body_radius_cm short of the
+    # middle of them and has it added back (body_centre_cm()). A node's servo
+    # stops wherever its beam finds the player, so its aim can be
+    # body_half_width_cm either side of their middle; the line of sight and
+    # the beam check allow for it.
+    body_radius_cm: float = 15.0
+    body_half_width_cm: float = 20.0
 
     # Geometry (COLUMN_MARGIN_CM)
     column_margin_cm: float = 8.0
@@ -683,16 +694,20 @@ def line_of_sight(node_x_cm: float, distance_cm: float, angle_deg: float,
                   scan_state: Optional[float], config: FilterConfig,
                   repeats: int = 0) -> tuple:
     """lineOfSight() in game.js: one node's reading as (x_cm, y_cm, cov) - the
-    point along its line of sight and that point's 2x2 covariance, small along
-    the line and the distance times the bearing uncertainty across it.
+    point along its line of sight (distance_cm is to the middle of the player,
+    body_centre_cm()) and that point's 2x2 covariance: small along the line;
+    across it, the distance times the bearing uncertainty and
+    body_half_width_cm (the aim can stop anywhere across the player) added in
+    quadrature.
 
     repeats is how many readings in a row have already used this same aim: a
-    servo that holds still repeats the same small aim error, so the k-th
-    repeat counts 1/(k+1)^2 as much across the line (a held aim adds up to
-    about one and a half readings' worth) while the distance counts in full."""
+    servo that holds still repeats the same aim error, on the same part of the
+    player, so the k-th repeat counts 1/(k+1)^2 as much across the line (a
+    held aim adds up to about one and a half readings' worth) while the
+    distance counts in full."""
     phi = (angle_deg - 90) * math.pi / 180
-    along = [-math.sin(phi), math.cos(phi)]
-    across = [math.cos(phi), math.sin(phi)]
+    along = [math.sin(phi), math.cos(phi)]
+    across = [math.cos(phi), -math.sin(phi)]
     if scan_state == 0:
         bearing_deg = config.los_bearing_found_deg
     elif scan_state == 1:
@@ -700,11 +715,12 @@ def line_of_sight(node_x_cm: float, distance_cm: float, angle_deg: float,
     else:
         bearing_deg = config.los_bearing_unknown_deg
     radial = config.los_range_sigma_cm * config.los_range_sigma_cm
-    sideways = distance_cm * bearing_deg * math.pi / 180 * (repeats + 1)
-    tangential = sideways * sideways
+    aim = distance_cm * bearing_deg * math.pi / 180
+    body = config.body_half_width_cm
+    tangential = (aim * aim + body * body) * (repeats + 1) * (repeats + 1)
     cov = [[radial * along[i] * along[j] + tangential * across[i] * across[j]
             for j in range(2)] for i in range(2)]
-    return node_x_cm - distance_cm * math.sin(phi), distance_cm * math.cos(phi), cov
+    return node_x_cm + distance_cm * math.sin(phi), distance_cm * math.cos(phi), cov
 
 
 class LineOfSightTracker:
@@ -715,7 +731,7 @@ class LineOfSightTracker:
     acceleration. Each node reading that has the player in its line of sight
     (new, with a distance and an angle, not sweeping) is used once, when it
     arrives. While a node's servo holds still its aim counts for less with
-    every reading (line_of_sight(repeats=...)): the aim repeats the same small
+    every reading (line_of_sight(repeats=...)): the aim repeats the same
     error, and taking it in full again and again would drown the other node's
     distance. Readings far from where the track expects the player are left
     out; los_relock_readings of those in a row restart the track there.
@@ -750,7 +766,8 @@ class LineOfSightTracker:
             new_aim = (self.x is None or angle != self.aimed_at[slot]
                        or now_ms - self.fed_ms[slot] > config.hold_ms)
             repeats = 0 if new_aim else self.aim_repeats[slot] + 1
-            m = line_of_sight(area.column_centre_cm(slot), filtered[slot], angle, state,
+            m = line_of_sight(area.column_centre_cm(slot),
+                              body_centre_cm(filtered[slot], config), angle, state,
                               config, repeats)
             if self._observe(m, slot, now_ms, config):
                 self.aimed_at[slot] = angle
@@ -856,9 +873,11 @@ class TwoSensorGeometry(Geometry):
 
     Each node is a servo scanner (src/scanning.cpp) that reports its distance
     to the player, the servo angle it was read at (90 is straight out into the
-    play area, larger turns towards screen-left) and its scan state (0 found,
-    1 half-found, 2 lost and sweeping). method picks how that becomes a
-    position, as the game's position switch does:
+    play area, larger turns towards screen-right, as the rig's servos do) and
+    its scan state (0 found, 1 half-found, 2 lost and sweeping). Every method
+    places the middle of the player: each distance has body_radius_cm added
+    first (body_centre_cm()). method picks how that becomes a position, as the
+    game's position switch does:
 
       "los" - line of sight: LineOfSightTracker, fed by track() once per
               update. The default.
@@ -960,8 +979,10 @@ class TwoSensorGeometry(Geometry):
 
     def _trilaterate(self, filtered, area) -> Optional[tuple]:
         config = self._config or FilterConfig()
-        d_left = filtered[self.LEFT] if in_sensor_range(filtered[self.LEFT]) else None
-        d_right = filtered[self.RIGHT] if in_sensor_range(filtered[self.RIGHT]) else None
+        d_left = (body_centre_cm(filtered[self.LEFT], config)
+                  if in_sensor_range(filtered[self.LEFT]) else None)
+        d_right = (body_centre_cm(filtered[self.RIGHT], config)
+                   if in_sensor_range(filtered[self.RIGHT]) else None)
         in_left = d_left is not None and area.contains(self.LEFT, d_left)
         in_right = d_right is not None and area.contains(self.RIGHT, d_right)
 
@@ -975,8 +996,9 @@ class TwoSensorGeometry(Geometry):
                 x = x_left + along
                 y = math.sqrt(h2)
                 half = config.tri_beam_half_deg
-                if (in_beam(x_left, self._angles[self.LEFT], x, y, half)
-                        and in_beam(x_right, self._angles[self.RIGHT], x, y, half)):
+                body = config.body_half_width_cm
+                if (in_beam(x_left, self._angles[self.LEFT], x, y, half, body)
+                        and in_beam(x_right, self._angles[self.RIGHT], x, y, half, body)):
                     return x, y
 
         # One sensor on its own: the nearer in-bounds reading, or failing that
@@ -1317,14 +1339,24 @@ def _clamp(value, low, high):
 
 def scanner_point(node_x_cm: float, distance_cm: float,
                   angle_deg: Optional[float]) -> tuple:
-    """Where a scanner node's reading puts the player: (x_cm, y_cm).
+    """The point distance_cm out from the node at node_x_cm along its servo
+    angle: (x_cm, y_cm).
 
     angle_deg is the servo angle: 90 points straight out into the play area,
-    larger turns towards screen-left (smaller x). None means straight out.
-    Same arithmetic as scannerPoint() in game.js, operation for operation.
+    larger turns towards screen-right (larger x), as the rig's servos turn
+    (the centre test, 4 Oct) and as src/Config.h sets their limits. None means
+    straight out. Same arithmetic as scannerPoint() in game.js, operation for
+    operation.
     """
     phi = ((90.0 if angle_deg is None else angle_deg) - 90) * math.pi / 180
-    return node_x_cm - distance_cm * math.sin(phi), distance_cm * math.cos(phi)
+    return node_x_cm + distance_cm * math.sin(phi), distance_cm * math.cos(phi)
+
+
+def body_centre_cm(distance_cm: float, config: FilterConfig) -> float:
+    """bodyCentreCm() in game.js: a node's distance to the middle of the
+    player - what it measured, to the side of them nearest it, plus
+    body_radius_cm."""
+    return distance_cm + config.body_radius_cm
 
 
 def in_sensor_range(distance_cm: Optional[float]) -> bool:
@@ -1333,20 +1365,21 @@ def in_sensor_range(distance_cm: Optional[float]) -> bool:
 
 
 def in_beam(node_x_cm: float, angle_deg: Optional[float], x_cm: float, y_cm: float,
-            half_beam_deg: float) -> bool:
-    """inBeam() in game.js: whether (x_cm, y_cm) lies within half_beam_deg of
-    where the node at node_x_cm points its servo (angle_deg, as in
-    scanner_point()). Compares cosines, operation for operation as the JS does,
-    so the two agree to the last bit. No angle means no beam to check."""
+            half_beam_deg: float, body_half_width_cm: float = 0.0) -> bool:
+    """inBeam() in game.js: whether the middle of the player can be at
+    (x_cm, y_cm) when the node at node_x_cm, its servo at angle_deg (as in
+    scanner_point()), sees them - within half_beam_deg of where it points, or
+    no more than body_half_width_cm outside that (the beam may have found the
+    edge of the player). Operation for operation as the JS does, so the two
+    agree to the last bit. No angle means no beam to check."""
     if angle_deg is None:
         return True
     phi = (angle_deg - 90) * math.pi / 180
     dx = x_cm - node_x_cm
-    reach = math.sqrt(dx * dx + y_cm * y_cm)
-    if reach == 0:
-        return True
+    along = math.sin(phi) * dx + math.cos(phi) * y_cm
+    across = math.cos(phi) * dx - math.sin(phi) * y_cm
     half_beam = half_beam_deg * math.pi / 180
-    return -math.sin(phi) * dx + math.cos(phi) * y_cm >= reach * math.cos(half_beam)
+    return along >= 0 and abs(across) <= along * math.tan(half_beam) + body_half_width_cm
 
 
 def _split_reading(entry) -> tuple:

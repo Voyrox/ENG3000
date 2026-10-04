@@ -56,24 +56,29 @@ function run(w, nodes, frames = 240) {
   }
 }
 
+// The player is a body: a node's echo comes off the side of them nearest it,
+// the game's tuning.bodyRadiusCm short of their middle, which (x, y) is.
+const BODY_RADIUS_CM = loadWindow().tuneSensor({}).bodyRadiusCm;
+const echoCm = (slot, x, y) => Math.hypot(x - SENSOR_X[slot], y) - BODY_RADIUS_CM;
+
 function nodesSeeing(x, y) {
   return [0, 1, 2].map((slot) => ({
     id: slot + 1,
     online: true,
-    latest: JSON.stringify({ avg: Math.hypot(x - SENSOR_X[slot], y) }),
+    latest: JSON.stringify({ avg: echoCm(slot, x, y) }),
   }));
 }
 
 // Scanner nodes, as the firmware reports: each one's distance to the player,
-// its servo angle pointing at them (90 straight out, more towards screen-left)
-// and its scan state (0 found).
+// its servo angle pointing at them (90 straight out, more towards
+// screen-right) and its scan state (0 found).
 function scannersSeeing(x, y) {
   return [0, 1, 2].map((slot) => ({
     id: slot + 1,
     online: true,
     latest: JSON.stringify({
-      avg: Math.hypot(x - SENSOR_X[slot], y),
-      angle: Math.round(90 + (Math.atan2(SENSOR_X[slot] - x, y) * 180) / Math.PI),
+      avg: echoCm(slot, x, y),
+      angle: Math.round(90 + (Math.atan2(x - SENSOR_X[slot], y) * 180) / Math.PI),
       scanState: 0,
     }),
   }));

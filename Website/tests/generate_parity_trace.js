@@ -43,10 +43,14 @@ const round6 = (v) => Math.round(v * 1e6) / 1e6;
 // Each segment exercises a different branch. Values are [left, centre, right];
 // the rig has two sensors, so the centre is always NO_ECHO. A simulated player
 // at (x, depth) cm is seen by a sensor only inside its beam; outside it the
-// sensor sees the back wall.
+// sensor sees the back wall. The player is a body: a sensor's echo comes off
+// the side of them nearest it, BODY_RADIUS_CM short of their middle (the
+// game's tuning.bodyRadiusCm adds it back).
 
 const SENSOR_X_CM = [25, 125];                    // centres of the outer columns
+const BODY_RADIUS_CM = 15;
 const beamHalfWidthCm = (depth) => 15 + depth * 0.36;
+const echoCm = (sensorX, x, depth) => Math.hypot(x - sensorX, depth) - BODY_RADIUS_CM;
 
 function buildStream() {
   const rand = lcg(20260929);
@@ -54,7 +58,7 @@ function buildStream() {
   const maybe = (value, dropRate) => (rand() < dropRate ? NO_ECHO : value);
   const wall = () => maybe(jitter(235, 6), 0.25);
   const sees = (sensorX, x, depth) =>
-    Math.abs(x - sensorX) <= beamHalfWidthCm(depth) ? jitter(Math.hypot(x - sensorX, depth), 2) : wall();
+    Math.abs(x - sensorX) <= beamHalfWidthCm(depth) ? jitter(echoCm(sensorX, x, depth), 2) : wall();
   const steps = [];
   const push = (l, r) => steps.push([l, NO_ECHO, r]);
   const at = (x, depth) => push(sees(SENSOR_X_CM[0], x, depth), sees(SENSOR_X_CM[1], x, depth));
@@ -99,11 +103,11 @@ function buildStream() {
 
   // From here the nodes are servo scanners: each entry is [distance, angle,
   // scanState], the angle the node's servo was at (90 = straight out, more =
-  // screen-left) in whole degrees as the firmware sends it, and the scan state
+  // screen-right) in whole degrees as the firmware sends it, and the scan state
   // (0 found, 1 half-found, 2 lost and sweeping).
-  const aimAt = (nodeX, x, depth) => Math.round(90 + (Math.atan2(nodeX - x, depth) * 180) / Math.PI);
+  const aimAt = (nodeX, x, depth) => Math.round(90 + (Math.atan2(x - nodeX, depth) * 180) / Math.PI);
   const scanned = (nodeX, x, depth, state = 0) =>
-    [jitter(Math.hypot(x - nodeX, depth), 2), aimAt(nodeX, x, depth), state];
+    [jitter(echoCm(nodeX, x, depth), 2), aimAt(nodeX, x, depth), state];
 
   // 11. Both scanners track a player walking diagonally across the board.
   for (let i = 0; i < 150; i++) {

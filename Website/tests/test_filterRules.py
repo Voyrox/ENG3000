@@ -42,6 +42,7 @@ from filterRules import (  # noqa: E402
     StreakHold,
     TwoSensorGeometry,
     UltrasonicArrayGeometry,
+    body_centre_cm,
     fft_lowpass_last,
     in_beam,
     in_sensor_range,
@@ -393,20 +394,28 @@ class PipelineBehaviour(unittest.TestCase):
         self.assertEqual(pipe.update([None, None, None], 20).status, STATUS_NO_SIGNAL)
 
 
+# The player is a body: each echo comes off the side of them nearest the node,
+# this far short of their middle (FilterConfig.body_radius_cm adds it back).
+BODY_RADIUS_CM = FilterConfig().body_radius_cm
+
+
 def scanner_sample(x_cm, y_cm, state=0, aim_error_deg=0.0):
-    """[left, centre, right] scanner readings of a player at (x_cm, y_cm):
-    exact distances, each node's angle pointing at the player (plus
-    aim_error_deg), and a scan state."""
+    """[left, centre, right] scanner readings of a player whose middle is at
+    (x_cm, y_cm): exact distances to the near side of them, each node's angle
+    pointing at their middle (larger turns towards screen-right, as the rig's
+    servos do; plus aim_error_deg), and a scan state."""
     def reading(node_x):
-        angle = 90 + math.degrees(math.atan2(node_x - x_cm, y_cm)) + aim_error_deg
-        return (math.hypot(x_cm - node_x, y_cm), angle, state)
+        angle = 90 + math.degrees(math.atan2(x_cm - node_x, y_cm)) + aim_error_deg
+        return (math.hypot(x_cm - node_x, y_cm) - BODY_RADIUS_CM, angle, state)
     return [reading(25.0), None, reading(125.0)]
 
 
 def two_sensor_sample(x_cm, depth_cm):
-    """[left, centre, right] distances a player at (x, depth) would produce,
-    with the sensors at the centres of the outer columns (25 and 125 cm)."""
-    return [math.hypot(x_cm - 25.0, depth_cm), None, math.hypot(x_cm - 125.0, depth_cm)]
+    """[left, centre, right] distances a player whose middle is at (x, depth)
+    would produce (to the near side of them), with the sensors at the centres
+    of the outer columns (25 and 125 cm)."""
+    return [math.hypot(x_cm - 25.0, depth_cm) - BODY_RADIUS_CM, None,
+            math.hypot(x_cm - 125.0, depth_cm) - BODY_RADIUS_CM]
 
 
 class TwoSensorGeometryBehaviour(unittest.TestCase):
@@ -435,12 +444,13 @@ class TwoSensorGeometryBehaviour(unittest.TestCase):
 
     def test_a_wall_reading_falls_back_to_the_other_sensor(self):
         fix = self.locate([70.0, None, 235.0])
-        self.assertEqual((fix.x_cm, fix.y_cm, fix.column), (25.0, 70.0, 0))
+        self.assertEqual((fix.x_cm, fix.y_cm, fix.column), (25.0, 70.0 + BODY_RADIUS_CM, 0))
 
     def test_circles_that_miss_fall_back_to_the_nearer_sensor(self):
-        # 30 + 40 < the 100 cm between the sensors: no crossing exists.
-        fix = self.locate([30.0, None, 40.0])
-        self.assertEqual((fix.x_cm, fix.y_cm, fix.column), (25.0, 30.0, 0))
+        # 35 + 45 cm to the middle of the player < the 100 cm between the
+        # sensors: no crossing exists.
+        fix = self.locate([20.0, None, 30.0])
+        self.assertEqual((fix.x_cm, fix.y_cm, fix.column), (25.0, 20.0 + BODY_RADIUS_CM, 0))
 
     def test_the_centre_channel_is_ignored(self):
         self.assertEqual(self.geometry.channels([None, 70.0, None]), [None, None, None])
@@ -459,20 +469,21 @@ class TwoSensorGeometryBehaviour(unittest.TestCase):
 
     def test_off_either_side_of_the_board_is_out_of_bounds(self):
         # Every method, each on its own geometry (a line-of-sight track would
-        # carry over). 80 cm from the left scanner at 130 degrees:
-        # x = 25 - 80 sin 40 = -26.
+        # carry over). 80 cm (95 to the player's middle) from the left scanner
+        # at 50 degrees: x = 25 - 95 sin 40 = -36.
         for method in ("los", "tri", "avg"):
-            left = self.scan([(80.0, 130), None, None], geometry=TwoSensorGeometry(method=method))
+            left = self.scan([(80.0, 50), None, None], geometry=TwoSensorGeometry(method=method))
             self.assertEqual(left.status, STATUS_OUT_OF_BOUNDS, method)
             self.assertEqual(left.x_cm, 0.0, method)  # clamped for the column, still out
-            # 80 cm from the right scanner at 50 degrees: x = 125 + 80 sin 40 = 176.
-            right = self.scan([None, None, (80.0, 50)], geometry=TwoSensorGeometry(method=method))
+            # From the right scanner at 130 degrees: x = 125 + 95 sin 40 = 186.
+            right = self.scan([None, None, (80.0, 130)], geometry=TwoSensorGeometry(method=method))
             self.assertEqual(right.status, STATUS_OUT_OF_BOUNDS, method)
 
     def test_just_inside_the_side_edge_is_in_bounds(self):
-        # 80 cm from the left scanner at 105 degrees: x = 25 - 80 sin 15 = 4.3.
+        # 80 cm (95 to the middle) from the left scanner at 75 degrees:
+        # x = 25 - 95 sin 15 = 0.4.
         for method in ("los", "tri", "avg"):
-            fix = self.scan([(80.0, 105), None, None], geometry=TwoSensorGeometry(method=method))
+            fix = self.scan([(80.0, 75), None, None], geometry=TwoSensorGeometry(method=method))
             self.assertEqual(fix.status, STATUS_OK, method)
 
     # --- servo scanners: (distance, angle) per node ---------------------------
@@ -480,10 +491,25 @@ class TwoSensorGeometryBehaviour(unittest.TestCase):
     def test_a_scanner_at_90_degrees_points_straight_out(self):
         self.assertEqual(scanner_point(25.0, 80.0, 90), (25.0, 80.0))
 
-    def test_a_larger_angle_turns_towards_screen_left(self):
-        x, y = scanner_point(125.0, 80.0, 120)
-        self.assertAlmostEqual(x, 85.0)
+    def test_a_larger_angle_turns_towards_screen_right(self):
+        # As the rig's servos turn (the centre test, 4 Oct 2026).
+        x, y = scanner_point(25.0, 80.0, 120)
+        self.assertAlmostEqual(x, 65.0)
         self.assertAlmostEqual(y, 80.0 * math.cos(math.radians(30)))
+        x, _ = scanner_point(125.0, 80.0, 60)
+        self.assertAlmostEqual(x, 85.0)
+
+    def test_the_body_radius_is_added_to_every_distance(self):
+        # A player straight out from the left node: the echo comes off the
+        # near side of them, and the fix is their middle.
+        config = FilterConfig(body_radius_cm=12.0)
+        self.assertEqual(body_centre_cm(68.0, config), 80.0)
+        for method in ("los", "tri", "avg"):
+            geometry = TwoSensorGeometry(method=method)
+            readings = geometry.channels([(68.0, 90, 0), None, None])
+            geometry.track(readings, [True] * 3, 0.0, self.area, config)
+            fix = geometry.locate(readings, self.area, config)
+            self.assertEqual((fix.x_cm, fix.y_cm), (25.0, 80.0), method)
 
     # --- the position methods, which need track() before locate() ----------
 
@@ -501,17 +527,17 @@ class TwoSensorGeometryBehaviour(unittest.TestCase):
         self.assertEqual(fix.column, 1)
 
     def test_one_scanner_hearing_nothing_leaves_the_other(self):
-        fix = self.scan([(None, 70, 2), None, (90.0, 115, 0)])
-        x, y = scanner_point(125.0, 90.0, 115)
+        fix = self.scan([(None, 110, 2), None, (90.0, 65, 0)])
+        x, y = scanner_point(125.0, body_centre_cm(90.0, self.config), 65)
         self.assertAlmostEqual(fix.x_cm, x)
         self.assertAlmostEqual(fix.y_cm, y)
 
     def test_line_of_sight_leaves_out_a_node_that_is_sweeping(self):
         # The left node is lost, and its beam has found furniture at 120 cm.
         sample = scanner_sample(80.0, 95.0)
-        sample[0] = (120.0, 60, 2)
+        sample[0] = (120.0, 120, 2)
         fix = self.scan(sample)
-        x, y = scanner_point(125.0, *sample[2][:2])
+        x, y = scanner_point(125.0, body_centre_cm(sample[2][0], self.config), sample[2][1])
         self.assertAlmostEqual(fix.x_cm, x)
         self.assertAlmostEqual(fix.y_cm, y)
         # Trilateration does not know the node is lost. Here the circles cross
@@ -531,22 +557,24 @@ class TwoSensorGeometryBehaviour(unittest.TestCase):
     def test_trilateration_refuses_a_crossing_outside_a_beam(self):
         geometry = TwoSensorGeometry(method="tri")
         # Both servos point somewhere else entirely: the crossing is not where
-        # either is looking, so the nearer node (left, 87 cm) places the player
-        # by its own distance along its own aim instead.
-        d_left = math.hypot(60 - 25, 80)
-        sample = [(d_left, 120, 0), None, (math.hypot(60 - 125, 80), 120, 0)]
+        # the left one is looking, so the nearer node (left, 87 cm to the
+        # player's middle) places the player by its own distance along its own
+        # aim instead.
+        d_left = math.hypot(60 - 25, 80) - BODY_RADIUS_CM
+        sample = [(d_left, 60, 0), None, (math.hypot(60 - 125, 80) - BODY_RADIUS_CM, 60, 0)]
         fix = self.scan(sample, geometry=geometry)
-        x, y = scanner_point(25.0, d_left, 120)
+        x, y = scanner_point(25.0, body_centre_cm(d_left, self.config), 60)
         self.assertAlmostEqual(fix.x_cm, max(0.0, x))
         self.assertAlmostEqual(fix.y_cm, y)
 
     def test_one_node_aimed_away_leaves_the_crossing_to_the_other(self):
-        # The right node looks 10 degrees past the player (furniture, say):
-        # the crossing is refused, and the left node - nearer, and aimed at
-        # the player - puts them where it sees them.
+        # The right node looks 25 degrees past the player (furniture, say),
+        # further than its beam and the player's width reach: the crossing is
+        # refused, and the left node - nearer, and aimed at the player - puts
+        # them where it sees them.
         geometry = TwoSensorGeometry(method="tri")
         sample = scanner_sample(60.0, 80.0)
-        sample[2] = (sample[2][0], sample[2][1] + 10.0, 0)
+        sample[2] = (sample[2][0], sample[2][1] - 25.0, 0)
         fix = self.scan(sample, geometry=geometry)
         self.assertAlmostEqual(fix.x_cm, 60.0)
         self.assertAlmostEqual(fix.y_cm, 80.0)
@@ -561,12 +589,12 @@ class TwoSensorGeometryBehaviour(unittest.TestCase):
     def test_the_half_beam_is_tunable(self):
         geometry = TwoSensorGeometry(method="tri")
         sample = scanner_sample(60.0, 80.0, aim_error_deg=5.0)
-        narrow = FilterConfig(tri_beam_half_deg=4.0)
+        narrow = FilterConfig(tri_beam_half_deg=4.0, body_half_width_cm=0.0)
         readings = geometry.channels(sample)
         geometry.track(readings, [True] * 3, 0.0, self.area, narrow)
         fix = geometry.locate(readings, self.area, narrow)
         # 5 degrees off is outside 4: the left node's own aim, not the crossing.
-        x, y = scanner_point(25.0, *sample[0][:2])
+        x, y = scanner_point(25.0, body_centre_cm(sample[0][0], narrow), sample[0][1])
         self.assertAlmostEqual(fix.x_cm, x)
         self.assertAlmostEqual(fix.y_cm, y)
 
@@ -577,6 +605,17 @@ class TwoSensorGeometryBehaviour(unittest.TestCase):
             y = 100 * math.cos(math.radians(off_deg))
             self.assertEqual(in_beam(25.0, 90, x, y, 7.5), inside, off_deg)
         self.assertTrue(in_beam(25.0, None, 140.0, 5.0, 7.5))   # no angle, no check
+        self.assertFalse(in_beam(25.0, 90, 25.0, -10.0, 7.5))   # behind the node
+
+    def test_the_beam_is_widened_by_the_players_half_width(self):
+        # 100 cm straight out from x = 25 the beam's edge is 13.2 cm to the
+        # side; the middle of the player can be 20 cm past it when the beam
+        # found the edge of them.
+        edge = 100 * math.tan(math.radians(7.5))
+        for side, body, inside in ((edge + 19.0, 20.0, True), (edge + 21.0, 20.0, False),
+                                   (edge + 1.0, 0.0, False)):
+            for x in (25.0 + side, 25.0 - side):
+                self.assertEqual(in_beam(25.0, 90, x, 100.0, 7.5, body), inside, (side, body))
 
     def test_a_distance_outside_the_sensor_range_is_not_a_reading(self):
         self.assertFalse(in_sensor_range(None))
@@ -587,7 +626,7 @@ class TwoSensorGeometryBehaviour(unittest.TestCase):
 
     def test_average_is_the_midpoint_of_the_other_two(self):
         sample = scanner_sample(80.0, 95.0)
-        sample[0] = (120.0, 60, 0)      # the left node aimed at something else
+        sample[0] = (120.0, 120, 0)     # the left node aimed at something else
         fixes = {}
         for method in ("los", "tri", "avg"):
             geometry = TwoSensorGeometry(method=method)
@@ -614,8 +653,9 @@ class TwoSensorGeometryBehaviour(unittest.TestCase):
         # distances cross where the player is.
         truth = (75.0, 90.0)
         sample = scanner_sample(*truth, aim_error_deg=5.0)
-        off = max(math.dist(scanner_point(25.0, *sample[0][:2]), truth),
-                  math.dist(scanner_point(125.0, *sample[2][:2]), truth))
+        aimed = [scanner_point(node_x, body_centre_cm(sample[slot][0], self.config), sample[slot][1])
+                 for slot, node_x in ((0, 25.0), (2, 125.0))]
+        off = max(math.dist(point, truth) for point in aimed)
         self.assertGreater(off, 7.0)
         for k in range(40):
             fix = self.scan(sample, now_ms=50.0 * k)
@@ -647,12 +687,15 @@ class TwoSensorGeometryBehaviour(unittest.TestCase):
             self.geometry.method = "guess"
 
     def test_the_line_of_sight_is_tight_along_and_loose_across(self):
-        # Straight out from the left node: along is y, across is x.
+        # Straight out from the left node: along is y, across is x. Across, the
+        # aim's uncertainty at this distance and the player's half-width.
         x, y, cov = line_of_sight(25.0, 100.0, 90.0, 0, self.config)
         self.assertEqual((x, y), (25.0, 100.0))
         self.assertAlmostEqual(cov[1][1], self.config.los_range_sigma_cm ** 2)
-        across = 100.0 * math.radians(self.config.los_bearing_found_deg)
-        self.assertAlmostEqual(cov[0][0], across ** 2)
+        aim = 100.0 * math.radians(self.config.los_bearing_found_deg)
+        self.assertAlmostEqual(cov[0][0], aim ** 2 + self.config.body_half_width_cm ** 2)
+        _, _, point = line_of_sight(25.0, 100.0, 90.0, 0, FilterConfig(body_half_width_cm=0.0))
+        self.assertAlmostEqual(point[0][0], aim ** 2)
         # Half-found is less sure of its aim than found.
         _, _, half = line_of_sight(25.0, 100.0, 90.0, 1, self.config)
         self.assertGreater(half[0][0], cov[0][0])

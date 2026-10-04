@@ -56,9 +56,14 @@ function loadWindow() {
   return context;
 }
 
-// Exact ranges from `sensors` at x positions to a target at (x, y).
+// The player is a body: a node's echo comes off the side of them nearest it,
+// the game's tuning.bodyRadiusCm short of their middle.
+const BODY_RADIUS_CM = loadWindow().tuneSensor({}).bodyRadiusCm;
+
+// Exact ranges from `sensors` at x positions to a player whose middle is at
+// (x, y), as game.js is sent them.
 function rangesTo(positions, x, y) {
-  return positions.map((sx) => Math.hypot(x - sx, y));
+  return positions.map((sx) => Math.hypot(x - sx, y) - BODY_RADIUS_CM);
 }
 
 // Feeds one sensor frame per node message and steps the game loop over it.

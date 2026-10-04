@@ -180,9 +180,21 @@
     losBearingUnknownDeg: 7,
     // Trilateration's beam check (see inBeam()): a crossing of the two
     // distance circles counts only if it lies within this many degrees of
-    // where each node's servo points. The sensors' beam is under 15 degrees
-    // wide, 7.5 either side. Python: FilterConfig tri_beam_half_deg.
+    // where each node's servo points, widened by bodyHalfWidthCm either side.
+    // The sensors' beam is under 15 degrees wide, 7.5 either side. Python:
+    // FilterConfig tri_beam_half_deg.
     triBeamHalfDeg: 7.5,
+    // The player is a body, not a point (see bodyCentreCm()). bodyRadiusCm:
+    // an echo comes back off the side of the player nearest the node, so each
+    // distance falls this far short of the middle of them; it is added back
+    // before the player is placed. bodyHalfWidthCm: a node's servo stops
+    // wherever its beam finds the player, anywhere across their body, so its
+    // aim can be this far either side of their middle whatever the distance;
+    // the line of sight and the beam check allow for it. Measured on the rig
+    // (centre test, 4 Oct): the readings fell 13-37 cm short of the taped
+    // spots. Python: FilterConfig body_radius_cm, body_half_width_cm.
+    bodyRadiusCm: 15,
+    bodyHalfWidthCm: 20,
   };
 
   window.tuneSensor = function tuneSensor(partial) {
@@ -920,7 +932,7 @@
   }
 
   // The scanner fields of a node's latest payload (src/scanning.cpp): the servo
-  // angle the reading was taken at (90 = straight out, more = screen-left),
+  // angle the reading was taken at (90 = straight out, more = screen-right),
   // the scan state (0 found, 1 half-found, 2 lost), both ultrasonics
   // (-1 = no echo) and the empty room (0 not learnt, 1 learning, 2 learnt; see
   // src/RoomMap.h). Each is null when the node's firmware does not send it.
@@ -1310,8 +1322,11 @@
   //   "los" - line of sight, the default. Each node's reading is a point along
   //           its line of sight (its distance along its servo angle), with an
   //           uncertainty that is small along the line - the distance is good
-  //           - and grows across it with the distance and with how sure the
-  //           node is of its aim (found / half-found). Those points feed a 2D
+  //           - and grows across it with the distance, with how sure the node
+  //           is of its aim (found / half-found) and with the width of the
+  //           player, anywhere across whom the aim may stop. In the centre
+  //           column the two nodes look in from either side, so the distances
+  //           cross and fix the player there. Those points feed a 2D
   //           constant-velocity Kalman filter (losTrack) one reading at a time,
   //           as they arrive. The nodes take turns to scan, so they are never
   //           read at the same moment: each reading is used once, when it
@@ -1328,9 +1343,17 @@
   //   "avg" - the midpoint of the two.
   //
   // All three are worked out on every update, so the board can show them side
-  // by side (Compare). x picks the column (the centre one included) and y, the
-  // depth from the screen, picks the row. filterRules.py (TwoSensorGeometry)
-  // is the parity-tested Python port.
+  // by side (Compare). Every method places the middle of the player: each
+  // distance has tuning.bodyRadiusCm added first (bodyCentreCm()). x picks the
+  // column (the centre one included) and y, the depth from the screen, picks
+  // the row. filterRules.py (TwoSensorGeometry) is the parity-tested Python
+  // port.
+  //
+  // The servo angle: 90 points straight out into the play area, and a larger
+  // angle turns towards screen-right (larger x). That is the way the rig's
+  // servos turn (the centre test on 4 Oct: read the other way, the two nodes
+  // put a player standing still 160-250 cm apart) and the way the firmware's
+  // limits are set (src/Config.h: LEFT turns in to 160, RIGHT to 30).
 
   function columnCentreCm(column) {
     return ((column + 0.5) * PLAY_WIDTH_CM) / 3;
@@ -1353,19 +1376,29 @@
     return distance !== null && distance >= SENSOR_MIN_CM && distance <= SENSOR_MAX_CM;
   }
 
-  // Whether the point (x, y) lies inside the beam of the node at nodeX whose
-  // servo is at angle: within tuning.triBeamHalfDeg of where it points.
-  // Compares cosines (the aim dotted with the point) rather than angles, with
-  // the same sin and cos as scannerPoint(), so in_beam() in filterRules.py
-  // agrees to the last bit. A node that sends no angle has no beam to check.
+  // A node's distance to the middle of the player: what it measured, to the
+  // side of them nearest it, plus tuning.bodyRadiusCm. filterRules.py
+  // body_centre_cm().
+  function bodyCentreCm(distance) {
+    return distance + tuning.bodyRadiusCm;
+  }
+
+  // Whether the middle of the player can be at (x, y) when the node at nodeX,
+  // its servo at angle, sees them: inside its beam (within
+  // tuning.triBeamHalfDeg of where it points), or no more than
+  // tuning.bodyHalfWidthCm outside it - the beam may have found the edge of
+  // the player rather than their middle. Splits (x, y) into how far it is out
+  // along the aim and how far off to the side, with the same sin and cos as
+  // scannerPoint(), so in_beam() in filterRules.py agrees to the last bit. A
+  // node that sends no angle has no beam to check.
   function inBeam(nodeX, angle, x, y) {
     if (angle === null) return true;
     const phi = (angle - 90) * Math.PI / 180;
     const dx = x - nodeX;
-    const reach = Math.sqrt(dx * dx + y * y);
-    if (reach === 0) return true;
+    const along = Math.sin(phi) * dx + Math.cos(phi) * y;
+    const across = Math.cos(phi) * dx - Math.sin(phi) * y;
     const halfBeam = tuning.triBeamHalfDeg * Math.PI / 180;
-    return -Math.sin(phi) * dx + Math.cos(phi) * y >= reach * Math.cos(halfBeam);
+    return along >= 0 && Math.abs(across) <= along * Math.tan(halfBeam) + tuning.bodyHalfWidthCm;
   }
 
   // Where the player is, from the filtered [left, centre, right] distances and
@@ -1374,14 +1407,16 @@
   // source is "both" for a trilaterated fix, else the one sensor used. Pure:
   // no hysteresis state is touched, and x is not yet clamped to the board.
   //
-  // A reading only counts toward the crossing if it is inside its own
-  // column's play area. When only one does, the circles miss each other, or
-  // the crossing is outside either node's beam (one sensor is seeing
-  // something else), the nearer sensor places the player by its distance
-  // along its servo angle - straight in front of itself if it sends none.
+  // The circles are the distances to the middle of the player
+  // (bodyCentreCm()). A reading only counts toward the crossing if it is
+  // inside its own column's play area. When only one does, the circles miss
+  // each other, or the crossing is outside either node's beam (one sensor is
+  // seeing something else), the nearer sensor places the player by its
+  // distance along its servo angle - straight in front of itself if it sends
+  // none.
   function trilaterate(filtered, angles = [null, null, null]) {
-    const dL = inSensorRange(filtered[LEFT_SENSOR]) ? filtered[LEFT_SENSOR] : null;
-    const dR = inSensorRange(filtered[RIGHT_SENSOR]) ? filtered[RIGHT_SENSOR] : null;
+    const dL = inSensorRange(filtered[LEFT_SENSOR]) ? bodyCentreCm(filtered[LEFT_SENSOR]) : null;
+    const dR = inSensorRange(filtered[RIGHT_SENSOR]) ? bodyCentreCm(filtered[RIGHT_SENSOR]) : null;
     const inL = dL !== null && isInPlay(LEFT_SENSOR, dL);
     const inR = dR !== null && isInPlay(RIGHT_SENSOR, dR);
 
@@ -1417,13 +1452,13 @@
     return { x: point.x, y: point.y, source: best.column === LEFT_SENSOR ? "left" : "right" };
   }
 
-  // Where one scanner node's reading puts the player. angle is the servo angle:
-  // 90 points straight out, larger turns towards screen-left (smaller x); null
+  // The point distance out from the node at nodeX along its servo angle: 90
+  // points straight out, larger turns towards screen-right (larger x); null
   // means straight out. Same arithmetic as scanner_point() in filterRules.py,
   // operation for operation, so the two agree to the last bit.
   function scannerPoint(nodeX, distance, angle) {
     const phi = ((angle === null ? 90 : angle) - 90) * Math.PI / 180;
-    return { x: nodeX - distance * Math.sin(phi), y: distance * Math.cos(phi) };
+    return { x: nodeX + distance * Math.sin(phi), y: distance * Math.cos(phi) };
   }
 
   // --- Line of sight: a 2D Kalman filter ---------------------------------------
@@ -1463,30 +1498,36 @@
     return a.map((row, i) => row.map((value, j) => value + b[i][j]));
   }
 
-  // One node's reading as a measurement: the point along its line of sight,
-  // and that point's covariance (2x2, cm^2) - LOS_RANGE_SIGMA_CM along the
-  // line, the distance times the bearing uncertainty across it. `repeats` is
-  // how many readings in a row have already used this same aim: a servo that
-  // holds still repeats the same small aim error on every reading, so the k-th
-  // repeat counts 1/(k+1)^2 as much across the line - a held aim adds up to
-  // about one and a half readings' worth, however long it is held - while the
-  // distance along the line counts in full every time.
+  // One node's reading as a measurement: the point along its line of sight
+  // (distance is to the middle of the player, bodyCentreCm()), and that
+  // point's covariance (2x2, cm^2) - LOS_RANGE_SIGMA_CM along the line; across
+  // it, the distance times the bearing uncertainty and tuning.bodyHalfWidthCm
+  // (the aim can stop anywhere across the player) added in quadrature. So
+  // where the two nodes look in from either side, as in the centre column,
+  // each one's distance fixes the player across the other's line. `repeats`
+  // is how many readings in a row have already used this same aim: a servo
+  // that holds still repeats the same aim error, on the same part of the
+  // player, on every reading, so the k-th repeat counts 1/(k+1)^2 as much
+  // across the line - a held aim adds up to about one and a half readings'
+  // worth, however long it is held - while the distance along the line
+  // counts in full every time.
   function lineOfSight(nodeX, distance, angle, state, repeats) {
     const phi = (angle - 90) * Math.PI / 180;
-    const along = [-Math.sin(phi), Math.cos(phi)];
-    const across = [Math.cos(phi), Math.sin(phi)];
+    const along = [Math.sin(phi), Math.cos(phi)];
+    const across = [Math.cos(phi), -Math.sin(phi)];
     const bearingDeg = state === 0 ? tuning.losBearingFoundDeg
       : state === 1 ? tuning.losBearingHalfDeg : tuning.losBearingUnknownDeg;
     const radial = LOS_RANGE_SIGMA_CM * LOS_RANGE_SIGMA_CM;
-    const sideways = distance * bearingDeg * Math.PI / 180 * (repeats + 1);
-    const tangential = sideways * sideways;
+    const aim = distance * bearingDeg * Math.PI / 180;
+    const body = tuning.bodyHalfWidthCm;
+    const tangential = (aim * aim + body * body) * (repeats + 1) * (repeats + 1);
     const cov = [[0, 0], [0, 0]];
     for (let i = 0; i < 2; i++) {
       for (let j = 0; j < 2; j++) {
         cov[i][j] = radial * along[i] * along[j] + tangential * across[i] * across[j];
       }
     }
-    return { x: nodeX - distance * Math.sin(phi), y: distance * Math.cos(phi), cov };
+    return { x: nodeX + distance * Math.sin(phi), y: distance * Math.cos(phi), cov };
   }
 
   function makeLosTrack() {
@@ -1612,7 +1653,7 @@
       const newAim = losTrack.x === null || scan.angle !== losTrack.aimedAt[slot] ||
         now - losTrack.fedAt[slot] > SENSOR_HOLD_MS;
       const repeats = newAim ? 0 : losTrack.aimRepeats[slot] + 1;
-      const m = lineOfSight(columnCentreCm(slot), filtered[slot], scan.angle, scan.state, repeats);
+      const m = lineOfSight(columnCentreCm(slot), bodyCentreCm(filtered[slot]), scan.angle, scan.state, repeats);
       if (losObserve(m, slot, now)) {
         losTrack.aimedAt[slot] = scan.angle;
         losTrack.aimRepeats[slot] = repeats;
@@ -1710,8 +1751,9 @@
   //   heardMsAgo: [l, c, r] ms since each node's last new reading,
   //   fixes:      { los, tri, avg } - every method's position, see solvePositions(),
   //   method:     the method the position above came from,
-  //   depth:      [l, c, r] each node's own depth reading (filtered distance
-  //               turned by its servo angle) - what corner calibration captures,
+  //   depth:      [l, c, r] each node's own depth reading (filtered distance to
+  //               the middle of the player, bodyCentreCm(), turned by its servo
+  //               angle) - what corner calibration captures,
   //   scans:      [l, c, r] each node's scanner fields, see readScan(),
   //   configured: how many sensors currently have a usable value
   // }
@@ -1738,7 +1780,8 @@
     const fixes = solvePositions(filtered, angles, now);
     const configured = filtered.filter((d) => d !== null).length;
     const depth = filtered.map((distance, slot) =>
-      distance === null || slot === 1 ? null : scannerPoint(columnCentreCm(slot), distance, angles[slot]).y);
+      distance === null || slot === 1 ? null
+        : scannerPoint(columnCentreCm(slot), bodyCentreCm(distance), angles[slot]).y);
     const heardMsAgo = heardAt.map((at) => now - at);
 
     const base = {

@@ -24,6 +24,7 @@ sys.path.insert(0, os.path.dirname(HERE))
 from filterRules import (  # noqa: E402
     STATUS_OK,
     CoordinatePipeline,
+    FilterConfig,
     UltrasonicArrayGeometry,
 )
 from serverFilter import (  # noqa: E402
@@ -40,6 +41,9 @@ except ImportError:  # server requirements not installed
 
 STEP_MS = 100.0          # 10 Hz, a typical node reporting rate
 LEFT, CENTRE, RIGHT = 11, 12, 13   # node ids, deliberately not 1, 2, 3
+# A two-node rig reads the side of the player nearest it, this far short of
+# their middle; the chain adds it back (FilterConfig.body_radius_cm).
+BODY_RADIUS_CM = FilterConfig().body_radius_cm
 
 
 class RecordingPipeline(CoordinatePipeline):
@@ -159,7 +163,8 @@ class StageTwoSensorRig(unittest.TestCase):
     def test_centre_player_is_placed_from_left_and_right(self):
         stage = ServerFilterStage()
         stage.assign_slots([LEFT, None, RIGHT])
-        distance = math.hypot(50.0, 100.0)          # player at x 75, depth 100
+        # The player's middle at x 75, depth 100.
+        distance = math.hypot(50.0, 100.0) - BODY_RADIUS_CM
         stage.on_reading(LEFT, distance, STEP_MS)
         result = stage.on_reading(RIGHT, distance, 2 * STEP_MS)
         self.assertEqual(result.status, STATUS_OK)
@@ -168,13 +173,15 @@ class StageTwoSensorRig(unittest.TestCase):
         self.assertAlmostEqual(result.y_cm, 100.0)
 
     def test_scanner_angles_place_the_player(self):
-        # Each node 80 cm away and aimed at the player, who is at (75, 62.4).
+        # Each node 80 cm from the player's middle, at (75, 62.4), and aimed
+        # at it: a larger angle turns towards screen-right.
         depth = math.sqrt(80.0 ** 2 - 50.0 ** 2)
         turn = math.degrees(math.atan2(50.0, depth))
+        reading = 80.0 - BODY_RADIUS_CM
         stage = ServerFilterStage()
         stage.assign_slots([LEFT, None, RIGHT])
-        stage.on_reading(LEFT, 80.0, STEP_MS, angle_deg=90 - turn, scan_state=0)
-        result = stage.on_reading(RIGHT, 80.0, 2 * STEP_MS, angle_deg=90 + turn, scan_state=0)
+        stage.on_reading(LEFT, reading, STEP_MS, angle_deg=90 + turn, scan_state=0)
+        result = stage.on_reading(RIGHT, reading, 2 * STEP_MS, angle_deg=90 - turn, scan_state=0)
         self.assertEqual(result.column, 1)
         self.assertAlmostEqual(result.x_cm, 75.0)
         self.assertAlmostEqual(result.y_cm, depth)
@@ -186,7 +193,7 @@ class StageTwoSensorRig(unittest.TestCase):
         # The left node is lost; its beam found something at 40 cm.
         result = stage.on_reading(LEFT, 40.0, 2 * STEP_MS, angle_deg=90, scan_state=2)
         self.assertAlmostEqual(result.x_cm, 125.0 - 0.0, places=6)
-        self.assertAlmostEqual(result.y_cm, 80.0, places=6)
+        self.assertAlmostEqual(result.y_cm, 80.0 + BODY_RADIUS_CM, places=6)
 
     def test_the_position_method_can_be_switched(self):
         stage = ServerFilterStage()
@@ -439,7 +446,7 @@ class AppWiring(unittest.TestCase):
         result = app.server_filter.latest
         # The lost left node is not in the line of sight: the right one places the player.
         self.assertAlmostEqual(result.x_cm, 125.0, places=6)
-        self.assertAlmostEqual(result.y_cm, 80.0, places=6)
+        self.assertAlmostEqual(result.y_cm, 80.0 + BODY_RADIUS_CM, places=6)
 
     def test_flag_on_feeds_raw_not_filtered_distance(self):
         pipeline = RecordingPipeline()
@@ -512,12 +519,13 @@ class FakeBrowser:
 
 # Shapes exactly as canvas.js sends them (syncServerFilterSetup).
 ASSIGN = {"type": "sensors:assign", "slots": [LEFT, CENTRE, RIGHT]}
-# Near edge 60 cm, far edge 150 cm: 30 cm rows. 85 cm is row 0 here but row 1
-# of the default 20-140 cm area, so a test can tell whether it was applied.
+# Near edge 60 cm, far edge 150 cm: 30 cm rows. A player whose middle is 85 cm
+# out (a reading of 70 cm) is row 0 here but row 1 of the default 20-140 cm
+# area, so a test can tell whether it was applied.
 CALIBRATED_NEAR_CM, CALIBRATED_FAR_CM = 60.0, 150.0
 CALIBRATE = {"type": "calibration:update", "perColumn": [
     {"near": CALIBRATED_NEAR_CM, "far": CALIBRATED_FAR_CM}] * 3}
-PROBE_CM = 85.0
+PROBE_CM = 85.0 - BODY_RADIUS_CM
 TOO_CLOSE_MARGIN_CM = 5.0     # how far inside the alert threshold the too-close probe sits
 
 
@@ -631,8 +639,9 @@ class BrowserMessages(unittest.TestCase):
         for key in ("status", "x", "y", "gx", "gy", "rawGx", "rawGy", "column",
                     "held", "heldFor", "calibrated", "raw", "filtered"):
             self.assertIn(key, coordinate)
-        # y is the distance used, x the column centre; lists are L, C, R.
-        self.assertEqual(coordinate["y"], PROBE_CM)
+        # y is the distance to the player's middle, x the column centre;
+        # lists are L, C, R.
+        self.assertEqual(coordinate["y"], PROBE_CM + BODY_RADIUS_CM)
         self.assertEqual(coordinate["x"], app.server_filter.pipeline.area.column_centre_cm(0))
         self.assertEqual(coordinate["raw"], [PROBE_CM, None, None])
 
