@@ -2248,7 +2248,8 @@
     const w = Math.max(220, Math.min(300, width * 0.22));
     return {
       x: width - 12 - w,
-      y: Math.max(140, height * 0.22),
+      // Below the Room button, the last of the top-right stack.
+      y: Math.max(188, height * 0.22),
       w,
       h: LEGEND_HEADER_H + LEGEND_ENTRIES * LEGEND_ENTRY_H + 14,
     };
@@ -2259,11 +2260,12 @@
     return pointInRect(x, y, getGamePauseLayout()) ? { type: "pause" } : null;
   };
 
-  // Top-right, under the level panel (and clear of the legend below it).
+  // Top-right, under the Stats toggle (and clear of the legend below it).
   function getPulsesButtonLayout(canvas) {
     const width = canvas.clientWidth || canvas.width;
     const w = 170;
-    return { x: width - 12 - w, y: 60, width: w, height: 36 };
+    const toggle = getStatsToggleLayout(canvas);
+    return { x: width - 12 - w, y: toggle.y + toggle.height + 8, width: w, height: 36 };
   }
 
   function pulsesLabel() {
@@ -2777,6 +2779,48 @@
     });
   }
 
+  // --- Stats toggle ----------------------------------------------------------
+  // Top-right, under the level panel: shows or hides the stats panels
+  // (LIVE STATS, LIVE DATA). Remembered per browser; the game plays the
+  // same either way.
+  const STATS_VISIBLE_KEY = "eng3000.statsVisible";
+  let statsVisible = true;
+  try {
+    statsVisible = localStorage.getItem(STATS_VISIBLE_KEY) !== "0";
+  } catch (err) {
+    // Storage blocked: start with the stats shown.
+  }
+
+  function getStatsToggleLayout(canvas) {
+    const width = canvas.clientWidth || canvas.width;
+    const w = 130; // the level panel's width, so the two line up
+    return { x: width - 12 - w, y: 60, width: w, height: 32 };
+  }
+
+  window.getStatsToggleAtPoint = function getStatsToggleAtPoint(canvas, x, y) {
+    return pointInRect(x, y, getStatsToggleLayout(canvas)) ? { type: "stats" } : null;
+  };
+
+  window.toggleGameStats = function toggleGameStats() {
+    statsVisible = !statsVisible;
+    try {
+      localStorage.setItem(STATS_VISIBLE_KEY, statsVisible ? "1" : "0");
+    } catch (err) {
+      // Not remembered, but still toggled for this page.
+    }
+    return statsVisible;
+  };
+
+  function drawStatsToggle(ctx, canvas) {
+    const r = getStatsToggleLayout(canvas);
+    drawHudPanel(ctx, r.x, r.y, r.width, r.height, 10);
+    ctx.textAlign = "center";
+    ctx.fillStyle = statsVisible ? "#f4f4f5" : "#9298aa";
+    ctx.font = "bold 14px monospace";
+    ctx.fillText(statsVisible ? "Stats: On" : "Stats: Off", r.x + r.width / 2, r.y + r.height / 2 + 5);
+    ctx.textAlign = "left";
+  }
+
   // --- HUD layout ------------------------------------------------------------
   // Bottom-left: in sensor mode the sensor panel sits in the corner with the
   // position switch above it (mouse and remote need no input box). LIVE STATS
@@ -2801,7 +2845,7 @@
     }
 
     const stats = roundStats();
-    if (!view || !stats) return;
+    if (!view || !stats || !statsVisible) return;
     const now = performance.now();
     const snap = stats.snapshot(now);
 
@@ -2905,6 +2949,7 @@
     ctx.fillStyle = "#f4f4f5";
     ctx.font = "bold 20px monospace";
     ctx.fillText(`Level: ${gameState.level}`, levelPanel.x + levelPanel.w - 14, levelPanel.y + 27);
+    drawStatsToggle(ctx, canvas);
 
     // Pulses button: multi-pulse on the scanner nodes, amber while on.
     if (gameState.status === "playing") {
