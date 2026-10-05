@@ -122,7 +122,7 @@ test("sensor mode reports the player's (x, y) in cm, and the hole under the draw
   const w = loadWindow();
   w.setGameInputMode("sensor");
   w.resetGame();
-  run(w, nodesSeeing(75, 80));
+  run(w, nodesSeeing(75, 85));
 
   const status = w.getGameCursorStatus(CANVAS);
   assert.ok(status.sensor, "sensor mode carries a sensor block");
@@ -130,9 +130,9 @@ test("sensor mode reports the player's (x, y) in cm, and the hole under the draw
   assert.strictEqual(status.sensor.held, false);
   assert.strictEqual(status.sensor.source, "both", "both nodes see a player in the centre");
   assert.ok(Math.abs(status.sensor.xCm - 75) < 1, `x was ${status.sensor.xCm}`);
-  assert.ok(Math.abs(status.sensor.yCm - 80) < 1, `y was ${status.sensor.yCm}`);
+  assert.ok(Math.abs(status.sensor.yCm - 85) < 1, `y was ${status.sensor.yCm}`);
 
-  // 80 cm deep is the middle of the middle row with the default 20-140 cm
+  // 85 cm deep is the middle of the middle row with the default 10-160 cm
   // span, so the cursor sits on the centre of hole 4.
   assert.strictEqual(status.sensor.gx, 1);
   assert.strictEqual(status.sensor.gy, 1);
@@ -183,7 +183,7 @@ test("the phone pad takes the cursor from the sensors; they carry on underneath,
   const w = loadWindow();
   w.setGameInputMode("sensor");
   w.resetGame();
-  run(w, scannersSeeing(75, 80));
+  run(w, scannersSeeing(75, 85));
   const before = w.getGameCursorStatus(CANVAS);
   assert.strictEqual(before.remote, false);
   assert.strictEqual(before.hole, 4);
@@ -194,7 +194,7 @@ test("the phone pad takes the cursor from the sensors; they carry on underneath,
   Object.assign(state, { activeHole: 4, moleType: "mole", moleSpawnedAt: 0 });
 
   w.setRemotePoint(0.15, 0.85);
-  run(w, scannersSeeing(75, 80), 30);
+  run(w, scannersSeeing(75, 85), 30);
   const status = w.getGameCursorStatus(CANVAS);
   assert.strictEqual(w.getGameInputMode(), "sensor", "the pad is not a mode");
   assert.strictEqual(status.remote, true);
@@ -208,7 +208,7 @@ test("the phone pad takes the cursor from the sensors; they carry on underneath,
   // The sensors still place the player, on their own cursor, and the sensor
   // panel stays up.
   assert.strictEqual(status.sensor.status, "ok");
-  assert.ok(Math.hypot(status.sensor.xCm - 75, status.sensor.yCm - 80) < 3, `(${status.sensor.xCm}, ${status.sensor.yCm})`);
+  assert.ok(Math.hypot(status.sensor.xCm - 75, status.sensor.yCm - 85) < 3, `(${status.sensor.xCm}, ${status.sensor.yCm})`);
   assert.ok(Math.abs(status.sensor.board.nx - 0.5) < 0.03 && Math.abs(status.sensor.board.ny - 0.5) < 0.03,
     JSON.stringify(status.sensor.board));
   assert.ok(textsDrawn(w).includes("NODE"), "the sensor panel is drawn");
@@ -217,7 +217,7 @@ test("the phone pad takes the cursor from the sensors; they carry on underneath,
   const after = w.getGameCursorStatus(CANVAS);
   assert.strictEqual(after.remote, false);
   assert.strictEqual(after.hole, 4, "the sensors' cursor, without waiting for a frame");
-  run(w, scannersSeeing(75, 80), 2);
+  run(w, scannersSeeing(75, 85), 2);
   assert.strictEqual(state.score, 1, "and the sensors score again");
 });
 
@@ -304,7 +304,7 @@ test("every method's fix comes with its ring on the pad, the method in use and C
   const w = loadWindow();
   w.setGameInputMode("sensor");
   w.resetGame();
-  run(w, scannersSeeing(75, 80));
+  run(w, scannersSeeing(75, 85));
 
   const sensor = w.getGameCursorStatus(CANVAS).sensor;
   assert.strictEqual(sensor.method, "dyn", "Dynamic is the default");
@@ -314,8 +314,8 @@ test("every method's fix comes with its ring on the pad, the method in use and C
   ["dyn", "los", "tri", "avg"].forEach((method) => {
     const fix = sensor.fixes[method];
     assert.ok(fix, `${method} has a fix`);
-    assert.ok(Math.hypot(fix.xCm - 75, fix.yCm - 80) < 3, `${method} at ${fix.xCm}, ${fix.yCm}`);
-    // 80 cm deep in the centre column is the centre of the board.
+    assert.ok(Math.hypot(fix.xCm - 75, fix.yCm - 85) < 3, `${method} at ${fix.xCm}, ${fix.yCm}`);
+    // 85 cm deep in the centre column is the centre of the board.
     assert.ok(Math.abs(fix.nx - 0.5) < 0.03 && Math.abs(fix.ny - 0.5) < 0.03, `${method} ${fix.nx}, ${fix.ny}`);
   });
   // The cursor's own (x, y) is Dynamic's.
@@ -326,7 +326,7 @@ test("every method's fix comes with its ring on the pad, the method in use and C
   w.setPositionMethod("tri");
   assert.strictEqual(w.setPositionCompare(false), false);
   assert.strictEqual(w.getPositionCompare(), false);
-  run(w, scannersSeeing(75, 80), 2);
+  run(w, scannersSeeing(75, 85), 2);
   const after = w.getGameCursorStatus(CANVAS).sensor;
   assert.strictEqual(after.method, "tri");
   assert.strictEqual(after.placedBy, "tri");
@@ -544,6 +544,61 @@ test("the angle limit is on until the control panel turns it off, and follows th
   assert.ok(Math.abs(w.getAngleLimitCm(2, 60) - 184.8) < 0.05, "far edge");
 });
 
+// --- Too close (Aaron, 5 Oct) -------------------------------------------------------
+
+test("the dead zone: turned in, a reading over 10 cm is too close; with it off, only the reading itself counts", () => {
+  const w = loadWindow();
+  assert.strictEqual(w.getDeadZone(), true, "on by default");
+  w.setGameInputMode("sensor");
+  w.resetGame();
+  // The right node turned in to 31 degrees reads 14 cm: 14 cos 59 = 7.2 cm
+  // out from the nodes, inside the 10 cm strip. The left one reads 60 cm.
+  const close = scanners({ avg: 60, angle: 150, scanState: 0 }, { avg: 14, angle: 31, scanState: 0 });
+  run(w, close, 10);
+  let sensor = w.getGameState().sensor;
+  assert.strictEqual(sensor.status, "too-close");
+  const depth = 14 * Math.cos((59 * Math.PI) / 180);
+  assert.ok(Math.abs(sensor.distanceCm - depth) < 1e-9, `distance was ${sensor.distanceCm}`);
+  assert.strictEqual(w.isGameAlertActive(), true);
+  assert.strictEqual(w.getGameAlertInfo().distanceCm, sensor.distanceCm, "the alert shows the depth");
+
+  assert.strictEqual(w.setDeadZone(false), false);
+  run(w, close, 10);
+  sensor = w.getGameState().sensor;
+  assert.notStrictEqual(sensor.status, "too-close", "14 cm is over 10 cm");
+  assert.strictEqual(w.isGameAlertActive(), false);
+  run(w, scanners({ avg: 9, angle: 31, scanState: 0 }, { avg: 9, angle: 31, scanState: 0 }), 10);
+  assert.strictEqual(w.getGameState().sensor.status, "too-close", "9 cm is under it");
+});
+
+test("the control panel's held alert is up in any mode, and holds the round until it is let go", () => {
+  const w = loadWindow();
+  w.setGameInputMode("mouse");
+  w.resetGame();
+  assert.strictEqual(w.isAlertHeld(), false);
+  assert.strictEqual(w.isGameAlertActive(), false);
+  assert.strictEqual(w.setAlertHeld(true), true);
+  assert.strictEqual(w.isGameAlertActive(), true, "in a mouse round too");
+  // One clock across every step (run() starts its own again at 0), so the
+  // round clock only ever moves forward.
+  let t = 0;
+  const step = (frames) => {
+    for (let i = 0; i < frames; i += 1) {
+      t += FRAME_MS;
+      w.performance.now = () => t;
+      w.updateGame(t, CANVAS, scannersSeeing(75, 85));
+    }
+  };
+  step(2);
+  const before = w.getGameState().remainingMs;
+  step(30);
+  assert.strictEqual(w.getGameState().remainingMs, before, "the round waits");
+  assert.strictEqual(w.setAlertHeld(false), false);
+  assert.strictEqual(w.isGameAlertActive(), false);
+  step(30);
+  assert.ok(w.getGameState().remainingMs < before, "and carries on once it is let go");
+});
+
 // --- Dynamic's rules (Aaron, 5 Oct) ----------------------------------------------
 // Nodes as the firmware reports them: [left, right], each { avg, angle, scanState }.
 function scanners(left, right) {
@@ -635,9 +690,11 @@ test("Dynamic: a lone node whose own reading is in front of the board's near edg
   const w = loadWindow();
   w.setGameInputMode("sensor");
   w.resetGame();
-  // 5 Oct: the left node, turned fully in, found something 27 cm away - 14 cm
-  // out, in front of the near edge (20 cm).
-  run(w, scanners({ avg: 27, angle: 160, scanState: 0 }, FURNITURE));
+  // The left node, turned fully in, finds something 10 cm away - its point
+  // (the middle, 25 cm along its line) 8.6 cm out, in front of the near edge
+  // (10 cm). filterRules' test of the same name says why not 27 cm, as on
+  // the rig on 5 Oct.
+  run(w, scanners({ avg: 10, angle: 160, scanState: 0 }, FURNITURE));
   assert.notStrictEqual(w.getGameState().sensor.placedBy, "left");
 });
 

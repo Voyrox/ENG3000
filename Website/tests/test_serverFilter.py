@@ -236,6 +236,13 @@ class StageTwoSensorRig(unittest.TestCase):
         stage.set_angle_limit(True)
         self.assertTrue(stage.pipeline.config.angle_limit)
 
+    def test_the_dead_zone_switch_reaches_the_config(self):
+        stage = ServerFilterStage()
+        stage.set_dead_zone(False)
+        self.assertFalse(stage.pipeline.config.dead_zone)
+        stage.set_dead_zone(True)
+        self.assertTrue(stage.pipeline.config.dead_zone)
+
     def test_dynamic_rule_switches_reach_the_config(self):
         stage = ServerFilterStage()
         stage.set_dynamic_rules({"columnLock": False})
@@ -504,6 +511,13 @@ class AppWiring(unittest.TestCase):
         app.apply_filter_event({"type": "filter:angleLimit", "on": True})
         self.assertTrue(app.server_filter.pipeline.config.angle_limit)
 
+    def test_the_dead_zone_switch_reaches_the_chain(self):
+        app.server_filter = ServerFilterStage()
+        app.apply_filter_event({"type": "filter:deadZone", "on": False})
+        self.assertFalse(app.server_filter.pipeline.config.dead_zone)
+        app.apply_filter_event({"type": "filter:deadZone", "on": True})
+        self.assertTrue(app.server_filter.pipeline.config.dead_zone)
+
     def test_dynamic_rule_switches_reach_the_chain(self):
         app.server_filter = ServerFilterStage()
         app.apply_filter_event({"type": "sensor:dynamicRules", "rules": {"cornerNode": False}})
@@ -597,7 +611,7 @@ class FakeBrowser:
 # Shapes exactly as canvas.js sends them (syncServerFilterSetup).
 ASSIGN = {"type": "sensors:assign", "slots": [LEFT, CENTRE, RIGHT]}
 # Near edge 60 cm, far edge 150 cm: 30 cm rows. A player whose middle is 85 cm
-# out (a reading of 70 cm) is row 0 here but row 1 of the default 20-140 cm
+# out (a reading of 70 cm) is row 0 here but row 1 of the default 10-160 cm
 # area, so a test can tell whether it was applied.
 CALIBRATED_NEAR_CM, CALIBRATED_FAR_CM = 60.0, 150.0
 CALIBRATE = {"type": "calibration:update", "perColumn": [

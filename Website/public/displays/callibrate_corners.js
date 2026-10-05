@@ -64,9 +64,12 @@
   const CENTRE_COLUMN = 1;
 
   // Used when sensor mode starts without a completed calibration, so the game
-  // still responds instead of going dead.
-  const DEFAULT_NEAR_CM = 20;
-  const DEFAULT_FAR_CM = 140;
+  // still responds instead of going dead. The rows start behind the dead zone,
+  // the front ABSOLUTE_ALERT_CM of the grid, and end at its far edge
+  // (GRID_LENGTH_CM in game.js): three rows of 50 cm, square with the columns
+  // (Aaron, 5 Oct). filterRules.py PlayArea.per_column.
+  const DEFAULT_NEAR_CM = 10;
+  const DEFAULT_FAR_CM = 160;
 
   // Breathing room outside the calibrated edges. Standing a step past a corner
   // should report the edge row, not throw the player out of the game.

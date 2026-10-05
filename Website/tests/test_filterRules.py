@@ -80,6 +80,7 @@ class ParityWithGameJs(unittest.TestCase):
         switches = run.get("dynamicRules") or {}
         config = FilterConfig(kalman=run.get("kalman", True),
                               angle_limit=run.get("angleLimit", True),
+                              dead_zone=run.get("deadZone", True),
                               **{DYNAMIC_RULE_SWITCHES[name]: on for name, on in switches.items()})
         pipeline = CoordinatePipeline(TwoSensorGeometry(method=run["method"]), area=area,
                                       config=config)
@@ -157,6 +158,12 @@ class ParityWithGameJs(unittest.TestCase):
 
     def test_dynamic_with_the_angle_limit_off(self):
         self.assertGreater(self._replay("angleLimitOffDynamic"), 0)
+
+    def test_line_of_sight_with_the_dead_zone_off(self):
+        self.assertGreater(self._replay("deadZoneOff"), 0)
+
+    def test_dynamic_with_the_dead_zone_off(self):
+        self.assertGreater(self._replay("deadZoneOffDynamic"), 0)
 
     def test_the_kalman_switch_changes_the_recorded_stream(self):
         # Otherwise the two runs above would not show the switch doing anything.
@@ -390,9 +397,9 @@ class PlayAreaRules(unittest.TestCase):
         self.assertFalse(area.is_calibrated)
 
     def test_row_hysteresis_holds_near_a_boundary(self):
-        area = PlayArea.default()                      # rows split at 60 and 100
-        self.assertEqual(area.row_for(0, 102, previous_row=1), 1, "within 6 cm")
-        self.assertEqual(area.row_for(0, 110, previous_row=1), 2, "clear of it")
+        area = PlayArea.default()                      # rows split at 60 and 110
+        self.assertEqual(area.row_for(0, 112, previous_row=1), 1, "within 6 cm")
+        self.assertEqual(area.row_for(0, 120, previous_row=1), 2, "clear of it")
 
 
 class CellStabiliserRules(unittest.TestCase):
@@ -498,8 +505,8 @@ def two_sensor_sample(x_cm, depth_cm):
 class DynamicPickerBehaviour(unittest.TestCase):
     """Dynamic: the method that has held its square longest places the player."""
 
-    # Squares on the default board (columns 50 cm wide, rows 40 cm deep from
-    # 20 cm out): A is the near-left cell, B the middle, C the far-right.
+    # Squares on the default board (columns 50 cm wide, rows 50 cm deep from
+    # 10 cm out): A is the near-left cell, B the middle, C the far-right.
     A = (25.0, 40.0)
     B = (75.0, 80.0)
     C = (125.0, 120.0)
@@ -771,12 +778,15 @@ class DynamicRules(unittest.TestCase):
         self.assertNotEqual(by, "centre")
 
     def test_a_lone_node_reading_in_front_of_the_near_edge_is_not_confident(self):
-        # 5 Oct: the left node, turned fully in (160), found something 27 cm
-        # away - its own point 14 cm out, in front of the board's near edge
-        # (20 cm). Not the player, so it does not place them on its own.
+        # The left node, turned fully in (160), finds something 10 cm away -
+        # its own point (the middle, 25 cm along its line) 8.6 cm out, in
+        # front of the board's near edge (10 cm). Not the player, so it does
+        # not place them on its own. (On 5 Oct it found something 27 cm away:
+        # its point is 14 cm out, on the board since the rows start at 10 cm,
+        # and the reading is in the dead zone, 9.2 cm out.)
         geometry = TwoSensorGeometry()
         for k in range(3):
-            _, by = self.scan(geometry, [(27.0, 160, 0), None, self.FURNITURE], 50.0 * k)
+            _, by = self.scan(geometry, [(10.0, 160, 0), None, self.FURNITURE], 50.0 * k)
         self.assertNotEqual(by, "left")
 
     def test_a_lone_node_reading_off_the_side_of_the_board_is_not_confident(self):
@@ -908,18 +918,18 @@ class TwoSensorGeometryBehaviour(unittest.TestCase):
 
     def test_beyond_the_far_limit_is_kept_on_the_far_square(self):
         # Only nobody found is out of bounds (Aaron, 5 Oct). 185 cm straight
-        # out from the right node is past the far edge (140 cm): the player is
-        # kept a tenth of a row inside it, 136 cm, on the far right square.
+        # out from the right node is past the far edge (160 cm): the player is
+        # kept a tenth of a row inside it, 155 cm, on the far right square.
         fix = self.locate([None, None, 170.0])
         self.assertEqual(fix.status, STATUS_OK)
         self.assertEqual(fix.column, 2)
-        self.assertAlmostEqual(fix.y_cm, 140.0 - 40.0 * 0.1)
+        self.assertAlmostEqual(fix.y_cm, 160.0 - 50.0 * 0.1)
         self.assertEqual(fix.distance_cm, fix.y_cm)
 
     def test_in_front_of_the_near_edge_is_kept_on_the_near_square(self):
-        fix = self.locate(two_sensor_sample(75.0, 10.0))
+        fix = self.locate(two_sensor_sample(75.0, 5.0))
         self.assertEqual(fix.status, STATUS_OK)
-        self.assertAlmostEqual(fix.y_cm, 20.0 + 40.0 * 0.1)
+        self.assertAlmostEqual(fix.y_cm, 10.0 + 50.0 * 0.1)
 
     def test_off_either_side_of_the_board_is_kept_on_the_edge_square(self):
         # Every method, each on its own geometry (a line-of-sight track would
@@ -1068,15 +1078,15 @@ class TwoSensorGeometryBehaviour(unittest.TestCase):
 
     def test_trilateration_crosses_the_distances_in_a_far_square_across_the_board(self):
         geometry = TwoSensorGeometry(method="tri")
-        # The player's middle 135 cm out in the right column: 168 cm from the
-        # left node, past the far edge plus its margin (140 + 15) as a depth,
+        # The player's middle 150 cm out in the right column: 180 cm from the
+        # left node, past the far edge plus its margin (160 + 15) as a depth,
         # but the point along the left servo's line is on the board. Both
         # distances count, and the crossing places the player.
-        d_left = math.hypot(125 - 25, 135)
+        d_left = math.hypot(125 - 25, 150)
         self.assertGreater(d_left, PlayArea.default().far_cm + PlayArea.EDGE_MARGIN_CM)
-        fix = self.scan(scanner_sample(125.0, 135.0, aim_error_deg=5.0), geometry=geometry)
+        fix = self.scan(scanner_sample(125.0, 150.0, aim_error_deg=5.0), geometry=geometry)
         self.assertAlmostEqual(fix.x_cm, 125.0)
-        self.assertAlmostEqual(fix.y_cm, 135.0)
+        self.assertAlmostEqual(fix.y_cm, 150.0)
 
     def test_one_node_aimed_away_leaves_the_crossing_to_the_other(self):
         # The right node looks 25 degrees past the player (furniture, say),
@@ -1389,11 +1399,13 @@ class BothNodesLost(unittest.TestCase):
     def test_short_of_out_of_bounds_the_player_stays_on_the_board(self):
         # Off the side, past the far edge, in front of the near one, and a
         # long run of no echo from nodes that send no scan state: the player
-        # stays on the board (the edge square, or the last one, held).
-        pipe = CoordinatePipeline(TwoSensorGeometry())
+        # stays on the board (the edge square, or the last one, held). In
+        # front of the near edge is the dead zone, too close with it on
+        # (DeadZone), so it is off here.
+        pipe = CoordinatePipeline(TwoSensorGeometry(), config=FilterConfig(dead_zone=False))
         t = 0.0
         for where, cell in (((-30.0, 80.0), (0, 1)), ((75.0, 220.0), (1, 2)),
-                            ((180.0, 40.0), (2, 0)), ((75.0, 12.0), (1, 0))):
+                            ((180.0, 40.0), (2, 0)), ((75.0, 5.0), (1, 0))):
             pipe.reset()
             result = None
             for k in range(60):
@@ -1498,6 +1510,76 @@ class AngleLimit(unittest.TestCase):
         changed = sum(1 for a, b in zip(runs["default"]["steps"], runs["angleLimitOff"]["steps"])
                       if a[at] != b[at])
         self.assertGreater(changed, 20, "line of sight should differ with the angle limit off")
+
+
+class DeadZone(unittest.TestCase):
+    """The dead zone (Aaron, 5 Oct): too close when a raw reading's point along
+    its node's servo line is less than 10 cm out, the strip across the front
+    of the grid; with the switch off, when the raw reading itself is."""
+
+    STEP_MS = 50.0
+
+    def settle(self, sample, config=None):
+        """Two updates of the same sample, enough to confirm too close."""
+        pipe = CoordinatePipeline(TwoSensorGeometry(), config=config)
+        result = None
+        for k in range(2):
+            result = pipe.update(sample, k * self.STEP_MS)
+        return result
+
+    def test_turned_in_a_reading_over_10_cm_is_too_close(self):
+        # The right node at 31 degrees reads 14 cm: 14 cos 59 = 7.2 cm out.
+        # The left one sees the player's back half, 60 cm out.
+        sample = [(60.0, 150, 0), None, (14.0, 31, 0)]
+        result = self.settle(sample)
+        self.assertEqual(result.status, STATUS_TOO_CLOSE)
+        self.assertAlmostEqual(result.y_cm, 14.0 * math.cos(math.radians(59)))
+        self.assertNotEqual(self.settle(sample, FilterConfig(dead_zone=False)).status,
+                            STATUS_TOO_CLOSE)
+
+    def test_the_distance_into_the_dead_zone_follows_the_servo_angle(self):
+        # 10 / cos(phi): 10 cm straight out, 15.6 at 40 and 140, 29.2 at 160.
+        for angle, edge in ((90, 10.0), (40, 15.557), (140, 15.557), (160, 29.238)):
+            inside = self.settle([(edge - 0.1, angle, 0), None, None])
+            outside = self.settle([(edge + 0.1, angle, 0), None, None])
+            self.assertEqual(inside.status, STATUS_TOO_CLOSE, angle)
+            self.assertNotEqual(outside.status, STATUS_TOO_CLOSE, angle)
+
+    def test_off_only_the_reading_itself_counts(self):
+        off = FilterConfig(dead_zone=False)
+        self.assertNotEqual(self.settle([(25.0, 160, 0), None, None], off).status, STATUS_TOO_CLOSE)
+        result = self.settle([(9.0, 160, 0), None, None], off)
+        self.assertEqual(result.status, STATUS_TOO_CLOSE)
+        self.assertEqual(result.y_cm, 9.0)
+
+    def test_one_close_reading_is_not_enough(self):
+        pipe = CoordinatePipeline(TwoSensorGeometry())
+        result = pipe.update([(20.0, 150, 0), None, None], 0.0)
+        self.assertNotEqual(result.status, STATUS_TOO_CLOSE)
+
+    def test_the_rows_start_behind_the_dead_zone(self):
+        area = PlayArea.default()
+        self.assertEqual(area.per_column, ((10.0, 160.0),) * 3)
+        self.assertEqual([area.row_for(0, y) for y in (11, 59, 61, 109, 111, 159)],
+                         [0, 0, 1, 1, 2, 2])
+        self.assertEqual(area.alert_threshold_cm, 10.0)
+
+    def test_the_pipeline_switch_changes_only_the_dead_zone(self):
+        pipeline = CoordinatePipeline(TwoSensorGeometry(method="los"))
+        pipeline.set_dead_zone(False)
+        self.assertFalse(pipeline.config.dead_zone)
+        self.assertEqual(pipeline.config, FilterConfig(dead_zone=False))
+        pipeline.set_dead_zone(True)
+        self.assertTrue(pipeline.config.dead_zone)
+
+    def test_the_parity_runs_show_the_switch_doing_something(self):
+        with open(FIXTURE, encoding="utf-8") as fh:
+            trace = json.load(fh)
+        runs = trace["runs"]
+        at = trace["fields"].index("status")
+        close = [sum(1 for step in runs[name]["steps"] if step[at] == STATUS_TOO_CLOSE)
+                 for name in ("default", "deadZoneOff")]
+        self.assertGreater(close[0], close[1] + 50, "too close more often with the dead zone on")
 
 
 if __name__ == "__main__":

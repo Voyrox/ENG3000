@@ -250,12 +250,21 @@ function buildStream() {
   for (let i = 0; i < 60; i++) push(scanned(SENSOR_X_CM[0], 125, 135), scanned(SENSOR_X_CM[1], 125, 135));
   for (let i = 0; i < 60; i++) push(scanned(SENSOR_X_CM[0], 25, 135), scanned(SENSOR_X_CM[1], 25, 135));
 
+  // 27. The dead zone: the player steps in to the front of the right column,
+  //     their middle about 15 cm out. The right node, turned in to 31 degrees,
+  //     reads 14 cm - over 10, but its point along the servo line is 7 cm out,
+  //     inside the 10 cm strip, so too close with the dead zone on and not
+  //     with it off. Then they step back to 60 cm out.
+  for (let i = 0; i < 40; i++) push([jitter(60, 2), 150, 0], [jitter(14, 0.5), 31, 0]);
+  for (let i = 0; i < 40; i++) push(scanned(SENSOR_X_CM[0], 100, 60), scanned(SENSOR_X_CM[1], 100, 60));
+
   return steps;
 }
 
 // --- Run the real JS -----------------------------------------------------------
 
-function runJs(stream, calibration, method, kalman = true, dynamicRules = null, angleLimit = true) {
+function runJs(stream, calibration, method, kalman = true, dynamicRules = null, angleLimit = true,
+  deadZone = true) {
   let clock = 0;
   const context = {
     console,
@@ -292,6 +301,7 @@ function runJs(stream, calibration, method, kalman = true, dynamicRules = null, 
   w.setPositionMethod(method);
   w.setKalman(kalman);
   w.setAngleLimit(angleLimit);
+  w.setDeadZone(deadZone);
   if (dynamicRules) w.setDynamicRules(dynamicRules);
   w.setGameInputMode("sensor");
   w.resetGame();
@@ -376,6 +386,10 @@ const trace = {
     // Line of sight and Dynamic with the angle limit off: every reading counts.
     angleLimitOff: { method: "los", angleLimit: false, ...runJs(stream, null, "los", true, null, false) },
     angleLimitOffDynamic: { method: "dyn", angleLimit: false, ...runJs(stream, null, "dyn", true, null, false) },
+    // Line of sight and Dynamic with the dead zone off: too close by the raw
+    // reading, whatever the angle.
+    deadZoneOff: { method: "los", deadZone: false, ...runJs(stream, null, "los", true, null, true, false) },
+    deadZoneOffDynamic: { method: "dyn", deadZone: false, ...runJs(stream, null, "dyn", true, null, true, false) },
   },
 };
 

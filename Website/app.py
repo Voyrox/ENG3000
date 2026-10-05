@@ -93,8 +93,15 @@ CONTROL_ENABLED = os.environ.get("CON") == "1"
 # its servo line runs on the grid is dropped by every method but trilateration).
 # "dynamicRules" turns Dynamic's rules on or off (the far corners, the column
 # lock, a lone node).
+# "deadZone" turns the dead zone on or off (too close by a reading's depth
+# along its servo line, or by the reading itself).
+# "tooCloseHold" is the hold button: the too-close screen while it is down,
+# re-sent every 250 ms while held.
 CONTROL_ACTIONS = {"point", "release", "start", "mode", "pause", "resume", "restart", "menu", "testMode",
-                   "position", "compare", "lostReadings", "kalman", "angleLimit", "dynamicRules"}
+                   "position", "compare", "lostReadings", "kalman", "angleLimit", "dynamicRules",
+                   "deadZone", "tooCloseHold"}
+# Sent many times a second while a finger is down, so not printed.
+QUIET_CONTROL_ACTIONS = {"point", "release", "tooCloseHold"}
 # Every raw node reading to logs/raw-*.csv, for the bench noise test
 # (tools/bench_noise.py). Off unless started with REC=1; see sessionRecorder.py.
 recorder = SessionRecorder.from_env(os.environ)
@@ -815,6 +822,9 @@ def apply_filter_event(event):
             elif event.get("type") == "filter:angleLimit":
                 # The control panel's angle limit switch, passed on by the game.
                 server_filter.set_angle_limit(bool(event["on"]))
+            elif event.get("type") == "filter:deadZone":
+                # The control panel's dead zone switch, passed on by the game.
+                server_filter.set_dead_zone(bool(event["on"]))
             elif event.get("type") == "sensor:dynamicRules":
                 # Dynamic's rule switches, from the control panel by way of the game.
                 server_filter.set_dynamic_rules(event["rules"])
@@ -902,7 +912,7 @@ async def control_handler(websocket):
                 continue
             if event.get("action") not in CONTROL_ACTIONS:
                 continue
-            if event["action"] not in ("point", "release"):
+            if event["action"] not in QUIET_CONTROL_ACTIONS:
                 print(f"Control panel: {event}")
             command = json.dumps({**event, "type": "remote:command"})
             broadcast(BROWSER_CONNECTIONS.copy(), command)

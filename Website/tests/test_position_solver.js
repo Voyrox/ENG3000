@@ -37,8 +37,8 @@ let clock = 0;
 // LEFT and RIGHT (25 and 125); the game ignores the centre slot, so the value
 // generated for 75 is never read and the tests describe a two-node rig.
 const SENSOR_X = [25, 75, 125];
-const NEAR_CM = 20;
-const FAR_CM = 140;
+const NEAR_CM = 10;
+const FAR_CM = 160;
 
 // Loads the page's modules into a fresh window.
 function loadWindow() {

@@ -118,6 +118,13 @@ class FilterConfig:
     angle_limit: bool = True
     angle_limit_tolerance_cm: float = 5.0
 
+    # The dead zone (tuning.deadZone; Aaron, 5 Oct): the strip across the
+    # front of the grid, the alert threshold (10 cm) deep. True: a raw reading
+    # is too close when its point along the node's servo line is in it
+    # (Geometry.nearest_depth_cm()). False: the raw reading itself is checked,
+    # whatever the angle. CoordinatePipeline.set_dead_zone() flips it live.
+    dead_zone: bool = True
+
     # Smoothing after the median (tuning.kalmanSigmaA, tuning.kalmanSigmaR,
     # tuning.fftWindow, tuning.fftCutoffHz, FFT_MIN_SAMPLES). The Kalman is
     # tracking.ConstantVelocityTracker with its default gap reset and starting
@@ -236,7 +243,11 @@ class PlayArea:
     PlayArea.default() before calibration and PlayArea.calibrated() after.
     """
 
-    per_column: tuple = ((20.0, 140.0),) * GRID_SIZE
+    # The rows start behind the dead zone, the front ABSOLUTE_ALERT_CM of the
+    # grid, and end at its far edge (GRID_LENGTH_CM): three rows of 50 cm,
+    # square with the columns (Aaron, 5 Oct). DEFAULT_NEAR_CM/DEFAULT_FAR_CM
+    # in callibrate_corners.js.
+    per_column: tuple = ((10.0, 160.0),) * GRID_SIZE
     is_calibrated: bool = False
     width_cm: float = 150.0
 
@@ -635,6 +646,12 @@ class Geometry(ABC):
     @abstractmethod
     def nearest_raw_cm(self, raw_channels: Sequence[Optional[float]]) -> Optional[float]:
         """The raw distance from the screen that the proximity guard checks."""
+
+    def nearest_depth_cm(self, raw_channels: Sequence[Optional[float]]) -> Optional[float]:
+        """What the proximity guard checks with the dead zone on: the nearest
+        raw reading's depth out from the nodes. A geometry with no servo
+        angles reads straight out, so its distance is the depth."""
+        return self.nearest_raw_cm(raw_channels)
 
     @abstractmethod
     def locate(self, filtered: Sequence[Optional[float]], area: PlayArea,
@@ -1155,6 +1172,15 @@ class TwoSensorGeometry(Geometry):
     def nearest_raw_cm(self, raw_channels) -> Optional[float]:
         present = [v for v in raw_channels if v is not None]
         return min(present) if present else None
+
+    def nearest_depth_cm(self, raw_channels) -> Optional[float]:
+        """Each raw reading's depth, its point along the node's servo line:
+        turned phi off straight out, a reading is in the dead zone under
+        threshold / cos(phi). closeDepthCm() in game.js. The depth is the
+        same wherever the node stands across the board, so x is 0 here."""
+        depths = [scanner_point(0.0, raw_channels[slot], self._angles[slot])[1]
+                  for slot in (self.LEFT, self.RIGHT) if raw_channels[slot] is not None]
+        return min(depths) if depths else None
 
     def channel_angles(self) -> list:
         return list(self._angles)
@@ -1696,6 +1722,13 @@ class CoordinatePipeline:
         for channel in self._channels:
             channel._cfg = self.config
 
+    def set_dead_zone(self, on: bool) -> None:
+        """The dead zone switch (setDeadZone() in game.js), from the next
+        update; nothing else in the config changes."""
+        self.config = replace(self.config, dead_zone=bool(on))
+        for channel in self._channels:
+            channel._cfg = self.config
+
     def reset(self) -> None:
         for channel in self._channels:
             channel.reset()
@@ -1736,8 +1769,10 @@ class CoordinatePipeline:
                     for ch, v, a, is_fresh in zip(self._channels, raw, angles, fresh)]
         self.geometry.track(filtered, fresh, now_ms, self.area, self.config, heard=heard)
 
-        # Safety first, on raw values, before anything is smoothed.
-        nearest = self.geometry.nearest_raw_cm(raw)
+        # Safety first, on raw values, before anything is smoothed. With the
+        # dead zone on, each reading counts as its depth along its servo line.
+        nearest = (self.geometry.nearest_depth_cm(raw) if self.config.dead_zone
+                   else self.geometry.nearest_raw_cm(raw))
         too_close = self._guard.update(nearest, self.area.alert_threshold_cm)
 
         if too_close:

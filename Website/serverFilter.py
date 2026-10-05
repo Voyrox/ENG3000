@@ -131,6 +131,10 @@ class ServerFilterStage:
         """The game's angle limit switch (FilterConfig.angle_limit)."""
         self.pipeline.set_angle_limit(on)
 
+    def set_dead_zone(self, on: bool) -> None:
+        """The game's dead zone switch (FilterConfig.dead_zone)."""
+        self.pipeline.set_dead_zone(on)
+
     def set_calibration(self, per_column: Sequence[tuple]) -> None:
         """Apply the calibration as (near_cm, far_cm) per column: the left and
         right as captured, the centre derived by the browser."""

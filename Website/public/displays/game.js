@@ -12,6 +12,8 @@
 //   window.readSensorCoordinate(orderedNodes)   - raw fix, also used by calibration
 //   window.isGameAlertActive()                  - drive the full-screen alert
 //   window.getGameAlertInfo()                   - { active, distanceCm }
+//   window.setAlertHeld(on) / window.isAlertHeld() - the control panel's held alert
+//   window.setDeadZone(on) / window.getDeadZone()   - too close by depth, or by the raw reading
 //   window.handleGameClick(canvas, x, y)        - register a hit attempt
 //   window.getGamePauseButtonAtPoint(canvas,x,y)- hit-test the pause icon
 //   window.getPauseMenuButtonAtPoint(canvas,x,y)- hit-test Resume / Restart / Main Menu
@@ -183,6 +185,13 @@
     // angle_limit_tolerance_cm.
     angleLimit: true,
     angleLimitToleranceCm: 5,
+    // The dead zone (Aaron, 5 Oct): the strip across the front of the grid,
+    // the alert threshold (10 cm) deep, where the nodes sit. On, a node's raw
+    // reading is too close when its point along the servo line is in it
+    // (closeDepthCm()): 10 cm straight out, 29 cm with the servo turned 70
+    // degrees. Off, the raw reading itself is checked, whatever the angle.
+    // Switched on the control panel. Python: FilterConfig dead_zone.
+    deadZone: true,
     // The smoothing after each sensor's median (see conditionSensor()).
     // kalmanSigmaA: the player's acceleration noise, cm/s^2 - higher follows a
     // lunge faster, lower smooths more. kalmanSigmaR: one reading's noise, cm.
@@ -628,17 +637,33 @@
     return gameState.inputMode;
   };
 
-  // The full-screen alert is driven purely by the raw distance, and only in
+  // The full-screen alert is driven purely by the raw readings, and only in
   // sensor mode mid-round - the mouse has no notion of standing too close, and
   // a paused or finished round should not be hijacked. Nor while the phone pad
-  // places the player.
+  // places the player. Or while the control panel's hold button is down
+  // (setAlertHeld()), in any mode.
   window.isGameAlertActive = function isGameAlertActive() {
-    return (
+    return alertHeld || (
       gameState.inputMode === "sensor" &&
       !gameState.remoteActive &&
       gameState.status === "playing" &&
       gameState.sensor.status === "too-close"
     );
+  };
+
+  // The control panel's "Hold: too close" button (Aaron, 5 Oct): while a
+  // finger is on it, the too-close alert is up and a round waits, as for the
+  // real thing; lifting the finger hands back to the sensors. canvas.js
+  // shows it over the other screens too.
+  let alertHeld = false;
+
+  window.setAlertHeld = function setAlertHeld(on) {
+    alertHeld = Boolean(on);
+    return alertHeld;
+  };
+
+  window.isAlertHeld = function isAlertHeld() {
+    return alertHeld;
   };
 
   window.getGameAlertInfo = function getGameAlertInfo() {
@@ -1555,7 +1580,7 @@
   // calibration), as rawToGrid() and the cursor use it.
   function columnSpan(column) {
     const bounds = window.getCalibrationBounds ? window.getCalibrationBounds() : null;
-    return bounds ? bounds.perColumn[column] : { near: 20, far: 140 };
+    return bounds ? bounds.perColumn[column] : { near: 10, far: 160 };
   }
 
   // Whether a node's distance can put the player on the board. Not the
@@ -1581,6 +1606,24 @@
       if (window.isPointInPlayArea(point.x, point.y)) return true;
     }
     return false;
+  }
+
+  // What the too-close check compares with the alert threshold: the nearest
+  // RAW reading (the front of the body), or null with none. With
+  // tuning.deadZone on, each reading counts as its depth, its point along the
+  // node's servo line: the dead zone is a strip across the front of the grid,
+  // so turned phi off straight out, a reading is in it under
+  // threshold / cos(phi) - 10 cm straight out, 15.6 at 40 or 140 degrees, 29.2
+  // at 160. Off, the reading itself, whatever the angle. filterRules.py
+  // Geometry.nearest_depth_cm().
+  function closeDepthCm(raw, angles) {
+    let closest = null;
+    for (const slot of [LEFT_SENSOR, RIGHT_SENSOR]) {
+      if (raw[slot] === null) continue;
+      const cm = tuning.deadZone ? scannerPoint(columnCentreCm(slot), raw[slot], angles[slot]).y : raw[slot];
+      if (closest === null || cm < closest) closest = cm;
+    }
+    return closest;
   }
 
   // How far the servo line of the node at nodeX runs before it leaves the
@@ -2281,6 +2324,18 @@
     return angleLimitCm(columnCentreCm(slot), angle);
   };
 
+  // The dead zone switch, on by default; see tuning.deadZone. Takes effect
+  // from the next update.
+  window.getDeadZone = function getDeadZone() {
+    return tuning.deadZone;
+  };
+
+  window.setDeadZone = function setDeadZone(on) {
+    tuning.deadZone = Boolean(on);
+    console.info(`[dead zone] ${tuning.deadZone ? "on" : "off"}`);
+    return tuning.deadZone;
+  };
+
   // Which slots carry a reading not seen before. The server stamps each node's
   // latest message (last_seen), and only one node scans at a time, so between
   // its turns a node's last reading is repeated in every update. A slot with
@@ -2432,12 +2487,10 @@
     // Safety runs on the RAW readings, never the filtered ones: a median window
     // full of safe distances would smooth away the very spike the alert exists
     // to catch. Two consecutive frames (100 ms at 20 Hz) are required so that
-    // crosstalk between the two sensors cannot raise a false alarm.
-    const rawMin = raw.reduce(
-      (min, value) => (value === null ? min : min === null || value < min ? value : min),
-      null
-    );
-    if (rawMin !== null && window.isTooClose(rawMin)) {
+    // crosstalk between the two sensors cannot raise a false alarm. With the
+    // dead zone on, each reading is first turned into its depth (closeDepthCm()).
+    const closest = closeDepthCm(raw, angles);
+    if (closest !== null && window.isTooClose(closest)) {
       closeStreak += 1;
     } else {
       closeStreak = 0;
@@ -2451,7 +2504,7 @@
     // is reported without advancing the hysteresis below.
     if (tooClose) {
       const column = position ? columnAtCm(x) : null;
-      return { ...base, column, distanceCm: rawMin, status: "too-close" };
+      return { ...base, column, distanceCm: closest, status: "too-close" };
     }
 
     // Both nodes are lost over their last readings (bothNodesLost()): nobody
@@ -2577,7 +2630,7 @@
     // to different depths.
     const bounds = window.getCalibrationBounds ? window.getCalibrationBounds() : null;
     const slot = Number.isInteger(column) && column >= 0 && column < GRID_COLUMNS ? column : 1;
-    const span = bounds ? bounds.perColumn[slot] : { near: 20, far: 140 };
+    const span = bounds ? bounds.perColumn[slot] : { near: 10, far: 160 };
     const rowDepth = Math.max(1e-6, (span.far - span.near) / GRID_ROWS);
 
     // How many hole-widths from column 0's centre, and how far through the
@@ -2919,10 +2972,11 @@
   // dropout they cannot control.
   // While the nodes learn the room, their echoes are the furniture's, not the
   // player's, so the round waits for that too. Never while the phone pad
-  // places the player.
+  // places the player. The control panel's held alert (setAlertHeld()) holds
+  // a round in any mode.
   function isSensorBlocked() {
-    return gameState.inputMode === "sensor" && !gameState.remoteActive &&
-      (gameState.sensor.status !== "ok" || roomStatus === "learning");
+    return alertHeld || (gameState.inputMode === "sensor" && !gameState.remoteActive &&
+      (gameState.sensor.status !== "ok" || roomStatus === "learning"));
   }
 
   window.getGameOverButtonAtPoint = function getGameOverButtonAtPoint(canvas, x, y) {

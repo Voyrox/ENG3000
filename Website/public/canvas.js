@@ -18,6 +18,9 @@ let gameLoopId = null;
 // Which screen the alert returns to. A game-driven alert clears itself, so it
 // has no Back button; the calibrate-driven one does.
 let alertReturnScreen = "calibrate";
+// The screen the control panel's held alert went up over, outside a round
+// (holdAlert()); null when it is not up there.
+let heldAlertFrom = null;
 const audioContext = new (window.AudioContext || window.webkitAudioContext)();
 let alertOscillator = null;
 
@@ -106,7 +109,8 @@ function draw() {
     window.renderAlert(ctx, c, {
       active: true,
       distanceCm: fromGame ? window.getGameAlertInfo().distanceCm : null,
-      showBack: !fromGame,
+      showBack: !fromGame && heldAlertFrom === null,
+      footer: fromGame ? "The game resumes automatically" : null,
     });
     return;
   }
@@ -402,6 +406,7 @@ let sentPositionMethod = null;
 let sentLostReadings = null;
 let sentKalman = null;
 let sentAngleLimit = null;
+let sentDeadZone = null;
 let sentDynamicRules = null;
 
 function sendToServer(message) {
@@ -462,6 +467,12 @@ function syncServerFilterSetup() {
     sentAngleLimit = angleLimit;
   }
 
+  // The dead zone switch, so the server's chain checks too close the same way.
+  const deadZone = window.getDeadZone();
+  if (deadZone !== sentDeadZone && sendToServer({ type: "filter:deadZone", on: deadZone })) {
+    sentDeadZone = deadZone;
+  }
+
   // Dynamic's rule switches, so the server's chain places the player the same way.
   const rules = window.getDynamicRules();
   const rulesKey = JSON.stringify(rules);
@@ -501,6 +512,38 @@ function releaseRemote() {
   window.clearTimeout(remoteIdleTimer);
   remoteIdleTimer = null;
   window.releaseRemotePoint();
+}
+
+// The control panel's "Hold: too close" button (Aaron, 5 Oct): the too-close
+// alert is up while a finger is on it, from any screen, and lifting the
+// finger goes back. In a round the game loop puts it up and takes it down, as
+// for a real one, and the round waits (isSensorBlocked() in game.js); on any
+// other screen it goes up here, over that screen. The phone re-sends the hold
+// while the finger is down, so if it goes quiet the alert drops after
+// REMOTE_IDLE_MS.
+let alertHoldTimer = null;
+
+function holdAlert(on) {
+  window.clearTimeout(alertHoldTimer);
+  alertHoldTimer = null;
+  window.setAlertHeld(on);
+  if (on) {
+    alertHoldTimer = window.setTimeout(() => holdAlert(false), REMOTE_IDLE_MS);
+    if (!roundOnScreen() && screen !== "alert") {
+      heldAlertFrom = screen;
+      alertReturnScreen = screen;
+      screen = "alert";
+      if (soundEnabled()) playAlertNoise();
+    }
+  } else {
+    // Back to the screen it went up over, unless a round has started since.
+    if (heldAlertFrom !== null && screen === "alert" && alertReturnScreen !== "game") {
+      screen = heldAlertFrom;
+      stopAlertNoise();
+    }
+    heldAlertFrom = null;
+  }
+  draw();
 }
 
 // Commands relayed from the phone control panel (/control). The server only
@@ -571,6 +614,16 @@ function handleRemoteCommand(command) {
       window.setAngleLimit(command.enabled);
       syncServerFilterSetup();
       break;
+    case "deadZone":
+      // The dead zone: too close by each reading's depth along its servo
+      // line, or by the reading itself.
+      window.setDeadZone(command.enabled);
+      syncServerFilterSetup();
+      break;
+    case "tooCloseHold":
+      // The hold button, down (and re-sent while held) or up.
+      holdAlert(Boolean(command.on));
+      break;
     case "dynamicRules":
       // Dynamic's rules on or off: { columnLock, loneNode, cornerNode }, only
       // the switches named.
@@ -613,6 +666,8 @@ function sendGameStatus() {
     lostScores: window.getLostScores(),
     kalman: window.getKalman(),
     angleLimit: window.getAngleLimit(),
+    deadZone: window.getDeadZone(),
+    alertHeld: window.isAlertHeld(),
     dynamicRules: window.getDynamicRules(),
   }));
 }
@@ -673,12 +728,13 @@ function connectSocket() {
     // playing on a frozen one.
     if (serverFiltering) window.setServerCoordinate(null);
     // A restarted server has forgotten the position method, the lost
-    // readings, the Kalman and angle limit switches and Dynamic's rule
-    // switches; send them again.
+    // readings, the Kalman, angle limit and dead zone switches and Dynamic's
+    // rule switches; send them again.
     sentPositionMethod = null;
     sentLostReadings = null;
     sentKalman = null;
     sentAngleLimit = null;
+    sentDeadZone = null;
     sentDynamicRules = null;
     if (reconnectTimer === null) {
       reconnectTimer = window.setTimeout(() => {
@@ -813,8 +869,9 @@ c.addEventListener("click", (event) => {
   }
 
   if (screen === "alert") {
-    // A game-driven alert has no Back button; it clears when the player steps back.
-    const showBack = alertReturnScreen !== "game";
+    // A game-driven alert has no Back button; it clears when the player steps
+    // back. Nor has the control panel's held one: it clears when let go.
+    const showBack = alertReturnScreen !== "game" && heldAlertFrom === null;
     const hit = window.getAlertButtonAtPoint(c, point.x, point.y, showBack);
     if (hit && hit.type === "back") {
       screen = alertReturnScreen;

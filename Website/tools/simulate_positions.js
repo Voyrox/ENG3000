@@ -148,7 +148,7 @@ function run(method, turnMs, seed) {
   let rightCell = 0;
   let stamp = 0;
   let nextMessage = 0;
-  const rowOf = (y) => (y < 60 ? 0 : y < 100 ? 1 : 2);   // default bounds, 20-140 cm
+  const rowOf = (y) => (y < 60 ? 0 : y < 110 ? 1 : 2);   // default bounds, 10-160 cm
   const columnOf = (x) => Math.max(0, Math.min(2, Math.floor(x / 50)));
 
   for (let t = 0; t < DURATION_S * 1000; t += FRAME_MS) {

@@ -1596,6 +1596,15 @@ class ControlPanelTests(BrokerTestCase):
         sent = self.relayed({"action": "angleLimit", "enabled": False})
         self.assertEqual(sent, [{"action": "angleLimit", "enabled": False, "type": "remote:command"}])
 
+    def test_the_dead_zone_switch_is_relayed_to_the_game(self):
+        sent = self.relayed({"action": "deadZone", "enabled": False})
+        self.assertEqual(sent, [{"action": "deadZone", "enabled": False, "type": "remote:command"}])
+
+    def test_the_too_close_hold_is_relayed_to_the_game(self):
+        for on in (True, False):
+            sent = self.relayed({"action": "tooCloseHold", "on": on})
+            self.assertEqual(sent, [{"action": "tooCloseHold", "on": on, "type": "remote:command"}])
+
     def test_dynamic_rule_switches_are_relayed_to_the_game(self):
         sent = self.relayed({"action": "dynamicRules", "rules": {"loneNode": False}})
         self.assertEqual(sent, [{"action": "dynamicRules", "rules": {"loneNode": False},
