@@ -1014,19 +1014,35 @@ class TwoSensorGeometryBehaviour(unittest.TestCase):
         self.assertAlmostEqual(fix.x_cm, max(5.0, x))   # off the left edge: kept on it
         self.assertAlmostEqual(fix.y_cm, y)
 
-    def test_trilateration_prefers_a_node_whose_point_is_on_the_board(self):
+    def test_trilateration_prefers_a_node_whose_beam_reaches_the_board(self):
         geometry = TwoSensorGeometry(method="tri")
-        # As above with both servos at 60: the left node's point is now 19 cm
-        # past the left edge, past the margin, so it is not on the board, and
-        # the right node, further away but pointing on to the board, places
-        # the player - in the centre column, where they are.
+        # As above with both servos at 50: even the edge of the left node's
+        # beam (42.5) is 22 cm past the left edge, past the margin, so nothing
+        # it hears is on the board, and the right node, further away but
+        # pointing on to the board, places the player - in the centre column,
+        # where they are.
         d_right = math.hypot(60 - 125, 80) - BODY_RADIUS_CM
-        sample = [(math.hypot(60 - 25, 80) - BODY_RADIUS_CM, 60, 0), None, (d_right, 60, 0)]
+        sample = [(math.hypot(60 - 25, 80) - BODY_RADIUS_CM, 50, 0), None, (d_right, 50, 0)]
         fix = self.scan(sample, geometry=geometry)
-        x, y = scanner_point(125.0, body_centre_cm(d_right, self.config), 60)
+        x, y = scanner_point(125.0, body_centre_cm(d_right, self.config), 50)
         self.assertAlmostEqual(fix.x_cm, x)
         self.assertAlmostEqual(fix.y_cm, y)
         self.assertEqual(fix.column, 1)
+
+    def test_a_node_is_in_play_when_the_edge_of_its_beam_is_on_the_board(self):
+        geometry = TwoSensorGeometry(method="tri")
+        # Both servos at 60: the left node's own point is 19 cm past the left
+        # edge, but its beam reaches to 67.5, and there the echo is 8 cm past
+        # it, inside the margin. So the left node is in play, and being the
+        # nearer, it places the player along its own aim (kept on the board).
+        d_left = math.hypot(60 - 25, 80) - BODY_RADIUS_CM
+        centre_x, _ = scanner_point(25.0, body_centre_cm(d_left, self.config), 60)
+        edge_x, _ = scanner_point(25.0, body_centre_cm(d_left, self.config), 67.5)
+        self.assertLess(centre_x, -PlayArea.EDGE_MARGIN_CM)
+        self.assertGreater(edge_x, -PlayArea.EDGE_MARGIN_CM)
+        sample = [(d_left, 60, 0), None, (math.hypot(60 - 125, 80) - BODY_RADIUS_CM, 60, 0)]
+        fix = self.scan(sample, geometry=geometry)
+        self.assertAlmostEqual(fix.x_cm, 5.0)   # off the left edge: kept on it
 
     def test_trilateration_crosses_the_distances_in_a_far_square_across_the_board(self):
         geometry = TwoSensorGeometry(method="tri")

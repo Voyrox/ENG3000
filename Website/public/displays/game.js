@@ -1547,16 +1547,29 @@
     return bounds ? bounds.perColumn[column] : { near: 20, far: 140 };
   }
 
-  // Whether a node's distance puts the player on the board: the point it
-  // gives along the node's servo line (straight out when the node sends no
-  // angle), not the distance itself. Across the board the distance is the
-  // long side of the triangle - 168 cm from the left node to the middle of
-  // the far right square, 135 cm out - and against the rows' depth it threw
-  // the player out. filterRules.py TwoSensorGeometry._in_play_along().
+  // Whether a node's distance can put the player on the board. Not the
+  // distance itself: across the board it is the long side of the triangle -
+  // 168 cm from the left node to the middle of the far right square, 135 cm
+  // out - and against the rows' depth it threw the player out. The echo came
+  // from somewhere in the sensor's beam, tuning.triBeamHalfDeg either side of
+  // where the servo points (a 15-degree cone), at that distance: the player
+  // is in play if any of that arc is on the board. A node that sends no angle
+  // points straight out and has no beam to check (as in inBeam()): its
+  // distance is the depth. filterRules.py TwoSensorGeometry._in_play_along().
+  const BEAM_ARC_STEPS = 15;   // the arc is checked at this many steps, both ends included
   function isInPlayAlong(slot, distance, angle) {
     if (!window.isPointInPlayArea) return true;
-    const point = scannerPoint(columnCentreCm(slot), distance, angle);
-    return window.isPointInPlayArea(point.x, point.y);
+    const nodeX = columnCentreCm(slot);
+    if (angle === null) {
+      const point = scannerPoint(nodeX, distance, null);
+      return window.isPointInPlayArea(point.x, point.y);
+    }
+    const half = tuning.triBeamHalfDeg;
+    for (let i = 0; i <= BEAM_ARC_STEPS; i++) {
+      const point = scannerPoint(nodeX, distance, angle - half + (2 * half * i) / BEAM_ARC_STEPS);
+      if (window.isPointInPlayArea(point.x, point.y)) return true;
+    }
+    return false;
   }
 
   // The sensors' datasheet range (HC-SR04; the RCWL-1601 is a pin-compatible

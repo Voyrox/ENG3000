@@ -1371,13 +1371,26 @@ class TwoSensorGeometry(Geometry):
         to the board."""
         return self.fixes(filtered, area)[self.method]
 
-    def _in_play_along(self, slot, distance, area) -> bool:
-        """isInPlayAlong() in game.js: whether a node's distance puts the
-        player on the board - the point it gives along the node's servo line
-        (straight out with no angle), not the distance itself, which across
-        the board is the long side of the triangle."""
-        x, y = scanner_point(area.column_centre_cm(slot), distance, self._angles[slot])
-        return area.contains_point(x, y)
+    # isInPlayAlong() in game.js checks the beam's arc at this many steps,
+    # both ends included.
+    BEAM_ARC_STEPS = 15
+
+    def _in_play_along(self, slot, distance, area, config) -> bool:
+        """isInPlayAlong() in game.js: whether a node's distance can put the
+        player on the board. Not the distance itself, which across the board
+        is the long side of the triangle: the echo came from somewhere in the
+        sensor's beam, tri_beam_half_deg either side of the servo's aim (a
+        15-degree cone), at that distance, and the player is in play if any of
+        that arc is on the board. With no angle, the point straight out."""
+        node_x = area.column_centre_cm(slot)
+        angle = self._angles[slot]
+        if angle is None:
+            return area.contains_point(*scanner_point(node_x, distance, None))
+        half = config.tri_beam_half_deg
+        steps = self.BEAM_ARC_STEPS
+        return any(area.contains_point(*scanner_point(node_x, distance,
+                                                      angle - half + (2 * half * i) / steps))
+                   for i in range(steps + 1))
 
     def _trilaterate(self, filtered, area) -> Optional[tuple]:
         config = self._config or FilterConfig()
@@ -1385,8 +1398,8 @@ class TwoSensorGeometry(Geometry):
                   if in_sensor_range(filtered[self.LEFT]) else None)
         d_right = (body_centre_cm(filtered[self.RIGHT], config)
                    if in_sensor_range(filtered[self.RIGHT]) else None)
-        in_left = d_left is not None and self._in_play_along(self.LEFT, d_left, area)
-        in_right = d_right is not None and self._in_play_along(self.RIGHT, d_right, area)
+        in_left = d_left is not None and self._in_play_along(self.LEFT, d_left, area, config)
+        in_right = d_right is not None and self._in_play_along(self.RIGHT, d_right, area, config)
 
         if in_left and in_right:
             x_left = area.column_centre_cm(self.LEFT)
