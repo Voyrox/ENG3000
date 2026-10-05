@@ -109,6 +109,11 @@ class ServerFilterStage:
             raise ValueError("this geometry has no position methods")
         self.pipeline.geometry.method = method
 
+    def set_kalman(self, on: bool) -> None:
+        """The game's Kalman switch: both Kalman filters on or off
+        (FilterConfig.kalman)."""
+        self.pipeline.set_kalman(on)
+
     def set_calibration(self, per_column: Sequence[tuple]) -> None:
         """Apply the calibration as (near_cm, far_cm) per column: the left and
         right as captured, the centre derived by the browser."""

@@ -216,6 +216,19 @@ class StageTwoSensorRig(unittest.TestCase):
         with self.assertRaises(ValueError):
             stage.set_position_method("guess")
 
+    def test_the_kalman_switch_reaches_every_channel(self):
+        stage = ServerFilterStage()
+        stage.set_kalman(False)
+        self.assertFalse(stage.pipeline.config.kalman)
+        stage.assign_slots([LEFT, None, RIGHT])
+        # Off, a channel is the median of its readings (the FFT stage passes
+        # fewer than eight straight through).
+        for i, cm in enumerate([60.0, 64.0, 61.0]):
+            result = stage.on_reading(LEFT, cm, i * STEP_MS, angle_deg=90)
+        self.assertEqual(result.filtered[0], 61.0)
+        stage.set_kalman(True)
+        self.assertTrue(stage.pipeline.config.kalman)
+
     def test_turn_discards_only_that_nodes_distance_history(self):
         stage = ServerFilterStage()
         stage.assign_slots([LEFT, None, RIGHT])
@@ -456,6 +469,13 @@ class AppWiring(unittest.TestCase):
         app.apply_filter_event({"type": "sensor:lostReadings", "count": 5})
         self.assertEqual(app.server_filter.pipeline.config.lost_readings, 5)
         self.assertIn("lostReadings", app.CONTROL_ACTIONS)
+
+    def test_the_kalman_switch_reaches_the_chain(self):
+        app.server_filter = ServerFilterStage()
+        app.apply_filter_event({"type": "filter:kalman", "on": False})
+        self.assertFalse(app.server_filter.pipeline.config.kalman)
+        app.apply_filter_event({"type": "filter:kalman", "on": True})
+        self.assertTrue(app.server_filter.pipeline.config.kalman)
 
     def test_the_scan_state_reaches_the_chain(self):
         app.server_filter = ServerFilterStage()

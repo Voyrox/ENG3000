@@ -86,8 +86,9 @@ CONTROL_ENABLED = os.environ.get("CON") == "1"
 # "position" is the position switch: Dynamic, line of sight, trilateration or their average.
 # "lostReadings" sets how many readings each node's lost score is taken over
 # (Out of bounds when both nodes are lost).
+# "kalman" turns the game's Kalman filters on or off.
 CONTROL_ACTIONS = {"point", "release", "start", "mode", "pause", "resume", "restart", "menu", "testMode",
-                   "position", "lostReadings"}
+                   "position", "lostReadings", "kalman"}
 # Every raw node reading to logs/raw-*.csv, for the bench noise test
 # (tools/bench_noise.py). Off unless started with REC=1; see sessionRecorder.py.
 recorder = SessionRecorder.from_env(os.environ)
@@ -775,6 +776,9 @@ def apply_filter_event(event):
                 # The readings each node's lost score is taken over, from the
                 # control panel by way of the game.
                 server_filter.set_lost_readings(event["count"])
+            elif event.get("type") == "filter:kalman":
+                # The control panel's Kalman switch, passed on by the game.
+                server_filter.set_kalman(bool(event["on"]))
     except (KeyError, TypeError, ValueError) as exc:
         print(f"Ignored bad {event.get('type')} message: {exc}")
 

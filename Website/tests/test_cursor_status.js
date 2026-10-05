@@ -391,6 +391,14 @@ test("the switch offers Dynamic first, and picking another method turns it off",
   assert.strictEqual(w.setPositionMethod("steady"), "dyn", "an unknown method is ignored");
 });
 
+test("the Kalman switch is on until the control panel turns it off", () => {
+  const w = loadWindow();
+  assert.strictEqual(w.getKalman(), true);
+  assert.strictEqual(w.setKalman(false), false);
+  assert.strictEqual(w.tuneSensor({}).kalman, false, "the filters read it from tuning");
+  assert.strictEqual(w.setKalman(true), true);
+});
+
 // --- Dynamic's rules (Aaron, 5 Oct) ----------------------------------------------
 // Nodes as the firmware reports them: [left, right], each { avg, angle, scanState }.
 function scanners(left, right) {

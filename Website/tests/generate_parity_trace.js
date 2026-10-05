@@ -232,7 +232,7 @@ function buildStream() {
 
 // --- Run the real JS -----------------------------------------------------------
 
-function runJs(stream, calibration, method) {
+function runJs(stream, calibration, method, kalman = true) {
   let clock = 0;
   const context = {
     console,
@@ -267,6 +267,7 @@ function runJs(stream, calibration, method) {
   }
 
   w.setPositionMethod(method);
+  w.setKalman(kalman);
   w.setGameInputMode("sensor");
   w.resetGame();
   const canvas = { clientWidth: 1280, clientHeight: 720, width: 1280, height: 720 };
@@ -329,7 +330,8 @@ const trace = {
   fields: FIELDS,
   stream,
   // One run per position method (the game's switch), on the default bounds,
-  // plus line of sight and Dynamic on calibrated bounds.
+  // plus line of sight and Dynamic on calibrated bounds, and both with the
+  // Kalman switch off.
   runs: {
     default: { method: "los", ...runJs(stream, null, "los") },
     calibrated: { method: "los", ...runJs(stream, calibrated, "los") },
@@ -337,6 +339,8 @@ const trace = {
     average: { method: "avg", ...runJs(stream, null, "avg") },
     dynamic: { method: "dyn", ...runJs(stream, null, "dyn") },
     dynamicCalibrated: { method: "dyn", ...runJs(stream, calibrated, "dyn") },
+    kalmanOff: { method: "los", kalman: false, ...runJs(stream, null, "los", false) },
+    kalmanOffDynamic: { method: "dyn", kalman: false, ...runJs(stream, null, "dyn", false) },
   },
 };
 

@@ -47,6 +47,11 @@
     <section>
         <h2>Placing the player <small>sensor mode</small></h2>
         <div class="row" id="position"></div>
+        <div class="row">
+            <button id="kalmanBtn" data-action="kalman">Kalman: on</button>
+        </div>
+        <p class="note">Kalman off: each node's distance goes median → FFT, and line of sight puts the
+            player at the newest reading, with no gate. The servos do not use it.</p>
     </section>
 
     <section>
@@ -204,6 +209,8 @@
                 const action = btn.dataset.action;
                 if (action === "start") return send({ action, mode: btn.dataset.startMode });
                 if (action === "testMode") return send({ action, enabled: !(game && game.testMode) });
+                // On until the game says otherwise, so the first press turns it off.
+                if (action === "kalman") return send({ action, enabled: Boolean(game) && game.kalman === false });
                 if (action === "pause" && game && game.status === "paused") return send({ action: "resume" });
                 send({ action });
             });
@@ -298,6 +305,8 @@
             $("status").textContent = game.status;
             $("pauseBtn").textContent = game.status === "paused" ? "Resume" : "Pause";
             $("testBtn").textContent = `Test mode: ${game.testMode ? "on" : "off"}`;
+            $("kalmanBtn").textContent = `Kalman: ${game.kalman === false ? "off" : "on"}`;
+            $("kalmanBtn").classList.toggle("selected", game.kalman === false);
             document.querySelectorAll("[data-mode]").forEach((btn) => {
                 btn.classList.toggle("selected", btn.dataset.mode === game.mode);
             });

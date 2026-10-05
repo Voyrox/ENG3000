@@ -66,7 +66,7 @@ from __future__ import annotations
 import math
 from abc import ABC, abstractmethod
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from functools import lru_cache
 from typing import Optional, Sequence
 
@@ -100,6 +100,12 @@ class FilterConfig:
     relock_readings: int = 8
     relock_spread_cm: float = 20.0
     anchor_ttl_ms: float = 3000.0
+
+    # The Kalman switch (tuning.kalman; Aaron, 5 Oct). False turns off both
+    # Kalman filters: each channel goes median -> FFT (ChannelFilter), and line
+    # of sight starts its track again at every reading, with no gate
+    # (LineOfSightTracker). CoordinatePipeline.set_kalman() flips it live.
+    kalman: bool = True
 
     # Smoothing after the median (tuning.kalmanSigmaA, tuning.kalmanSigmaR,
     # tuning.fftWindow, tuning.fftCutoffHz, FFT_MIN_SAMPLES). The Kalman is
@@ -469,7 +475,8 @@ class ChannelFilter:
             self._samples.append(raw)
             ordered = sorted(self._samples)
             middle = ordered[len(ordered) // 2]
-            tracked = self._tracker.update(middle, now_ms / 1000.0)
+            tracked = (self._tracker.update(middle, now_ms / 1000.0) if self._cfg.kalman
+                       else middle)
             self.value = self._smooth(tracked, now_ms)
             self._last_good_ms = now_ms
             # The gate judges readings against the median, as it always has:
@@ -827,7 +834,14 @@ class LineOfSightTracker:
             m = line_of_sight(area.column_centre_cm(slot),
                               body_centre_cm(filtered[slot], config), angle, state,
                               config, repeats)
-            if self._observe(m, slot, now_ms, config):
+            # With the Kalman off, each reading starts the track again at its
+            # own point: no gate, nothing kept from before.
+            took = True
+            if config.kalman:
+                took = self._observe(m, slot, now_ms, config)
+            else:
+                self._start(m, slot, now_ms, config)
+            if took:
                 self.aimed_at[slot] = angle
                 self.aim_repeats[slot] = repeats
         if self.x is not None and now_ms - self.updated_ms > config.los_track_timeout_ms:
@@ -1556,6 +1570,13 @@ class CoordinatePipeline:
     def set_area(self, area: PlayArea) -> None:
         """Apply a new calibration. Row hysteresis state is kept."""
         self.area = area
+
+    def set_kalman(self, on: bool) -> None:
+        """The Kalman switch (setKalman() in game.js): both Kalman filters on
+        or off from the next reading; nothing else in the config changes."""
+        self.config = replace(self.config, kalman=bool(on))
+        for channel in self._channels:
+            channel._cfg = self.config
 
     def reset(self) -> None:
         for channel in self._channels:

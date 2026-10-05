@@ -396,6 +396,7 @@ let sentAssignmentKey = null;
 let sentCalibrationKey = null;
 let sentPositionMethod = null;
 let sentLostReadings = null;
+let sentKalman = null;
 
 function sendToServer(message) {
   if (!socket || socket.readyState !== WebSocket.OPEN) return false;
@@ -441,6 +442,12 @@ function syncServerFilterSetup() {
   const lostReadings = window.getLostReadings();
   if (lostReadings !== sentLostReadings && sendToServer({ type: "sensor:lostReadings", count: lostReadings })) {
     sentLostReadings = lostReadings;
+  }
+
+  // The Kalman switch, so the server's chain smooths the same way.
+  const kalman = window.getKalman();
+  if (kalman !== sentKalman && sendToServer({ type: "filter:kalman", on: kalman })) {
+    sentKalman = kalman;
   }
 
   const perColumn = window.getCapturedCalibration();
@@ -531,6 +538,11 @@ function handleRemoteCommand(command) {
       window.setLostReadings(command.count);
       syncServerFilterSetup();
       break;
+    case "kalman":
+      // The Kalman switch: both of the game's Kalman filters on or off.
+      window.setKalman(command.enabled);
+      syncServerFilterSetup();
+      break;
     default:
       return;
   }
@@ -563,6 +575,7 @@ function sendGameStatus() {
     positionMethods: window.getPositionMethods(),
     lostReadings: window.getLostReadings(),
     lostScores: window.getLostScores(),
+    kalman: window.getKalman(),
   }));
 }
 
@@ -621,10 +634,11 @@ function connectSocket() {
     // No server, no coordinate: the round pauses on "no signal" rather than
     // playing on a frozen one.
     if (serverFiltering) window.setServerCoordinate(null);
-    // A restarted server has forgotten the position method and the lost
-    // readings; send them again.
+    // A restarted server has forgotten the position method, the lost
+    // readings and the Kalman switch; send them again.
     sentPositionMethod = null;
     sentLostReadings = null;
+    sentKalman = null;
     if (reconnectTimer === null) {
       reconnectTimer = window.setTimeout(() => {
         reconnectTimer = null;

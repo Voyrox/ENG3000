@@ -328,6 +328,18 @@ rig. In the browser console, `tuneSensor({ fftWindow: 0 })` turns it off and
 `tuneSensor({ fftCutoffHz: 2 })` / `tuneSensor({ kalmanSigmaA: 200 })` change
 it, from the next reading; the Python side takes the same settings through
 `FilterConfig` (`fft_window`, `fft_cutoff_hz`, `kalman_sigma_a_cm_s2`, ...).
+
+**Kalman switch.** The control panel's *Kalman* button (`/control`, needs
+`CON=1`) turns both of the game's Kalman filters off and on again:
+`tuning.kalman`, `setKalman()`, `FilterConfig.kalman`. Off, each node's
+distance goes median → FFT, and line of sight places the player at each new
+reading's own point along the node's line of sight, with no gate and nothing
+kept from the readings before. It is for testing whether a wrong position comes
+from the filters or from the readings. The servos never see it: each node
+steers on its own pulse pairs. `app.py`'s per-node `filtered_distance` keeps
+its Kalman either way. The parity trace has a run of line of sight and one of
+Dynamic with it off.
+
 The game steps a node's filters only on that node's new readings, not on
 every animation frame. On the server a no-echo reading (negative) is skipped
 rather than put into the median, and the median takes the upper of the two

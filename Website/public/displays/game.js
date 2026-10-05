@@ -154,6 +154,14 @@
     // waits. Unusable readings are otherwise ridden out on the last good
     // square for as long as they last (updateSensorCursor()).
     offlineMs: 5000,
+    // The Kalman switch (the control panel's Kalman button, setKalman();
+    // Aaron, 5 Oct). false turns off both Kalman filters: each sensor's
+    // distance goes median -> FFT (conditionSensor()), and line of sight
+    // places the player at each new reading's own point, with no gate and
+    // nothing kept from the readings before (stepLosTrack()). The servos never
+    // see it: the nodes steer on their own readings. Python: FilterConfig
+    // kalman.
+    kalman: true,
     // The smoothing after each sensor's median (see conditionSensor()).
     // kalmanSigmaA: the player's acceleration noise, cm/s^2 - higher follows a
     // lunge faster, lower smooths more. kalmanSigmaR: one reading's noise, cm.
@@ -1303,7 +1311,8 @@
   // low-pass. The median rejects single-sample spikes far better than a mean;
   // the Kalman follows the median without an average's lag; the FFT stage cuts
   // what is left above tuning.fftCutoffHz. The hold coasts through a dropped
-  // echo instead of reporting the player gone.
+  // echo instead of reporting the player gone. With tuning.kalman off, the
+  // median goes straight to the FFT stage.
   function conditionSensor(filter, raw, now, angle = null) {
     // Back after a silence - the other node's scanning turn, as a rule. What
     // the channel remembers is where the player was a turn ago, so it starts
@@ -1322,7 +1331,7 @@
       filter.samples.push(raw);
       if (filter.samples.length > SENSOR_HISTORY) filter.samples.shift();
       const middle = median(filter.samples);
-      const tracked = kalmanUpdate(filter.kalman, middle, now / 1000);
+      const tracked = tuning.kalman ? kalmanUpdate(filter.kalman, middle, now / 1000) : middle;
       filter.value = smoothWindow(filter, tracked, now);
       filter.lastGoodAt = now;
       // The slew gate judges readings against the median, as it always has:
@@ -1728,7 +1737,8 @@
   // a distance and a servo angle, from a node that is not sweeping. An aim is
   // new when the servo has moved, or the node has just come back for its turn;
   // after that each reading at the same aim counts for less across the line
-  // (lineOfSight()).
+  // (lineOfSight()). With tuning.kalman off, each reading starts the track
+  // again at its own point: no gate, nothing kept from before.
   function stepLosTrack(filtered, scans, fresh, now) {
     [LEFT_SENSOR, RIGHT_SENSOR].forEach((slot) => {
       const scan = scans[slot];
@@ -1737,7 +1747,10 @@
         now - losTrack.fedAt[slot] > SENSOR_HOLD_MS;
       const repeats = newAim ? 0 : losTrack.aimRepeats[slot] + 1;
       const m = lineOfSight(columnCentreCm(slot), bodyCentreCm(filtered[slot]), scan.angle, scan.state, repeats);
-      if (losObserve(m, slot, now)) {
+      let took = true;
+      if (tuning.kalman) took = losObserve(m, slot, now);
+      else losStart(m, slot, now);
+      if (took) {
         losTrack.aimedAt[slot] = scan.angle;
         losTrack.aimRepeats[slot] = repeats;
       }
@@ -1999,6 +2012,18 @@
       console.info(`[position] ${method}`);
     }
     return positioning.method;
+  };
+
+  // The Kalman switch, on by default; see tuning.kalman. Takes effect from
+  // the next reading.
+  window.getKalman = function getKalman() {
+    return tuning.kalman;
+  };
+
+  window.setKalman = function setKalman(on) {
+    tuning.kalman = Boolean(on);
+    console.info(`[kalman] ${tuning.kalman ? "on" : "off"}`);
+    return tuning.kalman;
   };
 
   // Which slots carry a reading not seen before. The server stamps each node's

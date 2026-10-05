@@ -72,7 +72,8 @@ class ParityWithGameJs(unittest.TestCase):
         fields = self.trace["fields"]
         area = (PlayArea.calibrated(run["calibration"]) if run["calibration"]
                 else PlayArea.default())
-        pipeline = CoordinatePipeline(TwoSensorGeometry(method=run["method"]), area=area)
+        pipeline = CoordinatePipeline(TwoSensorGeometry(method=run["method"]), area=area,
+                                      config=FilterConfig(kalman=run.get("kalman", True)))
 
         # A node that is "silent" for a step sent nothing: its last reading
         # stands, as the server keeps it, and the recorded fresh mask (what
@@ -132,6 +133,24 @@ class ParityWithGameJs(unittest.TestCase):
 
     def test_dynamic_on_calibrated_bounds(self):
         self.assertGreater(self._replay("dynamicCalibrated"), 0)
+
+    def test_line_of_sight_with_the_kalman_off(self):
+        self.assertGreater(self._replay("kalmanOff"), 0)
+
+    def test_dynamic_with_the_kalman_off(self):
+        self.assertGreater(self._replay("kalmanOffDynamic"), 0)
+
+    def test_the_kalman_switch_changes_the_recorded_stream(self):
+        # Otherwise the two runs above would not show the switch doing anything.
+        runs = self.trace["runs"]
+        filtered = self.trace["fields"].index("filtered")
+        at = self.trace["fields"].index("x")
+        smoothing = sum(1 for a, b in zip(runs["default"]["steps"], runs["kalmanOff"]["steps"])
+                        if a[filtered] != b[filtered])
+        placed = sum(1 for a, b in zip(runs["default"]["steps"], runs["kalmanOff"]["steps"])
+                     if a[at] is not None and b[at] is not None and abs(a[at] - b[at]) > 1.0)
+        self.assertGreater(smoothing, 50, "the distances should differ without the Kalman")
+        self.assertGreater(placed, 50, "line of sight should place the player differently")
 
     def test_dynamic_follows_every_method_and_rule_somewhere_on_the_recorded_stream(self):
         # Otherwise the parity above would not show the picker and the rules
@@ -209,6 +228,13 @@ class ChannelFilterRules(unittest.TestCase):
             window = (window + [v])[-self.cfg.median_window:]
             expected = tracker.update(sorted(window)[len(window) // 2], t * 20 / 1000.0)
             self.assertAlmostEqual(ch.update(v, t * 20), expected, places=12)
+
+    def test_with_the_kalman_off_the_median_goes_straight_on(self):
+        ch = ChannelFilter(FilterConfig(kalman=False, fft_window=0))
+        window = []
+        for t, v in enumerate([70, 74, 69, 72, 75, 71, 73, 70, 76, 72]):
+            window = (window + [v])[-self.cfg.median_window:]
+            self.assertEqual(ch.update(v, t * 20), sorted(window)[len(window) // 2])
 
     def test_the_fft_stage_runs_once_the_window_has_enough_readings(self):
         readings = [70, 74, 69, 72, 75, 71, 73, 70, 76, 72, 71, 74]
@@ -1000,6 +1026,17 @@ class TwoSensorGeometryBehaviour(unittest.TestCase):
                             fresh=(True, True, False), geometry=geometry)
             if k < relock - 1:
                 self.assertLess(fix.x_cm, 60.0, f"outlier {k + 1} of {relock} moved the track")
+        self.assertAlmostEqual(fix.x_cm, 120.0, delta=1.0)
+
+    def test_with_the_kalman_off_line_of_sight_takes_each_reading_at_once(self):
+        # No gate and no memory: the reading the gate above turns away five
+        # times is where the player is at once.
+        self.config = FilterConfig(kalman=False)
+        geometry = TwoSensorGeometry(method="los")
+        for k in range(10):
+            self.scan(scanner_sample(40.0, 70.0), now_ms=50.0 * k, geometry=geometry)
+        fix = self.scan(scanner_sample(120.0, 60.0), now_ms=500.0,
+                        fresh=(True, True, False), geometry=geometry)
         self.assertAlmostEqual(fix.x_cm, 120.0, delta=1.0)
 
     def test_the_track_is_dropped_when_nothing_usable_arrives(self):
