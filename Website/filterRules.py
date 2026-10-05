@@ -231,7 +231,10 @@ class PlayArea:
 
     EDGE_MARGIN_CM = 15.0
     ABSOLUTE_ALERT_CM = 10.0
-    ABSOLUTE_MAX_CM = 150.0
+    # The nodes' range (src/Config.h MAX_TARGET_CM, 190) plus the body radius
+    # (15): a far edge 160 cm out must still be capturable (MAX_COORD_CM in
+    # game.js).
+    ABSOLUTE_MAX_CM = 205.0
     BAND_HYSTERESIS_CM = 6.0
     MIN_PLAY_DEPTH_CM = 15.0
 
@@ -280,6 +283,16 @@ class PlayArea:
             return False
         near, far = self.per_column[column]
         return near - self.EDGE_MARGIN_CM <= distance_cm <= far + self.EDGE_MARGIN_CM
+
+    def contains_point(self, x_cm: float, y_cm: float) -> bool:
+        """isPointInPlayArea(): is the point (x across, y out from the screen)
+        on the board, give or take EDGE_MARGIN_CM on every side? The column x
+        falls in sets the depth span."""
+        if x_cm is None or y_cm is None or not (math.isfinite(x_cm) and math.isfinite(y_cm)):
+            return False
+        if not -self.EDGE_MARGIN_CM <= x_cm <= self.width_cm + self.EDGE_MARGIN_CM:
+            return False
+        return self.contains(self.column_at(x_cm), y_cm)
 
     def row_for(self, column: int, distance_cm: float,
                 previous_row: Optional[int] = None) -> int:
@@ -1358,14 +1371,22 @@ class TwoSensorGeometry(Geometry):
         to the board."""
         return self.fixes(filtered, area)[self.method]
 
+    def _in_play_along(self, slot, distance, area) -> bool:
+        """isInPlayAlong() in game.js: whether a node's distance puts the
+        player on the board - the point it gives along the node's servo line
+        (straight out with no angle), not the distance itself, which across
+        the board is the long side of the triangle."""
+        x, y = scanner_point(area.column_centre_cm(slot), distance, self._angles[slot])
+        return area.contains_point(x, y)
+
     def _trilaterate(self, filtered, area) -> Optional[tuple]:
         config = self._config or FilterConfig()
         d_left = (body_centre_cm(filtered[self.LEFT], config)
                   if in_sensor_range(filtered[self.LEFT]) else None)
         d_right = (body_centre_cm(filtered[self.RIGHT], config)
                    if in_sensor_range(filtered[self.RIGHT]) else None)
-        in_left = d_left is not None and area.contains(self.LEFT, d_left)
-        in_right = d_right is not None and area.contains(self.RIGHT, d_right)
+        in_left = d_left is not None and self._in_play_along(self.LEFT, d_left, area)
+        in_right = d_right is not None and self._in_play_along(self.RIGHT, d_right, area)
 
         if in_left and in_right:
             x_left = area.column_centre_cm(self.LEFT)

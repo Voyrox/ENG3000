@@ -130,6 +130,9 @@ class ParityWithGameJs(unittest.TestCase):
     def test_trilateration(self):
         self.assertGreater(self._replay("trilateration"), 0)
 
+    def test_trilateration_with_the_far_edge_past_150_cm(self):
+        self.assertGreater(self._replay("trilaterationDeep"), 0)
+
     def test_average_of_line_of_sight_and_trilateration(self):
         self.assertGreater(self._replay("average"), 0)
 
@@ -366,7 +369,7 @@ class PlayAreaRules(unittest.TestCase):
     def test_uncalibrated_limits(self):
         area = PlayArea.default()
         self.assertEqual(area.alert_threshold_cm, 10)
-        self.assertEqual(area.max_cm, 150)
+        self.assertEqual(area.max_cm, 205)
 
     def test_calibrated_limits_never_less_cautious_than_the_floor(self):
         area = PlayArea.calibrated([(12, 140), (12, 140), (12, 140)])
@@ -1002,13 +1005,40 @@ class TwoSensorGeometryBehaviour(unittest.TestCase):
         # Both servos point somewhere else entirely: the crossing is not where
         # the left one is looking, so the nearer node (left, 87 cm to the
         # player's middle) places the player by its own distance along its own
-        # aim instead.
+        # aim instead. Its point is 5 cm past the left edge: inside the margin,
+        # so still on the board.
         d_left = math.hypot(60 - 25, 80) - BODY_RADIUS_CM
-        sample = [(d_left, 60, 0), None, (math.hypot(60 - 125, 80) - BODY_RADIUS_CM, 60, 0)]
+        sample = [(d_left, 70, 0), None, (math.hypot(60 - 125, 80) - BODY_RADIUS_CM, 70, 0)]
         fix = self.scan(sample, geometry=geometry)
-        x, y = scanner_point(25.0, body_centre_cm(d_left, self.config), 60)
+        x, y = scanner_point(25.0, body_centre_cm(d_left, self.config), 70)
         self.assertAlmostEqual(fix.x_cm, max(5.0, x))   # off the left edge: kept on it
         self.assertAlmostEqual(fix.y_cm, y)
+
+    def test_trilateration_prefers_a_node_whose_point_is_on_the_board(self):
+        geometry = TwoSensorGeometry(method="tri")
+        # As above with both servos at 60: the left node's point is now 19 cm
+        # past the left edge, past the margin, so it is not on the board, and
+        # the right node, further away but pointing on to the board, places
+        # the player - in the centre column, where they are.
+        d_right = math.hypot(60 - 125, 80) - BODY_RADIUS_CM
+        sample = [(math.hypot(60 - 25, 80) - BODY_RADIUS_CM, 60, 0), None, (d_right, 60, 0)]
+        fix = self.scan(sample, geometry=geometry)
+        x, y = scanner_point(125.0, body_centre_cm(d_right, self.config), 60)
+        self.assertAlmostEqual(fix.x_cm, x)
+        self.assertAlmostEqual(fix.y_cm, y)
+        self.assertEqual(fix.column, 1)
+
+    def test_trilateration_crosses_the_distances_in_a_far_square_across_the_board(self):
+        geometry = TwoSensorGeometry(method="tri")
+        # The player's middle 135 cm out in the right column: 168 cm from the
+        # left node, past the far edge plus its margin (140 + 15) as a depth,
+        # but the point along the left servo's line is on the board. Both
+        # distances count, and the crossing places the player.
+        d_left = math.hypot(125 - 25, 135)
+        self.assertGreater(d_left, PlayArea.default().far_cm + PlayArea.EDGE_MARGIN_CM)
+        fix = self.scan(scanner_sample(125.0, 135.0, aim_error_deg=5.0), geometry=geometry)
+        self.assertAlmostEqual(fix.x_cm, 125.0)
+        self.assertAlmostEqual(fix.y_cm, 135.0)
 
     def test_one_node_aimed_away_leaves_the_crossing_to_the_other(self):
         # The right node looks 25 degrees past the player (furniture, say),

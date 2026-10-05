@@ -242,6 +242,14 @@ function buildStream() {
   for (let i = 0; i < 50; i++) push(scanned(SENSOR_X_CM[0], 25, 125), scanned(SENSOR_X_CM[1], 75, 50));
   for (let i = 0; i < 50; i++) push(scanned(SENSOR_X_CM[0], 75, 50), scanned(SENSOR_X_CM[1], 125, 125));
 
+  // 26. The far squares across the board, seen by both: the player 135 cm out
+  //     in the right column, ~153 cm from the left node, then in the left
+  //     column. A node's distance there is longer than the far edge plus its
+  //     margin; only the point it gives along the servo line is on the board,
+  //     so trilateration still crosses the two distances.
+  for (let i = 0; i < 60; i++) push(scanned(SENSOR_X_CM[0], 125, 135), scanned(SENSOR_X_CM[1], 125, 135));
+  for (let i = 0; i < 60; i++) push(scanned(SENSOR_X_CM[0], 25, 135), scanned(SENSOR_X_CM[1], 25, 135));
+
   return steps;
 }
 
@@ -340,6 +348,9 @@ const stream = buildStream();
 const RULES_OFF = { columnLock: false, loneNode: false, cornerNode: false };
 // [near, far] per column; the centre entry is ignored (no centre sensor to capture it).
 const calibrated = [[28.47, 140.68], [20.44, 138.26], [10.89, 145.81]];
+// A far edge past 150 cm, as on a 150 cm board starting 10 cm in front of the
+// nodes: the far corners must still be capturable.
+const deepCalibrated = [[12.3, 160.4], [11, 160], [10.6, 158.7]];
 
 const trace = {
   generatedBy: "Website/tests/generate_parity_trace.js",
@@ -353,6 +364,7 @@ const trace = {
     default: { method: "los", ...runJs(stream, null, "los") },
     calibrated: { method: "los", ...runJs(stream, calibrated, "los") },
     trilateration: { method: "tri", ...runJs(stream, null, "tri") },
+    trilaterationDeep: { method: "tri", ...runJs(stream, deepCalibrated, "tri") },
     average: { method: "avg", ...runJs(stream, null, "avg") },
     dynamic: { method: "dyn", ...runJs(stream, null, "dyn") },
     dynamicCalibrated: { method: "dyn", ...runJs(stream, calibrated, "dyn") },

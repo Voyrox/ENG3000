@@ -80,10 +80,16 @@
   const LEFT_SENSOR = 0;
   const RIGHT_SENSOR = 2;
   const PLAY_WIDTH_CM = 150; // matches PlayArea.width_cm in filterRules.py
-  const MAX_COORD_CM = 150; // hard ceiling before any calibration exists
+  // Hard ceiling before any calibration exists, and the deepest a calibration
+  // corner can be captured at (SENSOR_LIMITS.maxCm). The nodes hear out to
+  // src/Config.h's MAX_TARGET_CM, 190 cm, and a capture is the depth to the
+  // middle of the player, tuning.bodyRadiusCm (15) further out. At 150 a
+  // player standing on a far edge 160 cm out could not be captured, so the far
+  // edge could never be set past 150. filterRules.py PlayArea.ABSOLUTE_MAX_CM.
+  const MAX_COORD_CM = 205;
 
   // Once the play area is calibrated, the far edge sets the depth limit
-  // reported by getSensorDebug() rather than this blanket 1.5 m.
+  // reported by getSensorDebug() rather than this blanket one.
   function maxCoordCm() {
     const bounds = window.getCalibrationBounds ? window.getCalibrationBounds() : null;
     if (bounds && bounds.calibrated && Number.isFinite(bounds.maxCm)) {
@@ -1541,8 +1547,16 @@
     return bounds ? bounds.perColumn[column] : { near: 20, far: 140 };
   }
 
-  function isInPlay(column, distance) {
-    return window.isWithinPlayArea ? window.isWithinPlayArea(column, distance) : true;
+  // Whether a node's distance puts the player on the board: the point it
+  // gives along the node's servo line (straight out when the node sends no
+  // angle), not the distance itself. Across the board the distance is the
+  // long side of the triangle - 168 cm from the left node to the middle of
+  // the far right square, 135 cm out - and against the rows' depth it threw
+  // the player out. filterRules.py TwoSensorGeometry._in_play_along().
+  function isInPlayAlong(slot, distance, angle) {
+    if (!window.isPointInPlayArea) return true;
+    const point = scannerPoint(columnCentreCm(slot), distance, angle);
+    return window.isPointInPlayArea(point.x, point.y);
   }
 
   // The sensors' datasheet range (HC-SR04; the RCWL-1601 is a pin-compatible
@@ -1595,8 +1609,8 @@
   function trilaterate(filtered, angles = [null, null, null]) {
     const dL = inSensorRange(filtered[LEFT_SENSOR]) ? bodyCentreCm(filtered[LEFT_SENSOR]) : null;
     const dR = inSensorRange(filtered[RIGHT_SENSOR]) ? bodyCentreCm(filtered[RIGHT_SENSOR]) : null;
-    const inL = dL !== null && isInPlay(LEFT_SENSOR, dL);
-    const inR = dR !== null && isInPlay(RIGHT_SENSOR, dR);
+    const inL = dL !== null && isInPlayAlong(LEFT_SENSOR, dL, angles[LEFT_SENSOR]);
+    const inR = dR !== null && isInPlayAlong(RIGHT_SENSOR, dR, angles[RIGHT_SENSOR]);
 
     if (inL && inR) {
       const xLeft = columnCentreCm(LEFT_SENSOR);

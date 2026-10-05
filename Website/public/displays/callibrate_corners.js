@@ -45,6 +45,7 @@
 //   window.getCornerCalibration()
 //   window.getCalibrationBounds()          - { nearCm, farCm, alertCm, maxCm, perColumn }
 //   window.getCapturedCalibration()        - [{ near, far }] x3 (centre derived), or null
+//   window.isPointInPlayArea(xCm, yCm)     - is that point on the board (with the margin)?
 //   window.rawToGrid(column, distanceCm, previous) -> { gx, gy, inside, calibrated }
 
 (function () {
@@ -74,7 +75,8 @@
   // Absolute limits, whatever the calibration says. The alert can only ever
   // become MORE cautious than this floor, never less.
   const ABSOLUTE_ALERT_CM = 10;
-  const ABSOLUTE_MAX_CM = 150;
+  // The nodes' range plus the body radius: MAX_COORD_CM in game.js says why.
+  const ABSOLUTE_MAX_CM = 205;
 
   // How far past a row boundary a reading must travel before the row changes.
   const BAND_HYSTERESIS_CM = 6;
@@ -229,6 +231,19 @@
   window.getSensorX = function getSensorX(column) {
     if (!SENSOR_COLUMNS.includes(column)) return null;
     return ((column + 0.5) * AREA_WIDTH_CM) / COLUMN_COUNT;
+  };
+
+  // Is the point (x across, y out from the screen, in cm) on the board, give
+  // or take EDGE_MARGIN_CM on every side? The column x falls in sets the
+  // depth span. A node's distance is along its servo line, so it is only a
+  // depth when the node points straight out: across the board it is the long
+  // side of the triangle, and held up against the rows' depth it would throw
+  // the player out. Turn it into a point first (scannerPoint() in game.js).
+  window.isPointInPlayArea = function isPointInPlayArea(xCm, yCm) {
+    if (!Number.isFinite(xCm) || !Number.isFinite(yCm)) return false;
+    if (xCm < -EDGE_MARGIN_CM || xCm > AREA_WIDTH_CM + EDGE_MARGIN_CM) return false;
+    const column = clamp(Math.floor(xCm / (AREA_WIDTH_CM / COLUMN_COUNT)), 0, COLUMN_COUNT - 1);
+    return window.isWithinPlayArea(column, yCm);
   };
 
   // Picks the row, refusing to leave the previous one until the reading has
