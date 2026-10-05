@@ -189,9 +189,11 @@ test("the phone pad takes the cursor from the sensors; they carry on underneath,
   assert.strictEqual(before.hole, 4);
   assert.strictEqual(JSON.stringify(before.sensor.board), JSON.stringify(before.board), "the sensors' cursor is the drawn one");
 
-  // A mole up under the sensors' cursor, which the sensors would score.
+  // A mole up under the sensors' cursor, which the sensors would score. The
+  // score starts again here: a random mole may have come up under the
+  // cursor, and been hit, while the readings settled.
   const state = w.getGameState();
-  Object.assign(state, { activeHole: 4, moleType: "mole", moleSpawnedAt: 0 });
+  Object.assign(state, { activeHole: 4, moleType: "mole", moleSpawnedAt: 0, score: 0 });
 
   w.setRemotePoint(0.15, 0.85);
   run(w, scannersSeeing(75, 85), 30);
@@ -218,7 +220,8 @@ test("the phone pad takes the cursor from the sensors; they carry on underneath,
   assert.strictEqual(after.remote, false);
   assert.strictEqual(after.hole, 4, "the sensors' cursor, without waiting for a frame");
   run(w, scannersSeeing(75, 85), 2);
-  assert.strictEqual(state.score, 1, "and the sensors score again");
+  // At least once: the next random mole can come up under the cursor too.
+  assert.ok(state.score >= 1, "and the sensors score again");
 });
 
 test("while the pad has the cursor the sensors cannot hold the round or put up an overlay", () => {
@@ -611,7 +614,8 @@ test("cell lock on: the cursor and its hits keep to the voted cell until the vot
   const after = w.getGameCursorStatus(CANVAS);
   assert.strictEqual(after.sensor.gx, 2);
   assert.strictEqual(after.hole, 5);
-  assert.strictEqual(state.score, 1, "the mole is hit once the vote reaches it");
+  // At least once: after the hit the next random mole can come up there too.
+  assert.ok(state.score >= 1, "the mole is hit once the vote reaches it");
 });
 
 test("cell lock off: the cursor follows the position into the next hole and hits it before the vote", () => {
