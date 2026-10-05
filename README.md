@@ -55,7 +55,7 @@ build_flags =
 
 **Calibration** is the game's sensor-assignment screen: both servos are held still at 90 degrees (`AIM 90`) for the whole screen - through both steps, LEFT then RIGHT - while the operator aims the nodes straight out into the play area by hand and identifies each node with a hand in front of it; each live-readings row shows the angle the node reports, amber if it is not 90; Start Game then lets the nodes scan again (`SCAN`). There is no play-area (corner) calibration: the game plays on the default bounds, rows between 20 and 140 cm in every column. Each game page asks for the hold with `{"type": "nodes:aim", "hold": true}` and releases it with `false`; the servos stay held while any open page is on the calibration screen, so another tab or device on a different screen cannot release them, and a page that closes stops holding.
 
-The game puts each node on the screen edge at the centre of an outer column. How the player is placed is switched on the phone's `/control` page only (Aaron, 5 Oct; the game board draws one cursor and no buttons): **Dynamic** (the default), **Line of sight**, **Trilateration** or **Average**, under *Placing the player*. Picking one of the last three turns Dynamic off. With Dynamic on, its button says which one it is following (e.g. `Dynamic (TRI)`), or which of its rules is placing the player: `A1` / `A3` (the near node in its far corner), `MID`, `COL L` / `COL R` (the column lock: where the two servo lines cross) or `L` / `R` (a lone confident node); each rule has its own switch under *Dynamic's rules*. **Compare**, beside it, rings where line of sight, trilateration and the average put the player (LOS, TRI, AVG) on the control panel's pad, while the cyan cursor follows the one placing the player (the thick ring). The game's sensor panel lists all three positions. See *Placing the player* under the filtering pipeline. With no `angle` from either node there is no line of sight, and every method is trilateration.
+The game puts each node on the screen edge at the centre of an outer column. How the player is placed is switched on the phone's `/control` page only (Aaron, 5 Oct; the game board draws one cursor and no buttons): **Dynamic** (the default), **Line of sight**, **Trilateration** or **Average**, under *Placing the player*. Picking one of the last three turns Dynamic off. With Dynamic on, its button says which one it is following (e.g. `Dynamic (TRI)`), or which of its rules is placing the player: `FAR` (far priority: both nodes read past 110 cm and agree), `A1` / `A3` (the near node in its far corner), `MID`, `COL L` / `COL R` (the column lock: where the two servo lines cross) or `L` / `R` (a lone confident node); each rule has its own switch under *Dynamic's rules*. **Compare**, beside it, rings where line of sight, trilateration and the average put the player (LOS, TRI, AVG) on the control panel's pad, while the cyan cursor follows the one placing the player (the thick ring). The game's sensor panel lists all three positions. See *Placing the player* under the filtering pipeline. With no `angle` from either node there is no line of sight, and every method is trilateration.
 
 **Out of bounds** appears in one case only: both nodes are lost (Aaron, 5 Oct). Each node's last *n* readings are scored as the control panel shows them - *found* +1, *half* 0, *lost* -1 - and a node whose scores add up to 0 or less is lost, so the odd found reading among lost ones does not stop it, and a node mostly finding the player never is. *n* is 8 by default; set it on the phone control panel under *Out of bounds* (minus and plus), which also shows each node's score now. The game keeps it in that browser, and passes it to the server when `SERVER_FILTERING` is on. Each reading counts once, when it arrives; a node waiting for its turn keeps the readings of its last one, and a node is not lost until it has had *n* readings in the round. A position off the board keeps the player on the edge square, a tenth of a square inside the edge (`EDGE_INSET`), and the game carries on; the sensor panel says `off board: edge`. Unusable readings are ridden out on the last square for as long as they last. If neither node sends anything for 5 s (`tuneSensor({ offlineMs })`), or the server says both are offline, the game says **Sensors offline** instead and the round waits. Waiting for a first position shows no message.
 
@@ -170,10 +170,30 @@ reporting whatever its beam hits while it sweeps. The position methods
 - **Dynamic** (`dyn`, the default): first three rules (`dynamicRule()`,
   `TwoSensorGeometry._rule()` here; Aaron, 5 Oct), checked in this order.
   Each has a switch on the control panel, under *Dynamic's rules*
-  (`setDynamicRules({ cornerNode, columnLock, loneNode })`, kept in the
-  browser; Python `FilterConfig(corner_node=..., column_lock=...,
-  lone_node=...)`), and the Dynamic button there says which one is placing
-  the player.
+  (`setDynamicRules({ farPriority, cornerNode, columnLock, loneNode })`, kept
+  in the browser; Python `FilterConfig(far_priority=..., corner_node=...,
+  column_lock=..., lone_node=...)`), and the Dynamic button there says which one is placing
+  the player. Far priority (`farPriority`, `far_priority`) comes first:
+  - **Far priority** (`Dynamic (FAR)`; Aaron, 6 Oct). Past 110 cm a node
+    hears the player rarely and mostly with one head: on the rig on 6 Oct
+    two thirds of the readings past 110 cm were half, and most runs of them were a
+    single reading, so the far position turned up for a tick or two and the
+    no-echo and stray nearer readings in between took it back (and pushed
+    the nodes towards Out of bounds). When both nodes have read past
+    `farPriorityCm` (110; the node's own distance) in the last `farSeenMs`
+    (1.5 s, which covers the other node's turn), found or half, and the two
+    readings agree - their distances, plus the body radius, cross inside
+    both nodes' beams as each was aimed (with the aim tolerance), on the
+    board - the player is at that crossing and is not Out of bounds,
+    whatever the readings in between. Two far readings that do not agree
+    are not the player and change nothing: on 6 Oct the left node read
+    113 cm with its servo at its stop (160°) while the right one read 135 cm
+    straight out; pairs like that came up in 230 updates of those logs.
+    A node that finds the player nearer than 110 cm twice in a row (both
+    heads) ends it at once. With Dynamic off it does nothing. Replaying the
+    6 Oct logs (00:46-01:09): it placed the player in 288 of 11,280 updates,
+    always in the back half, and 29 fewer were Out of bounds. The parity
+    trace has segment 31 for it and a run of Dynamic with it off.
   1. **Far corners** (`Dynamic (A1)` / `(A3)`). A1 and A3, the far-left and
      far-right squares, are far from the opposite node - the back-left square
      is some 156 cm from the right node, at a shallow angle. When the left

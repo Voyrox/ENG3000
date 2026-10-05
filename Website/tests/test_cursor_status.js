@@ -847,9 +847,9 @@ test("Dynamic: the near node alone places the player in its far corner (A1, A3)"
 test("Dynamic: each rule has a switch, as the control panel sets it", () => {
   const w = loadWindow();
   assert.deepStrictEqual({ ...w.getDynamicRules() },
-    { confidenceNode: true, columnLock: true, loneNode: true, cornerNode: true });
+    { farPriority: true, confidenceNode: true, columnLock: true, loneNode: true, cornerNode: true });
   assert.deepStrictEqual({ ...w.setDynamicRules({ columnLock: false, bogus: true, loneNode: "no" }) },
-    { confidenceNode: true, columnLock: false, loneNode: true, cornerNode: true },
+    { farPriority: true, confidenceNode: true, columnLock: false, loneNode: true, cornerNode: true },
     "only booleans for known switches change");
   w.setGameInputMode("sensor");
   w.resetGame();
@@ -902,13 +902,64 @@ test("the confidence level is set from the control panel, 1-100 %", () => {
   assert.strictEqual(w.setConfidenceLevel(72.4), 72, "whole percents");
 });
 
+test("far priority: two far readings that agree hold the player through no-echo and stray readings", () => {
+  // The player at (90, 140). Each node hears them past 110 cm with one head,
+  // once, then sends no echo or a stray nearer half echo (Aaron, 6 Oct).
+  const farOf = (slot) => ({ avg: echoCm(slot, 90, 140), angle: aimAt(slot, 90, 140), scanState: 1 });
+  const noEcho = { avg: -1, angle: 60, scanState: 2 };
+  // One clock across the calls (run() starts its own at 16 ms each time).
+  let t = 0;
+  const play = (win, nodes, frames) => {
+    for (let i = 0; i < frames; i += 1) {
+      t += FRAME_MS;
+      win.performance.now = () => t;
+      win.markSensorFrame();
+      win.updateGame(t, CANVAS, nodes);
+    }
+  };
+  const w = loadWindow();
+  assert.strictEqual(w.getDynamicRules().farPriority, true, "on by default");
+  w.setGameInputMode("sensor");
+  w.resetGame();
+  play(w, scanners(farOf(0), farOf(2)), 1);
+  let sensor = w.getGameState().sensor;
+  assert.strictEqual(sensor.placedBy, "far");
+  assert.ok(Math.hypot(sensor.xCm - 90, sensor.yCm - 140) < 1e-6, `${sensor.xCm}, ${sensor.yCm}`);
+  // No echo and a stray half echo 60 cm off: still there, for 1.5 s.
+  play(w, scanners(noEcho, { avg: 60, angle: 70, scanState: 1 }), 40);
+  sensor = w.getGameState().sensor;
+  assert.strictEqual(sensor.placedBy, "far");
+  assert.ok(Math.abs(sensor.yCm - 140) < 1e-6, `${sensor.yCm}`);
+  play(w, scanners(noEcho, noEcho), 60);
+  assert.notStrictEqual(w.getGameState().sensor.placedBy, "far", "gone 1.5 s after the last far readings");
+
+  // Two far readings that do not agree (6 Oct: the left node at its stop,
+  // 160 degrees, the right one straight out) are not the player.
+  const clutter = loadWindow();
+  clutter.setGameInputMode("sensor");
+  clutter.resetGame();
+  run(clutter, scanners({ avg: 113, angle: 160, scanState: 1 }, { avg: 135, angle: 85, scanState: 1 }), 10);
+  assert.notStrictEqual(clutter.getGameState().sensor.placedBy, "far");
+
+  // Off: the far readings place nothing on their own.
+  const off = loadWindow();
+  off.setDynamicRules({ farPriority: false });
+  off.setGameInputMode("sensor");
+  off.resetGame();
+  run(off, scanners(farOf(0), farOf(2)), 1);
+  assert.notStrictEqual(off.getGameState().sensor.placedBy, "far");
+});
+
 test("far half: half readings in the back row keep a player in play", () => {
   // Both nodes hear a player 130 cm out with one sensor each (half), as the
   // rig's nodes mostly did past 100 cm on 5 Oct.
   const half = (x, y) => scanners({ avg: echoCm(0, x, y), angle: aimAt(0, x, y), scanState: 1 },
     { avg: echoCm(2, x, y), angle: aimAt(2, x, y), scanState: 1 });
+  // Far priority off: on, the two far readings, which agree, keep the player
+  // in play either way (see the far priority test).
   const w = loadWindow();
   assert.strictEqual(w.getFarHalf(), true, "on by default");
+  w.setDynamicRules({ farPriority: false });
   w.setGameInputMode("sensor");
   w.resetGame();
   run(w, half(75, 130), 120);
@@ -916,6 +967,11 @@ test("far half: half readings in the back row keep a player in play", () => {
   w.setFarHalf(false);
   run(w, half(75, 130), 1);
   assert.strictEqual(w.getGameState().sensor.status, "out-of-bounds", "off: at once, on the kept readings too");
+  w.setDynamicRules({ farPriority: true });
+  run(w, half(75, 130), 1);
+  assert.strictEqual(w.getGameState().sensor.status, "ok", "far priority keeps them in play");
+  assert.strictEqual(w.getGameState().sensor.placedBy, "far");
+  w.setFarHalf(true);
 
   // In the front row half stays 0, far half on or off.
   const near = loadWindow();

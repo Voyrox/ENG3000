@@ -19,6 +19,7 @@ Standard library only:
 
 import json
 import math
+from dataclasses import replace
 import os
 import sys
 import unittest
@@ -213,6 +214,9 @@ class ParityWithGameJs(unittest.TestCase):
         self.assertGreater(smoothing, 50, "the distances should differ without the Kalman")
         self.assertGreater(placed, 50, "line of sight should place the player differently")
 
+    def test_dynamic_with_far_priority_off(self):
+        self.assertGreater(self._replay("farPriorityOff"), 0)
+
     def test_dynamic_with_its_rules_switched_off(self):
         self.assertGreater(self._replay("dynamicRulesOff"), 0)
         followed = set(self.trace["runs"]["dynamicRulesOff"]["placedBy"]) - {None}
@@ -225,7 +229,7 @@ class ParityWithGameJs(unittest.TestCase):
         # methods are required (DynamicPickerBehaviour covers the average).
         for run in ("dynamic", "dynamicCalibrated"):
             followed = set(self.trace["runs"][run]["placedBy"]) - {None}
-            self.assertLessEqual({"conf-left", "conf-right", "corner-left", "corner-right",
+            self.assertLessEqual({"far", "conf-left", "conf-right", "corner-left", "corner-right",
                                   "centre", "lock-left", "lock-right", "left", "right"},
                                  followed, run)
             self.assertGreaterEqual(len(followed & {"los", "tri", "avg"}), 2, run)
@@ -1487,10 +1491,13 @@ class BothNodesLost(unittest.TestCase):
 
     def test_half_in_the_back_row_counts_as_found(self):
         # Far half (Aaron, 5 Oct): both nodes hear a player 130 cm out with one
-        # sensor each. On, nobody is lost; off, both are.
+        # sensor each. On, nobody is lost; off, both are. With far priority
+        # off: on, its two far readings, which agree, keep the player in play
+        # either way (FarPriority).
         n = FilterConfig().lost_readings
         for far_half, want in ((True, STATUS_OK), (False, STATUS_OUT_OF_BOUNDS)):
-            pipe = CoordinatePipeline(TwoSensorGeometry(), config=FilterConfig(far_half=far_half))
+            pipe = CoordinatePipeline(TwoSensorGeometry(),
+                                      config=FilterConfig(far_half=far_half, far_priority=False))
             results = [pipe.update(scanner_sample(75.0, 130.0, state=self.HALF), k * self.STEP_MS)
                        for k in range(2 * n)]
             self.assertEqual(results[-1].status, want, far_half)
@@ -1823,6 +1830,141 @@ class TriAimTolerance(unittest.TestCase):
                                         runs["triAimToleranceOff"]["steps"])
                       if a[at] != b[at])
         self.assertGreater(changed, 20, "trilateration should differ with the aim tolerance off")
+
+
+class FarPriority(unittest.TestCase):
+    """Far priority (Dynamic's rule F; Aaron, 6 Oct): when both nodes have
+    read past far_priority_cm (110) within far_seen_ms (1.5 s), found or half,
+    and the two readings agree - their distances cross inside both nodes'
+    beams, on the board - Dynamic places the player at that crossing and they
+    are not Out of bounds, whatever the readings in between. The nodes take
+    turns here, as on the rig: a node with nothing new is not fresh."""
+
+    STEP_MS = 100.0
+    FOUND, HALF, LOST = 0, 1, 2
+    FAR = (90.0, 140.0)                       # about 139 cm from the left node, 129 from the right
+
+    def setUp(self):
+        self.latest = [None, None, None]
+
+    def pipe(self, method="dyn", **config):
+        return CoordinatePipeline(TwoSensorGeometry(method=method), config=FilterConfig(**config))
+
+    def step(self, pipe, k, left=None, right=None):
+        """Update k (k * STEP_MS): the nodes given send that reading, the
+        other keeps its last one, not fresh."""
+        fresh = [False, False, False]
+        for slot, reading in ((0, left), (2, right)):
+            if reading is not None:
+                self.latest[slot] = reading
+                fresh[slot] = True
+        result = pipe.update(list(self.latest), k * self.STEP_MS, fresh=fresh, heard=fresh)
+        return result, pipe.geometry.placed_by(result.filtered, pipe.area)
+
+    def far(self, slot):
+        return scanner_sample(*self.FAR, state=self.HALF)[slot]
+
+    @staticmethod
+    def no_echo(angle=60):
+        return (None, angle, 2)
+
+    def test_it_is_on_by_default(self):
+        config = FilterConfig()
+        self.assertTrue(config.far_priority)
+        self.assertEqual((config.far_priority_cm, config.far_seen_ms), (110.0, 1500.0))
+        self.assertEqual(DYNAMIC_RULE_SWITCHES["farPriority"], "far_priority")
+
+    def test_two_far_readings_that_agree_hold_the_player_through_the_noise(self):
+        for on in (True, False):
+            self.latest = [None, None, None]
+            pipe = self.pipe(far_priority=on)
+            # The left node hears the player once, then nothing and a stray
+            # nearer half echo; then the right node's turn.
+            self.step(pipe, 0, left=self.far(0))
+            for k in range(1, 5):
+                self.step(pipe, k, left=(60.0, 70, self.HALF) if k == 3 else self.no_echo())
+            result, by = self.step(pipe, 5, right=self.far(2))
+            if not on:
+                self.assertNotEqual(by, "far")
+                continue
+            self.assertEqual(by, "far")
+            self.assertAlmostEqual(result.x_cm, self.FAR[0], places=6)
+            self.assertAlmostEqual(result.y_cm, self.FAR[1], places=6)
+            # The right node's no-echo and stray readings leave it there
+            # until the left node's far reading is 1.5 s old.
+            for k in range(6, 16):
+                result, by = self.step(pipe, k, right=(55.0, 100, self.HALF) if k == 8 else self.no_echo(120))
+                self.assertEqual(by, "far", k)
+                self.assertAlmostEqual(result.y_cm, self.FAR[1], places=6)
+            _, by = self.step(pipe, 16, right=self.no_echo(120))
+            self.assertNotEqual(by, "far")
+
+    def test_far_readings_that_do_not_agree_change_nothing(self):
+        # As on the rig on 6 Oct: the left node 113 cm off with its servo at
+        # its stop, the right one 135 cm straight out. They cross at about
+        # (44, 127), 60 degrees off where the left servo points.
+        pipe = self.pipe()
+        self.step(pipe, 0, left=(113.0, 160, self.HALF))
+        _, by = self.step(pipe, 1, right=(135.0, 85, self.HALF))
+        self.assertNotEqual(by, "far")
+        self.assertIsNone(pipe.geometry._far_fix(pipe.area))
+
+    def test_a_reading_at_110_cm_or_nearer_is_not_far(self):
+        pipe = self.pipe()
+        self.step(pipe, 0, left=(110.0, 112, self.HALF))
+        _, by = self.step(pipe, 1, right=(110.0, 68, self.HALF))
+        self.assertNotEqual(by, "far")
+
+    def test_finding_the_player_nearer_twice_in_a_row_ends_it(self):
+        pipe = self.pipe()
+        self.step(pipe, 0, left=self.far(0))
+        _, by = self.step(pipe, 1, right=self.far(2))
+        self.assertEqual(by, "far")
+        near = scanner_sample(75.0, 60.0)
+        _, by = self.step(pipe, 2, right=near[2])
+        self.assertEqual(by, "far", "one found reading nearer is not enough")
+        _, by = self.step(pipe, 3, right=near[2])
+        self.assertNotEqual(by, "far")
+        self.assertIsNone(pipe.geometry._far_seen[2])
+
+    def test_it_keeps_a_far_player_out_of_out_of_bounds_with_dynamic_only(self):
+        # Every node reading one in four hears the player far out, the rest
+        # are no echo: each node's last 21 add up to under 0, so both are
+        # lost. Dynamic keeps the player at the far readings' crossing; line
+        # of sight, with no far priority, says Out of bounds as before.
+        for method, want in (("dyn", STATUS_OK), ("los", STATUS_OUT_OF_BOUNDS)):
+            self.latest = [None, None, None]
+            pipe = self.pipe(method=method)
+            for k in range(60):
+                far = k % 4 == 0
+                result, _ = self.step(pipe, k, left=self.far(0) if far else self.no_echo(),
+                                      right=self.far(2) if far else self.no_echo(120))
+            self.assertTrue(pipe.geometry._nobody_found(FilterConfig()), method)
+            self.assertEqual(result.status, want, method)
+        self.assertAlmostEqual(result.y_cm if method == "dyn" else self.FAR[1], self.FAR[1])
+
+    def test_the_rule_switch_turns_it_off(self):
+        pipe = self.pipe()
+        self.step(pipe, 0, left=self.far(0))
+        _, by = self.step(pipe, 1, right=self.far(2))
+        self.assertEqual(by, "far")
+        pipe.config = replace(pipe.config, far_priority=False)
+        _, by = self.step(pipe, 2, right=self.far(2))
+        self.assertNotEqual(by, "far")
+
+    def test_the_parity_runs_show_the_rule(self):
+        with open(FIXTURE, encoding="utf-8") as fh:
+            trace = json.load(fh)
+        runs = trace["runs"]
+        # Segment 31, the last 360 steps: 200 of the far player in turns, 100
+        # of far readings that do not agree, 60 of the player found nearer.
+        # The far player's last readings count for 1.5 s (75 steps) into the
+        # second part; after that, nothing is far.
+        on, off = runs["dynamic"]["placedBy"], runs["farPriorityOff"]["placedBy"]
+        self.assertGreater(on[-360:-160].count("far"), 100)
+        self.assertNotIn("far", on[-160 + 75:])
+        self.assertNotIn("far", off)
+        self.assertNotIn("far", runs["dynamicRulesOff"]["placedBy"])
 
 
 class DeadZone(unittest.TestCase):

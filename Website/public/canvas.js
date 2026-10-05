@@ -673,8 +673,8 @@ function handleRemoteCommand(command) {
       holdAlert(Boolean(command.on));
       break;
     case "dynamicRules":
-      // Dynamic's rules on or off: { confidenceNode, columnLock, loneNode,
-      // cornerNode }, only the switches named.
+      // Dynamic's rules on or off: { farPriority, confidenceNode, columnLock,
+      // loneNode, cornerNode }, only the switches named.
       window.setDynamicRules(command.rules);
       syncServerFilterSetup();
       break;

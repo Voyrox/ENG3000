@@ -298,6 +298,8 @@ class StageTwoSensorRig(unittest.TestCase):
         stage.set_dynamic_rules({"columnLock": False})
         config = stage.pipeline.config
         self.assertEqual((config.column_lock, config.lone_node, config.corner_node), (False, True, True))
+        stage.set_dynamic_rules({"farPriority": False})
+        self.assertFalse(stage.pipeline.config.far_priority)
         stage.set_dynamic_rules({"loneNode": False, "cornerNode": False, "columnLock": True})
         config = stage.pipeline.config
         self.assertEqual((config.column_lock, config.lone_node, config.corner_node), (True, False, False))

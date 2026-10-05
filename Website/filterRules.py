@@ -199,11 +199,20 @@ class FilterConfig:
     centre_hold_ms: float = 1000.0
     confident_readings: int = 2
     confident_ms: float = 1500.0
+    # Far priority (tuning.farPriorityCm, tuning.farSeenMs; Aaron, 6 Oct;
+    # TwoSensorGeometry._far_fix()): a node's reading past far_priority_cm (its
+    # own distance, before the body radius) counts for far_seen_ms - long
+    # enough to cover the other node's turn - however few of its readings are
+    # that far.
+    far_priority_cm: float = 110.0
+    far_seen_ms: float = 1500.0
     # The side-column lock needs the servo lines to cross at least this far
     # inside the left or right column (tuning.sideLockDepthCm). And each of
-    # Dynamic's rules on or off, from the control panel (tuning.columnLock,
-    # tuning.loneNode, tuning.cornerNode; serverFilter.set_dynamic_rules()).
+    # Dynamic's rules on or off, from the control panel (tuning.farPriority,
+    # tuning.confidenceNode, tuning.columnLock, tuning.loneNode,
+    # tuning.cornerNode; serverFilter.set_dynamic_rules()).
     side_lock_depth_cm: float = 20.0
+    far_priority: bool = True
     confidence_node: bool = True
     column_lock: bool = True
     lone_node: bool = True
@@ -812,8 +821,9 @@ SENSOR_MAX_CM = 400.0
 SCAN_FOUND = 0         # scanState: both heads hear the player
 # Dynamic's rule switches: the control panel's names (setDynamicRules() in
 # game.js) -> FilterConfig fields.
-DYNAMIC_RULE_SWITCHES = {"confidenceNode": "confidence_node", "columnLock": "column_lock",
-                         "loneNode": "lone_node", "cornerNode": "corner_node"}
+DYNAMIC_RULE_SWITCHES = {"farPriority": "far_priority", "confidenceNode": "confidence_node",
+                         "columnLock": "column_lock", "loneNode": "lone_node",
+                         "cornerNode": "corner_node"}
 SCAN_HALF = 1          # scanState: one head hears the player
 SCAN_LOST = 2         # scanState: sweeping, the player is not in its line of sight
 
@@ -1123,12 +1133,11 @@ class TwoSensorGeometry(Geometry):
     first (body_centre_cm()). method picks how that becomes a position, as the
     game's position switch does:
 
-      "dyn" - Dynamic, the default: first its two rules (_rule()) - the
-              centre, when both nodes' servo lines cross inside the centre
-              column, then a lone confident node's own reading - and
-              otherwise whichever of the other three has kept the player in
-              one square the longest (DynamicPicker, stepped by track() once
-              per update).
+      "dyn" - Dynamic, the default: first its rules (_rule()) - far
+              priority, a node at the confidence level, the far corners, the
+              column lock, a lone confident node - and otherwise whichever of
+              the other three has kept the player in one square the longest
+              (DynamicPicker, stepped by track() once per update).
       "los" - line of sight: LineOfSightTracker, fed by track() once per
               update.
       "tri" - trilateration of the two distances: each distance is a circle
@@ -1173,6 +1182,8 @@ class TwoSensorGeometry(Geometry):
         self._seen_aim: list = [None] * GRID_SIZE   # (ms, angle) of the last found/half-found reading
         self._found_streak = [0] * GRID_SIZE         # new readings in a row that found the player
         self._centre_held: Optional[tuple] = None    # (ms, x, y): when and where the lines last crossed in the centre
+        self._far_seen: list = [None] * GRID_SIZE    # (ms, distance, angle) of the last reading past far_priority_cm
+        self._raw: list = [None] * GRID_SIZE         # this update's distances as they arrived (channels())
         self._now_ms = -math.inf
         self._config: Optional[FilterConfig] = None
 
@@ -1202,6 +1213,8 @@ class TwoSensorGeometry(Geometry):
         self._seen_aim = [None] * GRID_SIZE
         self._found_streak = [0] * GRID_SIZE
         self._centre_held = None
+        self._far_seen = [None] * GRID_SIZE
+        self._raw = [None] * GRID_SIZE
         self._now_ms = -math.inf
 
     def channels(self, sample) -> list:
@@ -1218,6 +1231,7 @@ class TwoSensorGeometry(Geometry):
             self._angles[slot] = _finite(angle)
             self._states[slot] = _finite(state)
             self._confidence[slot] = _finite(confidence)
+        self._raw = list(out)
         return out
 
     def nearest_raw_cm(self, raw_channels) -> Optional[float]:
@@ -1263,6 +1277,7 @@ class TwoSensorGeometry(Geometry):
                                         if reading and state == SCAN_FOUND else 0)
             if reading and angle is not None and state in (SCAN_FOUND, SCAN_HALF):
                 self._seen_aim[slot] = (now_ms, angle)
+            self._far_step(slot, area, config)
         crossing = self._lines_crossing(area)
         if crossing is not None and self._in_centre_column(crossing[0], area):
             self._centre_held = (now_ms, crossing[0], crossing[1])
@@ -1299,12 +1314,64 @@ class TwoSensorGeometry(Geometry):
             total += lost_score(state, back_row, config.far_half)
         return total <= 0
 
-    def _nobody_found(self, config) -> bool:
+    def _nobody_found(self, config, area=None) -> bool:
         """bothNodesLost() in game.js: both nodes are lost (_lost()). A node
-        that sends no scan state never is."""
+        that sends no scan state never is. With Dynamic on, far priority's
+        position (_far_fix()) is someone on the board, however lost the nodes
+        are."""
         left = self._lost(self.LEFT, config)
         right = self._lost(self.RIGHT, config)
+        if left and right and self.method == "dyn" and area is not None:
+            return self._far_fix(area) is None
         return left and right
+
+    def _far_step(self, slot, area, config) -> None:
+        """farStep() in game.js: far priority's memory of this node's new
+        reading. A reading past far_priority_cm - the node's own distance, as
+        it arrived (channels()) - that found or half-found something, with an
+        angle and within the angle limit, is kept; one nearer that found the
+        player, the node's confident_readings-th found reading in a row,
+        forgets it. No-echo, half and lone nearer readings leave it alone."""
+        distance, state, angle = self._raw[slot], self._states[slot], self._angles[slot]
+        if distance is None or angle is None:
+            return
+        if distance > config.far_priority_cm:
+            if (state in (SCAN_FOUND, SCAN_HALF)
+                    and within_angle_limit(area.column_centre_cm(slot), distance, angle, area, config)):
+                self._far_seen[slot] = (self._now_ms, distance, angle)
+        elif state == SCAN_FOUND and self._found_streak[slot] >= config.confident_readings:
+            self._far_seen[slot] = None
+
+    def _far_fix(self, area) -> Optional[tuple]:
+        """farFix() in game.js: far priority's position, (x_cm, y_cm), or
+        None - both nodes' far readings (_far_step()) are within far_seen_ms
+        and agree: their distances, to the middle of the player, cross inside
+        both nodes' beams as each was aimed (in_beam(), with the aim
+        tolerance), on the board. None with the rule off."""
+        config = self._config or FilterConfig()
+        left, right = self._far_seen[self.LEFT], self._far_seen[self.RIGHT]
+        if not config.far_priority or left is None or right is None:
+            return None
+        if self._now_ms - left[0] > config.far_seen_ms or self._now_ms - right[0] > config.far_seen_ms:
+            return None
+        d_left = body_centre_cm(left[1], config)
+        d_right = body_centre_cm(right[1], config)
+        x_left = area.column_centre_cm(self.LEFT)
+        x_right = area.column_centre_cm(self.RIGHT)
+        base = x_right - x_left
+        along = (d_left * d_left - d_right * d_right + base * base) / (2 * base)
+        h2 = d_left * d_left - along * along
+        if h2 < 0:
+            return None
+        x = x_left + along
+        y = math.sqrt(h2)
+        half = config.tri_beam_half_deg + (config.tri_aim_tolerance_deg
+                                           if config.tri_aim_tolerance else 0)
+        body = config.body_half_width_cm
+        if not (in_beam(x_left, left[2], x, y, half, body)
+                and in_beam(x_right, right[2], x, y, half, body)):
+            return None
+        return (x, y) if area.contains_point(x, y) else None
 
     def _picked_from(self, filtered, area) -> dict:
         """The positions Dynamic picks between: {"los", "tri", "avg"} ->
@@ -1461,6 +1528,10 @@ class TwoSensorGeometry(Geometry):
         whose position is `steadiest`. Checked in order (Aaron, 5 Oct), each
         with its switch in FilterConfig:
 
+        F. far_priority (Aaron, 6 Oct) - both nodes have read past
+           far_priority_cm within far_seen_ms (found or half), and the two
+           readings agree: the player is where they cross (_far_fix(); "far"),
+           whatever the readings in between.
         0. confidence_node - a node whose confidence from the server is at
            least confidence_level_pct places the player by its own reading
            (_level_node(); "conf-left" / "conf-right"), and the other node is
@@ -1485,6 +1556,9 @@ class TwoSensorGeometry(Geometry):
         def side(slot):
             return "left" if slot == self.LEFT else "right"
 
+        far = self._far_fix(area)
+        if far is not None:
+            return "far", far
         if config.confidence_node:
             sure = self._level_node(filtered, area)
             if sure is not None:
@@ -1523,9 +1597,10 @@ class TwoSensorGeometry(Geometry):
 
     def placed_by(self, filtered, area) -> Optional[str]:
         """placedBy in game.js: where the position comes from - the method
-        switched on, or with Dynamic, "centre" or "left" / "right" when one
-        of its rules places the player, else the method it follows ("los",
-        "tri" or "avg"; None when no method has a position)."""
+        switched on, or with Dynamic, the rule's name ("far", "centre",
+        "left" / "right" and the rest; _rule()) when one of its rules places
+        the player, else the method it follows ("los", "tri" or "avg"; None
+        when no method has a position)."""
         if self.method != "dyn":
             return self.method
         return self._dynamic_pick(self._picked_from(filtered, area), filtered, area)[0]
@@ -1601,7 +1676,7 @@ class TwoSensorGeometry(Geometry):
     def locate(self, filtered, area, config) -> Fix:
         # Neither node has found the player for a while: nobody is on the
         # board, whatever any method still makes of old or stray readings.
-        if self._nobody_found(config):
+        if self._nobody_found(config, area):
             self._last_column = None
             return Fix(STATUS_OUT_OF_BOUNDS, nobody_found=True)
         where = self.position(filtered, area)

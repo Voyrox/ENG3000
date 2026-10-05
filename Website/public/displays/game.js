@@ -301,15 +301,24 @@
     centreHoldMs: 1000,
     confidentReadings: 2,
     confidentMs: 1500,
+    // Far priority (Dynamic's first rule; Aaron, 6 Oct; see farFix()). A
+    // node's reading past farPriorityCm (its own distance, before the body
+    // radius) counts for farSeenMs - long enough to cover the other node's
+    // turn - however few of its readings are that far. Python: FilterConfig
+    // far_priority_cm, far_seen_ms.
+    farPriorityCm: 110,
+    farSeenMs: 1500,
     // sideLockDepthCm: the side-column lock needs the servo lines to cross at
-    // least this far inside the left or right column. confidenceNode,
-    // columnLock, loneNode, cornerNode: Dynamic's rules on or off - a node at
-    // the confidence level, the column lock (centre and sides), a lone
-    // confident node, and the near node alone in its far corner (A1, A3) -
-    // set from the control panel (setDynamicRules()) and kept in this
-    // browser. Python: FilterConfig side_lock_depth_cm, confidence_node,
-    // column_lock, lone_node, corner_node.
+    // least this far inside the left or right column. farPriority,
+    // confidenceNode, columnLock, loneNode, cornerNode: Dynamic's rules on or
+    // off - far priority, a node at the confidence level, the column lock
+    // (centre and sides), a lone confident node, and the near node alone in
+    // its far corner (A1, A3) - set from the control panel
+    // (setDynamicRules()) and kept in this browser. Python: FilterConfig
+    // side_lock_depth_cm, far_priority, confidence_node, column_lock,
+    // lone_node, corner_node.
     sideLockDepthCm: 20,
+    farPriority: true,
     confidenceNode: true,
     columnLock: true,
     loneNode: true,
@@ -406,11 +415,11 @@
     // As above: the default stands.
   }
 
-  // Dynamic's rules on or off, { confidenceNode, columnLock, loneNode,
-  // cornerNode } (see dynamicRule()). From the control panel (canvas.js,
-  // "dynamicRules"); only the switches named change. Kept in this browser
-  // like lostReadings.
-  const DYNAMIC_RULE_SWITCHES = ["confidenceNode", "columnLock", "loneNode", "cornerNode"];
+  // Dynamic's rules on or off, { farPriority, confidenceNode, columnLock,
+  // loneNode, cornerNode } (see dynamicRule()). From the control panel
+  // (canvas.js, "dynamicRules"); only the switches named change. Kept in this
+  // browser like lostReadings.
+  const DYNAMIC_RULE_SWITCHES = ["farPriority", "confidenceNode", "columnLock", "loneNode", "cornerNode"];
   const DYNAMIC_RULES_KEY = "eng3000.dynamicRules";
 
   window.getDynamicRules = function getDynamicRules() {
@@ -2170,9 +2179,27 @@
     return leader;
   }
 
-  // --- Dynamic's rules: confidence, the far corners, the column lock, a lone node
+  // --- Dynamic's rules: far priority, confidence, the far corners, the column lock, a lone node
   // Checked before the steadiest method (Aaron, 5 Oct), in this order. Each
   // can be switched off from the control panel (setDynamicRules()).
+  //
+  // F. Far priority (tuning.farPriority; Aaron, 6 Oct). Past 110 cm a node's
+  //    readings are few and far between: mostly one head hears the player
+  //    (half) or neither does, so a far reading turned up for a reading or
+  //    two and the no-echo and nearer stray readings in between took the
+  //    player back (on the rig on 6 Oct, two thirds of the readings past
+  //    110 cm were half, and most runs of them were one reading long). When both
+  //    nodes have read past tuning.farPriorityCm in the last
+  //    tuning.farSeenMs (found or half, within the angle limit), and the two
+  //    readings agree - their distances cross inside both nodes' beams (with
+  //    the aim tolerance, as trilateration checks), on the board - the player
+  //    is at that crossing, and is not Out of bounds, whatever the readings
+  //    in between. Two far readings that do not agree are not the player (on
+  //    6 Oct the left node read 113 cm with its servo at its stop, 160
+  //    degrees, while the right one read 135 cm straight out), and change
+  //    nothing. A node that finds the player nearer than
+  //    tuning.farPriorityCm tuning.confidentReadings times in a row forgets
+  //    its far reading at once (farStep()).
   //
   // 0. A node at the confidence level (tuning.confidenceNode). The server
   //    works out how sure each node is of where the player is (handover.py:
@@ -2236,18 +2263,20 @@
   const seenAim = [null, null, null];   // { at, angle }: a slot's last new reading that found or half-found the player
   const foundStreak = [0, 0, 0];        // its new readings in a row that found the player
   let centreHeld = null;                // { at, x, y }: when and where the lines last crossed in the centre column
+  const farSeen = [null, null, null];   // { at, distance, angle }: a slot's last new reading past tuning.farPriorityCm
 
   function resetDynamicRules() {
     seenAim.fill(null);
     foundStreak.fill(0);
     centreHeld = null;
+    farSeen.fill(null);
   }
 
   // Once per update: this update's new readings. foundAt, which the
   // confidence also reads, is noted by bothNodesLost(). A reading past the
   // angle limit counts as none: it neither builds a found streak nor aims a
   // servo line.
-  function stepDynamicRules(filtered, scans, fresh, now) {
+  function stepDynamicRules(raw, filtered, scans, fresh, now) {
     [LEFT_SENSOR, RIGHT_SENSOR].forEach((slot) => {
       if (!fresh[slot]) return;
       const { state, angle } = scans[slot];
@@ -2256,10 +2285,53 @@
       if (reading && angle !== null && (state === SCAN_FOUND || state === SCAN_HALF)) {
         seenAim[slot] = { at: now, angle };
       }
+      farStep(slot, raw[slot], state, angle, now);
     });
     const crossing = linesCrossing(now);
     if (crossing && inCentreColumn(crossing.x)) centreHeld = { at: now, x: crossing.x, y: crossing.y };
     else if (crossing && deepSideColumn(crossing.x) !== null) centreHeld = null;
+  }
+
+  // Far priority's memory of one node's new reading (rule F): a reading past
+  // tuning.farPriorityCm - the node's own distance, as it arrived, before
+  // any filter - that found or half-found something, with an angle and
+  // within the angle limit, is kept; one nearer that found the player, the
+  // node's tuning.confidentReadings-th found reading in a row, forgets it.
+  // No-echo, half and lone nearer readings leave it alone: they are the noise.
+  function farStep(slot, distance, state, angle, now) {
+    if (distance === null || angle === null) return;
+    if (distance > tuning.farPriorityCm) {
+      if ((state === SCAN_FOUND || state === SCAN_HALF) && withinAngleLimit(slot, distance, angle)) {
+        farSeen[slot] = { at: now, distance, angle };
+      }
+    } else if (state === SCAN_FOUND && foundStreak[slot] >= tuning.confidentReadings) {
+      farSeen[slot] = null;
+    }
+  }
+
+  // Rule F's position, { x, y, source: "both" }, or null: both nodes' far
+  // readings (farStep()) are recent and agree - the two distances, to the
+  // middle of the player, cross inside both nodes' beams as each was aimed
+  // (inBeam(), with the aim tolerance), on the board. Null with the rule off.
+  function farFix(now) {
+    if (!tuning.farPriority) return null;
+    const left = farSeen[LEFT_SENSOR];
+    const right = farSeen[RIGHT_SENSOR];
+    if (!left || !right || now - left.at > tuning.farSeenMs || now - right.at > tuning.farSeenMs) return null;
+    const dL = bodyCentreCm(left.distance);
+    const dR = bodyCentreCm(right.distance);
+    const xLeft = columnCentreCm(LEFT_SENSOR);
+    const xRight = columnCentreCm(RIGHT_SENSOR);
+    const base = xRight - xLeft;
+    const along = (dL * dL - dR * dR + base * base) / (2 * base);
+    const h2 = dL * dL - along * along;
+    if (h2 < 0) return null;
+    const x = xLeft + along;
+    const y = Math.sqrt(h2);
+    const half = tuning.triBeamHalfDeg + (tuning.triAimTolerance ? tuning.triAimToleranceDeg : 0);
+    if (!inBeam(xLeft, left.angle, x, y, half) || !inBeam(xRight, right.angle, x, y, half)) return null;
+    if (window.isPointInPlayArea && !window.isPointInPlayArea(x, y)) return null;
+    return { x, y, source: "both" };
   }
 
   // Whether both nodes found or half-found the player in the last
@@ -2373,13 +2445,15 @@
   }
 
   // The rule placing the player for Dynamic, { by, fix: { x, y, source } } -
-  // by is "conf-left" | "conf-right" (rule 0), "corner-left" | "corner-right"
-  // (rule 1), "centre" | "lock-left" | "lock-right" (rule 2) or "left" |
-  // "right" (rule 3) - or null to follow the steadiest method, whose position
-  // is `steadiest`. confidence: [l, c, r], each node's from the server
-  // (readConfidence()).
+  // by is "far" (rule F), "conf-left" | "conf-right" (rule 0), "corner-left" |
+  // "corner-right" (rule 1), "centre" | "lock-left" | "lock-right" (rule 2)
+  // or "left" | "right" (rule 3) - or null to follow the steadiest method,
+  // whose position is `steadiest`. confidence: [l, c, r], each node's from
+  // the server (readConfidence()).
   function dynamicRule(filtered, scans, confidence, steadiest, now) {
     const side = (slot) => (slot === LEFT_SENSOR ? "left" : "right");
+    const far = farFix(now);
+    if (far) return { by: "far", fix: far };
     if (tuning.confidenceNode) {
       const sure = levelNode(filtered, scans, confidence);
       if (sure) {
@@ -2663,7 +2737,7 @@
   //   method:     the method switched on,
   //   placedBy:   where the position above came from: the method switched
   //               on ("los" | "tri" | "avg"), or, with Dynamic on, one of its
-  //               rules (dynamicRule(): "conf-left" | "conf-right" |
+  //               rules (dynamicRule(): "far" | "conf-left" | "conf-right" |
   //               "corner-left" | "corner-right" |
   //               "centre" | "lock-left" | "lock-right" | "left" | "right")
   //               or the steadiest method,
@@ -2697,8 +2771,12 @@
     const filtered = raw.map((value, slot) =>
       fresh[slot] ? conditionSensor(sensorFilters[slot], value, now, angles[slot]) : sensorFilters[slot].value);
     if (isNewReading) stepLosTrack(filtered, scans, fresh, now);
-    const nobodyFound = bothNodesLost(filtered, scans, fresh, heard, now);
-    if (isNewReading) stepDynamicRules(filtered, scans, fresh, now);
+    const bothLost = bothNodesLost(filtered, scans, fresh, heard, now);
+    if (isNewReading) stepDynamicRules(raw, filtered, scans, fresh, now);
+    // Far priority (rule F) places the player with Dynamic on: two far
+    // readings that agree are someone on the board, however lost the nodes'
+    // readings in between say they are.
+    const nobodyFound = bothLost && !(positioning.method === "dyn" && farFix(now));
     const fixes = solvePositions(filtered, angles, now);
     if (isNewReading) stepDynamic(fixes, now);
     const steadiest = dynamicLeader(fixes, now);
@@ -3754,9 +3832,10 @@
     avg: { label: "Average", short: "AVG", colour: "#f8fafc" },
   };
   // What the control panel's Dynamic button says when one of its rules places
-  // the player (dynamicRule()): a node at the confidence level, a far corner,
-  // the column lock, or a lone confident node.
+  // the player (dynamicRule()): far priority, a node at the confidence level,
+  // a far corner, the column lock, or a lone confident node.
   const DYNAMIC_RULE_SHORT = {
+    far: "FAR",
     "conf-left": "CONF L", "conf-right": "CONF R",
     "corner-left": "A1", "corner-right": "A3",
     centre: "MID", "lock-left": "COL L", "lock-right": "COL R",

@@ -127,8 +127,9 @@ class ServerFilterStage:
 
     def set_dynamic_rules(self, rules) -> None:
         """Dynamic's rule switches from the game's control panel
-        (setDynamicRules(): confidenceNode, columnLock, loneNode, cornerNode
-        -> FilterConfig confidence_node, column_lock, lone_node, corner_node).
+        (setDynamicRules(): farPriority, confidenceNode, columnLock,
+        loneNode, cornerNode -> FilterConfig far_priority, confidence_node,
+        column_lock, lone_node, corner_node).
         Only the switches named change. ValueError for an unknown switch or a
         value that is not true/false."""
         changes = {}

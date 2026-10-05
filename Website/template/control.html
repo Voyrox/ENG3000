@@ -89,6 +89,9 @@
     <section>
         <h2>Dynamic's rules <small>checked in this order</small></h2>
         <div class="row">
+            <button data-rule="farPriority">Far priority: on</button>
+        </div>
+        <div class="row">
             <button data-rule="confidenceNode">Confidence: on</button>
             <button data-rule="cornerNode">Far corners: on</button>
         </div>
@@ -101,7 +104,11 @@
             <b id="confidenceLevel" class="stepper">--</b>
             <button id="levelMore" aria-label="Higher confidence level">+</button>
         </div>
-        <p class="note">Confidence: a node whose Confidence (the Sensors table below) is at or above
+        <p class="note">Far priority: when both nodes have read past 110 cm in the last 1.5 s
+            (one head is enough) and the two readings agree - they cross where both servos point - the
+            player is there (FAR), and not Out of bounds, whatever the no-echo and stray nearer
+            readings in between say. A node that finds you nearer twice in a row ends it.
+            Confidence: a node whose Confidence (the Sensors table below) is at or above
             the level places the player on its own, along its servo line, and the other node is left
             out (CONF L, CONF R); both at it, the higher one. &minus;/+ moves the level 5 %.
             Far corners: in A1 (back left) or A3 (back right), the near node places the player
@@ -354,7 +361,8 @@
         // Dynamic's rule switches: each press flips one (on until the game
         // says otherwise).
         const RULE_LABELS = {
-            confidenceNode: "Confidence", cornerNode: "Far corners", columnLock: "Column lock", loneNode: "Lone node",
+            farPriority: "Far priority", confidenceNode: "Confidence", cornerNode: "Far corners",
+            columnLock: "Column lock", loneNode: "Lone node",
         };
         const ruleOn = (name) => !(game && game.dynamicRules && game.dynamicRules[name] === false);
         document.querySelectorAll("[data-rule]").forEach((btn) => {

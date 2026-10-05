@@ -303,6 +303,34 @@ function buildStream() {
       withConfidence(scanned(SENSOR_X_CM[1], 90, 50), null));
   }
 
+  // 31. Far priority (Dynamic's rule F; Aaron, 6 Oct). The player stands far
+  //     out, at (90, 140): about 139 cm from the left node and 129 cm from
+  //     the right. As on the rig on 6 Oct, the nodes take 500 ms turns and
+  //     past 110 cm hear the player one reading in five, with one head
+  //     (half); the rest are no echo, sweeping, and a stray nearer half
+  //     echo at 60 cm. With the rule on the player is held at the far
+  //     readings' crossing; off, they come and go.
+  for (let i = 0; i < 200; i++) {
+    const k = i % 5;
+    const sweep = 40 + ((i * 15) % 120);
+    const reading = (nodeX) =>
+      k === 0 ? scanned(nodeX, 90, 140, 1) : k === 3 ? [jitter(60, 2), sweep, 1] : [NO_ECHO, sweep, 2];
+    const leftTurn = Math.floor(i / 25) % 2 === 0;
+    push(leftTurn ? reading(SENSOR_X_CM[0]) : SILENT, leftTurn ? SILENT : reading(SENSOR_X_CM[1]));
+  }
+  //     Then two far readings that do not agree, as on the rig on 6 Oct: the
+  //     left node hears something 113 cm off with its servo at its stop (160
+  //     degrees), the right one something 135 cm straight out. Their
+  //     distances cross nowhere near where the left servo points, so far
+  //     priority leaves them alone. Then both find the player at (75, 80).
+  for (let i = 0; i < 100; i++) {
+    const leftTurn = Math.floor(i / 25) % 2 === 0;
+    const left = i % 2 ? [jitter(113, 1), 160, 1] : [NO_ECHO, 160, 2];
+    const right = i % 2 ? [jitter(135, 1), 85, 1] : [NO_ECHO, 85, 2];
+    push(leftTurn ? left : SILENT, leftTurn ? SILENT : right);
+  }
+  for (let i = 0; i < 60; i++) push(scanned(SENSOR_X_CM[0], 75, 80), scanned(SENSOR_X_CM[1], 75, 80));
+
   return steps;
 }
 
@@ -409,7 +437,8 @@ const FIELDS = ["status", "gx", "gy", "rawGx", "rawGy", "column", "held", "heldF
   "fresh", "x", "y"];
 
 const stream = buildStream();
-const RULES_OFF = { confidenceNode: false, columnLock: false, loneNode: false, cornerNode: false };
+const RULES_OFF = { farPriority: false, confidenceNode: false, columnLock: false, loneNode: false, cornerNode: false };
+const FAR_PRIORITY_OFF = { farPriority: false };
 // [near, far] per column; the centre entry is ignored (no centre sensor to capture it).
 const calibrated = [[28.47, 140.68], [20.44, 138.26], [10.89, 145.81]];
 // A far edge past 150 cm, as on a 150 cm board starting 10 cm in front of the
@@ -434,8 +463,12 @@ const trace = {
     dynamicCalibrated: { method: "dyn", ...runJs(stream, calibrated, "dyn") },
     kalmanOff: { method: "los", kalman: false, ...runJs(stream, null, "los", false) },
     kalmanOffDynamic: { method: "dyn", kalman: false, ...runJs(stream, null, "dyn", false) },
-    // Dynamic with all three of its rules switched off: the steadiest method only.
+    // Dynamic with all its rules switched off: the steadiest method only.
     dynamicRulesOff: { method: "dyn", dynamicRules: RULES_OFF, ...runJs(stream, null, "dyn", true, RULES_OFF) },
+    // Dynamic with far priority off: far readings come and go with the noise.
+    farPriorityOff: {
+      method: "dyn", dynamicRules: FAR_PRIORITY_OFF, ...runJs(stream, null, "dyn", true, FAR_PRIORITY_OFF),
+    },
     // Line of sight and Dynamic with the angle limit off: every reading counts.
     angleLimitOff: { method: "los", angleLimit: false, ...runJs(stream, null, "los", true, null, false) },
     angleLimitOffDynamic: { method: "dyn", angleLimit: false, ...runJs(stream, null, "dyn", true, null, false) },
