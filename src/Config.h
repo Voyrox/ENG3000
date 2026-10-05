@@ -80,12 +80,15 @@ constexpr float MIN_TARGET_CM = 10;
 constexpr float MAX_TARGET_CM = 230;
 
 // How long a reading may wait for its echo. pulseIn() counts from the trigger,
-// not from the start of the echo pulse, and the HC-SR04 only raises ECHO about
-// half a millisecond after its trigger. So the timeout is the round trip to
+// not from the start of the echo pulse, and the rig's sensors only raise ECHO
+// about 2.2 ms after their trigger. So the timeout is the round trip to
 // MAX_TARGET_CM plus that start: the old flat 9000 us left room for only
 // ~145 cm, and nothing past it - the far edge of the play area included - was
-// ever heard.
-constexpr unsigned long ECHO_START_US = 600;
+// ever heard. The start was taken as 600 us at first, and the rig's serial
+// logs (4-5 Oct) then stopped dead about 28 cm short of MAX_TARGET_CM at every
+// setting: at most 152 cm with 180, 162 with 190 and 203 with 230. Each of
+// those puts the start at 2.21-2.24 ms; 2.5 ms leaves some room.
+constexpr unsigned long ECHO_START_US = 2500;
 constexpr unsigned long ECHO_TIMEOUT_US =
     static_cast<unsigned long>(MAX_TARGET_CM * 2 / SOUND_CM_PER_US) + ECHO_START_US;
 
