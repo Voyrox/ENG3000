@@ -438,12 +438,22 @@ function applyServerFilteringFlag(payload) {
 //
 // The assignment goes whatever the filtering flag: the server passes each
 // scanner node its role (ROLE LEFT / ROLE RIGHT), which sets its servo limits.
+// So does the calibration: the server's search aims a lost node at a cell's
+// centre, which needs the calibrated rows (search.py, heading.py).
 function syncServerFilterSetup() {
   if (window.isSensorAssignmentComplete()) {
     const slots = window.getSensorAssignment();
     const key = JSON.stringify(slots);
     if (key !== sentAssignmentKey && sendToServer({ type: "sensors:assign", slots })) {
       sentAssignmentKey = key;
+    }
+  }
+
+  const perColumn = window.getCapturedCalibration();
+  if (perColumn) {
+    const key = JSON.stringify(perColumn);
+    if (key !== sentCalibrationKey && sendToServer({ type: "calibration:update", perColumn })) {
+      sentCalibrationKey = key;
     }
   }
 
@@ -525,14 +535,6 @@ function syncServerFilterSetup() {
   const farHalf = window.getFarHalf();
   if (farHalf !== sentFarHalf && sendToServer({ type: "sensor:farHalf", on: farHalf })) {
     sentFarHalf = farHalf;
-  }
-
-  const perColumn = window.getCapturedCalibration();
-  if (perColumn) {
-    const key = JSON.stringify(perColumn);
-    if (key !== sentCalibrationKey && sendToServer({ type: "calibration:update", perColumn })) {
-      sentCalibrationKey = key;
-    }
   }
 }
 
@@ -771,6 +773,35 @@ function sendGameStatus() {
 
 // 10 Hz, so the cursor mirrored on the phone glides rather than steps.
 window.setInterval(sendGameStatus, 100);
+
+// The player's track for the server's search (Aaron, 6 Oct): when a node
+// loses a moving player it is aimed at the cell they were walking into
+// (heading.py). Moving or still, where they are (cm), the line-of-sight
+// track's velocity (cm/s) and how long ago the track last took a reading,
+// from getSensorMotion(); only during a sensor round, and only while the
+// position is the game's own - not held on the last cell through bad
+// readings, Out of bounds or no signal. Then the server's last track ages
+// out instead of a stale position, still "moving", looking new: a search
+// that has given up on a cell takes only tracks newer than that (search.py).
+function sendTrackUpdate() {
+  if (!roundOnScreen() || window.getGameInputMode() !== "sensor") return;
+  const sensor = window.getGameState().sensor || {};
+  if (sensor.status !== "ok" || sensor.held) return;
+  const motion = window.getSensorMotion();
+  if (motion.x === null || motion.y === null) return;
+  sendToServer({
+    type: "track:update",
+    moving: Boolean(motion.moving),
+    x: motion.x,
+    y: motion.y,
+    vx: motion.vx,
+    vy: motion.vy,
+    ageMs: Math.max(0, performance.now() - motion.at),
+  });
+}
+
+// 10 Hz, like the game status: the search reads the latest one.
+window.setInterval(sendTrackUpdate, 100);
 
 function connectSocket() {
   socket = new WebSocket(wsUrl);
