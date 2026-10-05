@@ -197,6 +197,21 @@
     // steady, and past that line of sight wins, then trilateration, then the
     // average. Python: FilterConfig dynamic_steady_ms.
     dynamicSteadyMs: 1000,
+    // Dynamic's two rules, checked before the steadiest method (see
+    // dynamicRule(); Aaron, 5 Oct). centreSeenMs: the centre rule crosses each
+    // node's servo line from its last reading that found or half-found the
+    // player, if both are this recent (ms). centreHoldMs: once the lines have
+    // crossed in the centre column, the player stays in it this long (ms)
+    // while both lines are recent, even if the crossing strays outside.
+    // confidentReadings, confidentMs: a node is confident when this many of
+    // its readings in a row found the player (both heads), the latest this
+    // recent, and its own reading is inside the play area; a lone confident
+    // node places the player by itself. Python: FilterConfig centre_seen_ms,
+    // centre_hold_ms, confident_readings, confident_ms.
+    centreSeenMs: 1500,
+    centreHoldMs: 1000,
+    confidentReadings: 2,
+    confidentMs: 1500,
     // Out of bounds, the only time the game says it (Aaron, 5 Oct): both
     // nodes are lost. A node is lost when its last lostReadings readings,
     // scored found +1, half 0, lost -1 (as the control panel shows each
@@ -1333,6 +1348,7 @@
     });
     resetLosTrack();
     resetDynamic();
+    resetDynamicRules();
     lastSeenStamp.fill(null);
     heardAt.fill(-Infinity);
     foundAt.fill(-Infinity);
@@ -1535,6 +1551,7 @@
   const LOS_TRACK_TIMEOUT_MS = 1500;      // no usable reading for this long: no position
   const LOS_BOTH_WINDOW_MS = 2500;        // both nodes fed the track within this: source "both"
   const SCAN_FOUND = 0;                   // scanState: both heads hear the player
+  const SCAN_HALF = 1;                    // scanState: one head hears the player
   const SCAN_LOST = 2;                    // scanState: sweeping, the player is not in sight
 
   // Small dense matrices as arrays of rows, multiplied in a fixed order so the
@@ -1830,6 +1847,134 @@
     return leader;
   }
 
+  // --- Dynamic's rules: the centre, and a lone confident node ------------------
+  // Checked before the steadiest method (Aaron, 5 Oct), in this order:
+  //
+  // 1. The centre. Each node's servo points where it last found or half-found
+  //    the player. If both have done so in the last tuning.centreSeenMs and
+  //    the two servo lines cross inside the centre column, the player is in
+  //    the centre column - wherever the methods put them. The line from a
+  //    node, not its distance, is what the rule trusts: a player in the
+  //    centre is hard to place by distance because each node's beam finds
+  //    the edge of their body. (Aaron's own form, LEFT above 90 and RIGHT
+  //    below it, also holds anywhere between the two nodes, which sit in the
+  //    middle of the outer columns; on the 4 Oct centre run it said centre at
+  //    the left spot every time. The crossing said so at the left spot 0 % of
+  //    the time and 81-100 % at the centre spots.) x is the crossing's, kept
+  //    COLUMN_MARGIN_CM inside the column so the column hysteresis cannot hold
+  //    the player in the column they came from; y is the steadiest method's,
+  //    or the crossing's when no method has a position. Once the lines have
+  //    crossed in the centre column the player stays there for
+  //    tuning.centreHoldMs while both nodes still see them, even if the
+  //    crossing strays just outside it: standing still in the centre must
+  //    never touch a side column (Aaron). On the rig on 5 Oct the crossing
+  //    strayed to 103.5 cm for two readings in 20 minutes.
+  //
+  // 2. A lone confident node. A node whose last tuning.confidentReadings
+  //    readings all found the player (both heads), the latest in the last
+  //    tuning.confidentMs, and whose own reading - its distance along its
+  //    servo line - puts the player inside the play area (across the board,
+  //    and between its column's near and far edges), is confident. If only one
+  //    node is, that reading places the player and the other node's readings
+  //    are left out. When both are, the methods place the player as before.
+  //    (On 5 Oct the left node, turned fully in, found something 9 cm in front
+  //    of the screen line, and at times something off the left edge; neither
+  //    is the player.)
+  //
+  // Python: TwoSensorGeometry._rule() in filterRules.py.
+  const seenAim = [null, null, null];   // { at, angle }: a slot's last new reading that found or half-found the player
+  const foundStreak = [0, 0, 0];        // its new readings in a row that found the player
+  let centreHeld = null;                // { at, x, y }: when and where the lines last crossed in the centre column
+
+  function resetDynamicRules() {
+    seenAim.fill(null);
+    foundStreak.fill(0);
+    centreHeld = null;
+  }
+
+  // Once per update: this update's new readings. foundAt, which the
+  // confidence also reads, is noted by bothNodesLost().
+  function stepDynamicRules(filtered, scans, fresh, now) {
+    [LEFT_SENSOR, RIGHT_SENSOR].forEach((slot) => {
+      if (!fresh[slot]) return;
+      const { state, angle } = scans[slot];
+      const reading = filtered[slot] !== null;
+      foundStreak[slot] = reading && state === SCAN_FOUND ? foundStreak[slot] + 1 : 0;
+      if (reading && angle !== null && (state === SCAN_FOUND || state === SCAN_HALF)) {
+        seenAim[slot] = { at: now, angle };
+      }
+    });
+    const crossing = linesCrossing(now);
+    if (crossing && inCentreColumn(crossing.x)) centreHeld = { at: now, x: crossing.x, y: crossing.y };
+  }
+
+  // Whether both nodes found or half-found the player in the last
+  // tuning.centreSeenMs.
+  function bothLinesRecent(now) {
+    const left = seenAim[LEFT_SENSOR];
+    const right = seenAim[RIGHT_SENSOR];
+    return Boolean(left && right) && now - left.at <= tuning.centreSeenMs && now - right.at <= tuning.centreSeenMs;
+  }
+
+  // Where the two nodes' servo lines cross, { x, y }, or null when one is not
+  // recent or they do not meet in front of the nodes.
+  function linesCrossing(now) {
+    if (!bothLinesRecent(now)) return null;
+    const tanLeft = Math.tan((seenAim[LEFT_SENSOR].angle - 90) * Math.PI / 180);
+    const tanRight = Math.tan((seenAim[RIGHT_SENSOR].angle - 90) * Math.PI / 180);
+    if (!(tanLeft > tanRight)) return null;
+    const y = (columnCentreCm(RIGHT_SENSOR) - columnCentreCm(LEFT_SENSOR)) / (tanLeft - tanRight);
+    return { x: columnCentreCm(LEFT_SENSOR) + y * tanLeft, y };
+  }
+
+  function inCentreColumn(x) {
+    const pitch = PLAY_WIDTH_CM / 3;
+    return x >= pitch && x <= 2 * pitch;
+  }
+
+  // Where the centre rule puts the player, { x, y }: where the lines cross if
+  // that is in the centre column, else where they last did so, within
+  // tuning.centreHoldMs and while both lines are recent; otherwise null.
+  function centreCrossing(now) {
+    const crossing = linesCrossing(now);
+    if (crossing && inCentreColumn(crossing.x)) return crossing;
+    if (centreHeld && now - centreHeld.at <= tuning.centreHoldMs && bothLinesRecent(now)) {
+      return { x: centreHeld.x, y: centreHeld.y };
+    }
+    return null;
+  }
+
+  // A confident node's own reading, { x, y } - its distance along its servo
+  // line - or null when the node is not confident or that point is outside
+  // the play area.
+  function confidentPoint(slot, filtered, scans, now) {
+    if (foundStreak[slot] < tuning.confidentReadings || now - foundAt[slot] > tuning.confidentMs ||
+      filtered[slot] === null || scans[slot].angle === null) return null;
+    const point = scannerPoint(columnCentreCm(slot), bodyCentreCm(filtered[slot]), scans[slot].angle);
+    if (point.x < 0 || point.x > PLAY_WIDTH_CM) return null;
+    const span = columnSpan(columnAtCm(point.x));
+    return point.y >= span.near && point.y <= span.far ? point : null;
+  }
+
+  // The rule placing the player for Dynamic, { by: "centre" | "left" |
+  // "right", fix: { x, y, source } }, or null to follow the steadiest method,
+  // whose position is `steadiest`.
+  function dynamicRule(filtered, scans, steadiest, now) {
+    const crossing = centreCrossing(now);
+    if (crossing) {
+      const pitch = PLAY_WIDTH_CM / 3;
+      const x = Math.max(pitch + COLUMN_MARGIN_CM, Math.min(2 * pitch - COLUMN_MARGIN_CM, crossing.x));
+      return { by: "centre", fix: { x, y: steadiest ? steadiest.y : crossing.y, source: "both" } };
+    }
+    const points = [LEFT_SENSOR, RIGHT_SENSOR]
+      .map((slot) => ({ slot, point: confidentPoint(slot, filtered, scans, now) }))
+      .filter((c) => c.point);
+    if (points.length !== 1) return null;
+    const { slot, point } = points[0];
+    const by = slot === LEFT_SENSOR ? "left" : "right";
+    return { by, fix: { x: point.x, y: point.y, source: by } };
+  }
+
   // --- Which method places the player ----------------------------------------
   // In switch order. Choosing any but Dynamic turns Dynamic off.
   const POSITION_METHODS = ["dyn", "los", "tri", "avg"];
@@ -1946,10 +2091,12 @@
   //   fresh:      [l, c, r] whether each slot brought a new reading this update,
   //   heardMsAgo: [l, c, r] ms since each node's last new reading,
   //   fixes:      { dyn, los, tri, avg } - every method's position, see
-  //               solvePositions() and dynamicLeader(),
+  //               solvePositions(), dynamicLeader() and dynamicRule(),
   //   method:     the method switched on,
-  //   placedBy:   "los" | "tri" | "avg" - the method the position above came
-  //               from: the method switched on, or the one Dynamic follows,
+  //   placedBy:   "los" | "tri" | "avg" | "centre" | "left" | "right" - where
+  //               the position above came from: the method switched on, or,
+  //               with Dynamic on, the centre rule ("centre"), a lone
+  //               confident node ("left" / "right") or the steadiest method,
   //   depth:      [l, c, r] each node's own depth reading (filtered distance to
   //               the middle of the player, bodyCentreCm(), turned by its servo
   //               angle) - what corner calibration captures,
@@ -1981,10 +2128,13 @@
       fresh[slot] ? conditionSensor(sensorFilters[slot], value, now, angles[slot]) : sensorFilters[slot].value);
     if (isNewReading) stepLosTrack(filtered, scans, fresh, now);
     const nobodyFound = bothNodesLost(scans, fresh, heard, now);
+    if (isNewReading) stepDynamicRules(filtered, scans, fresh, now);
     const fixes = solvePositions(filtered, angles, now);
     if (isNewReading) stepDynamic(fixes, now);
-    const following = dynamicLeader(fixes, now);
-    fixes.dyn = following ? fixes[following] : null;
+    const steadiest = dynamicLeader(fixes, now);
+    const rule = dynamicRule(filtered, scans, steadiest ? fixes[steadiest] : null, now);
+    const following = rule ? rule.by : steadiest;
+    fixes.dyn = rule ? rule.fix : steadiest ? fixes[steadiest] : null;
     const placedBy = positioning.method === "dyn" ? following : positioning.method;
     const configured = filtered.filter((d) => d !== null).length;
     const depth = filtered.map((distance, slot) =>
@@ -2822,6 +2972,9 @@
     tri: { label: "Trilateration", short: "TRI", colour: "#e879f9" },
     avg: { label: "Average", short: "AVG", colour: "#f8fafc" },
   };
+  // What the Dynamic button says when one of its rules places the player
+  // (dynamicRule()): the centre rule, or a lone confident node.
+  const DYNAMIC_RULE_SHORT = { centre: "MID", left: "L", right: "R" };
   // The scanner's state (src/scanning.cpp): both sensors agree, one sees the
   // player, or it is sweeping for them.
   const SCAN_STATE_NAMES = { 0: "found", 1: "half", 2: "lost" };
@@ -3001,12 +3154,14 @@
     return { top: y, buttons };
   }
 
-  // A method button's label: short, to fit, and Dynamic says which method it
-  // is following while it is on.
+  // A method button's label: short, to fit, and Dynamic says which method or
+  // rule it is following while it is on.
   function positionButtonLabel(method) {
     if (method !== "dyn") return METHOD_STYLES[method].short;
     const following = gameState.sensor && gameState.sensor.placedBy;
-    return positioning.method === "dyn" && following ? `DYN ${METHOD_STYLES[following].short}` : "Dynamic";
+    if (positioning.method !== "dyn" || !following) return "Dynamic";
+    const short = METHOD_STYLES[following] ? METHOD_STYLES[following].short : DYNAMIC_RULE_SHORT[following];
+    return short ? `DYN ${short}` : "Dynamic";
   }
 
   // The button under (x, y), while a sensor-mode round is playing, or null.

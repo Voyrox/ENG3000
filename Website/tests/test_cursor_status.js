@@ -12,6 +12,9 @@
 //   4. the sensor block carries every position method's fix, with its ring
 //      on the board as Compare draws it, the method in use and Compare's
 //      switch
+//   5. Dynamic's rules: servo lines crossing in the centre column put the
+//      player there, and a lone confident node places them by itself, as
+//      placedBy and the Dynamic button say
 //
 // Run with:
 //
@@ -197,7 +200,8 @@ test("every method's fix comes with its ring on the board, the method in use and
 
   const sensor = w.getGameCursorStatus(CANVAS).sensor;
   assert.strictEqual(sensor.method, "dyn", "Dynamic is the default");
-  assert.ok(["los", "tri", "avg"].includes(sensor.placedBy), `Dynamic follows ${sensor.placedBy}`);
+  // Both servos point at a player in the centre column: Dynamic's centre rule.
+  assert.strictEqual(sensor.placedBy, "centre", `Dynamic follows ${sensor.placedBy}`);
   assert.strictEqual(sensor.compare, true, "Compare starts on");
   ["dyn", "los", "tri", "avg"].forEach((method) => {
     const fix = sensor.fixes[method];
@@ -206,10 +210,9 @@ test("every method's fix comes with its ring on the board, the method in use and
     // 80 cm deep in the centre column is the centre of the board.
     assert.ok(Math.abs(fix.nx - 0.5) < 0.03 && Math.abs(fix.ny - 0.5) < 0.03, `${method} ${fix.nx}, ${fix.ny}`);
   });
-  // The cursor's own (x, y) is Dynamic's, which is the method it follows.
+  // The cursor's own (x, y) is Dynamic's.
   assert.strictEqual(sensor.xCm, sensor.fixes.dyn.xCm);
   assert.strictEqual(sensor.yCm, sensor.fixes.dyn.yCm);
-  assert.strictEqual(sensor.xCm, sensor.fixes[sensor.placedBy].xCm);
 
   // Switching method and turning Compare off both show up in the status.
   w.setPositionMethod("tri");
@@ -386,4 +389,115 @@ test("the switch offers Dynamic first, and picking another method turns it off",
   assert.strictEqual(w.setPositionMethod("los"), "los");
   assert.strictEqual(w.setPositionMethod("dyn"), "dyn");
   assert.strictEqual(w.setPositionMethod("steady"), "dyn", "an unknown method is ignored");
+});
+
+// --- Dynamic's rules (Aaron, 5 Oct) ----------------------------------------------
+// Nodes as the firmware reports them: [left, right], each { avg, angle, scanState }.
+function scanners(left, right) {
+  return [left, { avg: -1 }, right].map((reading, slot) => ({
+    id: slot + 1,
+    online: true,
+    latest: JSON.stringify(reading),
+  }));
+}
+const aimAt = (slot, x, y) => Math.round(90 + (Math.atan2(x - SENSOR_X[slot], y) * 180) / Math.PI);
+const FURNITURE = { avg: 150, angle: 60, scanState: 1 };   // the right node half-finding something
+
+// Draws the game screen into a canvas that only records the text drawn on it.
+function textsDrawn(w) {
+  const texts = [];
+  const handler = {
+    get(target, prop) {
+      if (prop in target) return target[prop];
+      if (prop === "fillText") return (text) => texts.push(String(text));
+      if (prop === "measureText") return (text) => ({ width: String(text).length * 7 });
+      return () => new Proxy({}, handler);
+    },
+    set(target, prop, value) {
+      target[prop] = value;
+      return true;
+    },
+  };
+  w.renderGame(new Proxy({}, handler), CANVAS);
+  return texts;
+}
+
+test("Dynamic: both servo lines crossing in the centre column put the player there, ahead of a lone confident node", () => {
+  const w = loadWindow();
+  w.setGameInputMode("sensor");
+  w.resetGame();
+  // The angles the rig read with a player 80 cm out in the centre on 4 Oct.
+  // The left node found them (confident on its own), the right one half-found them.
+  run(w, scanners({ avg: echoCm(0, 75, 80), angle: 141, scanState: 0 },
+    { avg: echoCm(2, 75, 80), angle: 49, scanState: 1 }));
+  const sensor = w.getGameState().sensor;
+  assert.strictEqual(sensor.placedBy, "centre");
+  assert.strictEqual(sensor.column, 1);
+  assert.ok(sensor.xCm >= 58 && sensor.xCm <= 92, `x was ${sensor.xCm}`);
+  assert.ok(textsDrawn(w).includes("DYN MID"), "the Dynamic button names the rule");
+});
+
+test("Dynamic: in front of the left node with its servo leant in is not the centre", () => {
+  const w = loadWindow();
+  w.setGameInputMode("sensor");
+  w.resetGame();
+  // LEFT reads 100 and RIGHT below 90, but the two lines cross in the left column.
+  run(w, scanners({ avg: echoCm(0, 25, 80), angle: 100, scanState: 0 },
+    { avg: echoCm(2, 25, 80), angle: aimAt(2, 25, 80), scanState: 0 }));
+  const sensor = w.getGameState().sensor;
+  assert.ok(["los", "tri", "avg"].includes(sensor.placedBy), `placed by ${sensor.placedBy}`);
+  assert.strictEqual(sensor.column, 0);
+});
+
+test("Dynamic: a lone confident node places the player by itself", () => {
+  const w = loadWindow();
+  w.setGameInputMode("sensor");
+  w.resetGame();
+  run(w, scanners({ avg: echoCm(0, 25, 85), angle: 90, scanState: 0 }, FURNITURE));
+  const sensor = w.getGameState().sensor;
+  assert.strictEqual(sensor.placedBy, "left");
+  assert.strictEqual(sensor.column, 0);
+  assert.ok(Math.abs(sensor.xCm - 25) < 0.5 && Math.abs(sensor.yCm - 85) < 0.5, `(${sensor.xCm}, ${sensor.yCm})`);
+  assert.ok(textsDrawn(w).includes("DYN L"));
+
+  // Line of sight, switched on by itself, takes the furniture too.
+  w.setPositionMethod("los");
+  run(w, scanners({ avg: echoCm(0, 25, 85), angle: 90, scanState: 0 }, FURNITURE), 2);
+  assert.strictEqual(w.getGameState().sensor.placedBy, "los");
+});
+
+test("Dynamic: the centre holds for centreHoldMs while the servo lines stray just outside it", () => {
+  const w = loadWindow();
+  w.setGameInputMode("sensor");
+  w.resetGame();
+  const holdMs = w.tuneSensor({}).centreHoldMs;
+  const at = (x, y) => scanners({ avg: echoCm(0, x, y), angle: aimAt(0, x, y), scanState: 0 },
+    { avg: echoCm(2, x, y), angle: aimAt(2, x, y), scanState: 0 });
+  run(w, at(75, 80));
+  const stray = at(110, 80);   // the lines now cross at 110 cm, in the right column
+  const step = (frames) => {
+    const start = w.performance.now();
+    for (let i = 1; i <= frames; i += 1) {
+      const t = start + i * FRAME_MS;
+      w.performance.now = () => t;
+      w.markSensorFrame();
+      w.updateGame(t, CANVAS, stray);
+    }
+    return w.getGameState().sensor;
+  };
+  let sensor = step(Math.floor((holdMs - 50) / FRAME_MS));
+  assert.strictEqual(sensor.placedBy, "centre");
+  assert.strictEqual(sensor.column, 1);
+  sensor = step(Math.ceil(400 / FRAME_MS));
+  assert.notStrictEqual(sensor.placedBy, "centre");
+});
+
+test("Dynamic: a lone node whose own reading is in front of the board's near edge does not place the player", () => {
+  const w = loadWindow();
+  w.setGameInputMode("sensor");
+  w.resetGame();
+  // 5 Oct: the left node, turned fully in, found something 27 cm away - 14 cm
+  // out, in front of the near edge (20 cm).
+  run(w, scanners({ avg: 27, angle: 160, scanState: 0 }, FURNITURE));
+  assert.notStrictEqual(w.getGameState().sensor.placedBy, "left");
 });

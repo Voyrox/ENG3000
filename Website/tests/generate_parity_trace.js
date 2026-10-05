@@ -195,6 +195,38 @@ function buildStream() {
   }
   for (let i = 0; i < 60; i++) push(scanned(SENSOR_X_CM[0], 75, 80), scanned(SENSOR_X_CM[1], 75, 80));
 
+  // 20. A lone confident node (Dynamic's second rule): the left node finds the
+  //     player straight in front of it, while the right one half-finds
+  //     furniture in the right column. The two servo lines cross in the left
+  //     column, so the centre rule stays out of it, and the left node alone
+  //     places the player (line of sight, which takes the furniture too, is
+  //     pulled towards the centre).
+  for (let i = 0; i < 60; i++) push(scanned(SENSOR_X_CM[0], 25, 85), [jitter(150, 2), 60, 1]);
+
+  // 21. The centre rule (Dynamic's first): a player in the centre, 80 cm out,
+  //     with both servos turned some 10-20 degrees further in than the
+  //     player's middle, the angles the rig read at that spot on 4 Oct (141
+  //     and 49; its servo stops where the beam first finds the body). The two
+  //     servo lines cross in the centre column, at 84 cm across.
+  for (let i = 0; i < 60; i++) {
+    push([jitter(echoCm(SENSOR_X_CM[0], 75, 80), 2), 141, 0], [jitter(echoCm(SENSOR_X_CM[1], 75, 80), 2), 49, 0]);
+  }
+
+  // 22. The centre hold: the player stays where they were, but the servo
+  //     lines stray to cross at 110 cm, in the right column, for 2 s. The
+  //     player stays in the centre column for tuning.centreHoldMs (1 s), then
+  //     the hold lets go.
+  for (let i = 0; i < 100; i++) {
+    push([jitter(echoCm(SENSOR_X_CM[0], 75, 80), 2), aimAt(SENSOR_X_CM[0], 110, 80), 0],
+      [jitter(echoCm(SENSOR_X_CM[1], 75, 80), 2), aimAt(SENSOR_X_CM[1], 110, 80), 0]);
+  }
+
+  // 23. A lone node outside the play area: the left node, turned fully in,
+  //     finds something 27 cm away (its own point 14 cm out, in front of the
+  //     near edge), as on the rig on 5 Oct, while the right one half-finds
+  //     furniture. It is not the player, so it does not place them alone.
+  for (let i = 0; i < 60; i++) push([jitter(27, 1), 160, 0], [jitter(150, 2), 60, 1]);
+
   return steps;
 }
 

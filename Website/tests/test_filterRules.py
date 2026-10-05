@@ -133,11 +133,15 @@ class ParityWithGameJs(unittest.TestCase):
     def test_dynamic_on_calibrated_bounds(self):
         self.assertGreater(self._replay("dynamicCalibrated"), 0)
 
-    def test_dynamic_follows_every_method_somewhere_on_the_recorded_stream(self):
-        # Otherwise the parity above would not show the picker agreeing.
+    def test_dynamic_follows_every_method_and_rule_somewhere_on_the_recorded_stream(self):
+        # Otherwise the parity above would not show the picker and the rules
+        # agreeing. Since the centre hold, the centre rule takes the stretches
+        # where the picker used to follow the average, so only two of the
+        # methods are required (DynamicPickerBehaviour covers the average).
         for run in ("dynamic", "dynamicCalibrated"):
-            followed = set(self.trace["runs"][run]["placedBy"])
-            self.assertEqual(followed, {"los", "tri", "avg"}, run)
+            followed = set(self.trace["runs"][run]["placedBy"]) - {None}
+            self.assertLessEqual({"centre", "left", "right"}, followed, run)
+            self.assertGreaterEqual(len(followed & {"los", "tri", "avg"}), 2, run)
 
     def test_the_methods_really_differ_on_the_recorded_stream(self):
         runs = self.trace["runs"]
@@ -535,10 +539,13 @@ class DynamicPositionMethod(unittest.TestCase):
             TwoSensorGeometry(method="steady")
 
     def test_the_position_is_the_one_dynamic_follows(self):
+        # In the left column, seen by both nodes: neither of Dynamic's rules
+        # applies (the servo lines cross in the left column, and both nodes
+        # are confident), so it follows the steadiest method.
         pipe = CoordinatePipeline(TwoSensorGeometry(method="dyn"))
         geometry = pipe.geometry
         for step in range(40):
-            got = pipe.update(scanner_sample(70.0 + (step % 3), 90.0), step * 50.0)
+            got = pipe.update(scanner_sample(28.0 + (step % 3), 90.0), step * 50.0)
             fixes = geometry.fixes(got.filtered, pipe.area)
             follows = geometry.placed_by(got.filtered, pipe.area)
             self.assertIn(follows, ("los", "tri", "avg"), step)
@@ -549,6 +556,176 @@ class DynamicPositionMethod(unittest.TestCase):
     def test_another_method_is_placed_by_itself(self):
         geometry = TwoSensorGeometry(method="tri")
         self.assertEqual(geometry.placed_by([None] * 3, PlayArea.default()), "tri")
+
+
+class DynamicRules(unittest.TestCase):
+    """Dynamic's two rules, before the steadiest method (Aaron, 5 Oct): the
+    centre, when both nodes' servo lines cross inside the centre column, and
+    then a lone confident node."""
+
+    FURNITURE = (150.0, 60, 1)   # the right node half-finding something in the right column
+
+    def setUp(self):
+        self.area = PlayArea.default()
+        self.config = FilterConfig()
+
+    def scan(self, geometry, sample, now_ms, fresh=(True, True, True)):
+        readings = geometry.channels(sample)
+        geometry.track(readings, list(fresh), now_ms, self.area, self.config)
+        fix = geometry.locate(readings, self.area, self.config)
+        return fix, geometry.placed_by(readings, self.area)
+
+    def test_servo_lines_crossing_in_the_centre_put_the_player_in_the_centre(self):
+        # The angles the rig read with a player 80 cm out in the centre on
+        # 4 Oct (141 and 49): the lines cross at 84 cm across. The left
+        # node's own reading along its line would put them at 98 cm.
+        geometry = TwoSensorGeometry()
+        sample = [(80.0, 141, 0), None, (80.0, 49, 0)]
+        for k in range(3):
+            fix, by = self.scan(geometry, sample, 50.0 * k)
+        self.assertEqual(by, "centre")
+        self.assertEqual(fix.column, 1)
+        self.assertAlmostEqual(fix.x_cm, 25.0 + 100.0 * math.tan(math.radians(51))
+                               / (math.tan(math.radians(51)) + math.tan(math.radians(41))))
+
+    def test_left_above_90_and_right_below_90_is_not_enough(self):
+        # Straight in front of the left node, its servo leant 10 degrees in
+        # (100): Aaron's first form (LEFT > 90 and RIGHT < 90) would call this
+        # the centre. The lines cross in the left column, so neither rule
+        # applies (both nodes are confident) and the steadiest method places
+        # the player.
+        geometry = TwoSensorGeometry()
+        left = scanner_sample(25.0, 80.0)[0]
+        right = scanner_sample(25.0, 80.0)[2]
+        for k in range(5):
+            fix, by = self.scan(geometry, [(left[0], 100, 0), None, right], 50.0 * k)
+        self.assertIn(by, ("los", "tri", "avg"))
+        self.assertEqual(fix.column, 0)
+
+    def test_the_centre_x_clears_the_column_hysteresis(self):
+        # Coming from the left column, a crossing 2 cm past the boundary would
+        # be held in the left column by the 8 cm margin; the rule's x is kept
+        # that far inside the centre column instead.
+        geometry = TwoSensorGeometry()
+        for k in range(5):
+            self.scan(geometry, scanner_sample(30.0, 80.0), 50.0 * k)
+        fix, by = self.scan(geometry, scanner_sample(52.0, 80.0), 250.0)
+        self.assertEqual(by, "centre")
+        self.assertEqual((fix.x_cm, fix.column), (50.0 + self.config.column_margin_cm, 1))
+
+    def test_a_lone_confident_node_places_the_player_by_itself(self):
+        geometry = TwoSensorGeometry()
+        left = scanner_sample(25.0, 85.0)[0]
+        for k in range(2):
+            fix, by = self.scan(geometry, [left, None, self.FURNITURE], 50.0 * k)
+        self.assertEqual(by, "left")
+        self.assertEqual((fix.x_cm, fix.y_cm, fix.column), (25.0, 85.0, 0))
+
+    def test_one_reading_that_found_the_player_is_not_confident(self):
+        geometry = TwoSensorGeometry()
+        left = scanner_sample(25.0, 85.0)[0]
+        self.scan(geometry, [(left[0], left[1], 1), None, self.FURNITURE], 0.0)
+        _, by = self.scan(geometry, [left, None, self.FURNITURE], 50.0)
+        self.assertNotEqual(by, "left")
+        _, by = self.scan(geometry, [left, None, self.FURNITURE], 100.0)
+        self.assertEqual(by, "left")
+
+    def test_confidence_lasts_through_the_other_nodes_turn_then_lapses(self):
+        geometry = TwoSensorGeometry()
+        left = scanner_sample(25.0, 85.0)[0]
+        for k in range(2):
+            self.scan(geometry, [left, None, self.FURNITURE], 50.0 * k)
+        # Only the right node reports now; the left node's last reading is
+        # repeated but not new.
+        right_turn = (False, True, True)
+        _, by = self.scan(geometry, [left, None, self.FURNITURE], 50.0 + self.config.confident_ms,
+                          fresh=right_turn)
+        self.assertEqual(by, "left")
+        _, by = self.scan(geometry, [left, None, self.FURNITURE], 51.0 + self.config.confident_ms,
+                          fresh=right_turn)
+        self.assertNotEqual(by, "left")
+
+    def test_both_nodes_confident_follow_the_steadiest_method(self):
+        geometry = TwoSensorGeometry()
+        for k in range(5):
+            _, by = self.scan(geometry, scanner_sample(130.0, 90.0), 50.0 * k)
+        self.assertIn(by, ("los", "tri", "avg"))
+
+    def test_the_centre_rule_comes_before_a_lone_confident_node(self):
+        # The left node found the player (confident), the right one only
+        # half-found them; their lines cross in the centre.
+        geometry = TwoSensorGeometry()
+        sample = scanner_sample(75.0, 80.0)
+        sample[2] = (sample[2][0], sample[2][1], 1)
+        for k in range(3):
+            _, by = self.scan(geometry, sample, 50.0 * k)
+        self.assertEqual(by, "centre")
+
+    def test_the_centre_rule_needs_both_lines_to_be_recent(self):
+        geometry = TwoSensorGeometry()
+        centre = scanner_sample(75.0, 80.0)
+        self.scan(geometry, centre, 0.0)
+        # The left node sweeps from then on; the right one still finds the
+        # player, but the left node's line is too old once centre_seen_ms is up.
+        sample = [(None, 150, 2), None, centre[2]]
+        _, by = self.scan(geometry, sample, self.config.centre_seen_ms)
+        self.assertEqual(by, "centre")
+        _, by = self.scan(geometry, sample, self.config.centre_seen_ms + 1.0)
+        self.assertEqual(by, "right")
+
+    def test_the_other_methods_do_not_use_the_rules(self):
+        for method in ("los", "tri", "avg"):
+            geometry = TwoSensorGeometry(method=method)
+            for k in range(3):
+                _, by = self.scan(geometry, [(80.0, 141, 0), None, (80.0, 49, 0)], 50.0 * k)
+            self.assertEqual(by, method)
+
+    # --- the centre hold and the play area (Aaron, 5 Oct) -----------------
+
+    def test_the_centre_holds_while_the_crossing_strays_just_outside_it(self):
+        # Standing still in the centre must never touch a side column. On the
+        # rig on 5 Oct the crossing strayed to 103.5 cm for two readings.
+        geometry = TwoSensorGeometry()
+        for k in range(3):
+            self.scan(geometry, scanner_sample(75.0, 80.0), 50.0 * k)
+        # Here the lines stray to cross at 110 cm, past the 8 cm the column
+        # hysteresis would hold anyway.
+        hold = self.config.centre_hold_ms
+        for t in (150.0, 100.0 + hold):
+            fix, by = self.scan(geometry, scanner_sample(110.0, 80.0), t)
+            self.assertEqual((by, fix.column), ("centre", 1), t)
+        fix, by = self.scan(geometry, scanner_sample(110.0, 80.0), 101.0 + hold)
+        self.assertIn(by, ("los", "tri", "avg"))
+        self.assertEqual(fix.column, 2)
+
+    def test_the_centre_hold_needs_both_nodes_still_seeing_the_player(self):
+        self.config = FilterConfig(centre_hold_ms=5000.0)
+        geometry = TwoSensorGeometry()
+        self.scan(geometry, scanner_sample(75.0, 80.0), 0.0)
+        # The left node sweeps from then on; its last line is too old once
+        # centre_seen_ms is up, however long the hold.
+        right = scanner_sample(104.0, 80.0)[2]
+        _, by = self.scan(geometry, [(None, 150, 2), None, right], self.config.centre_seen_ms)
+        self.assertEqual(by, "centre")
+        _, by = self.scan(geometry, [(None, 150, 2), None, right], self.config.centre_seen_ms + 1.0)
+        self.assertNotEqual(by, "centre")
+
+    def test_a_lone_node_reading_in_front_of_the_near_edge_is_not_confident(self):
+        # 5 Oct: the left node, turned fully in (160), found something 27 cm
+        # away - its own point 14 cm out, in front of the board's near edge
+        # (20 cm). Not the player, so it does not place them on its own.
+        geometry = TwoSensorGeometry()
+        for k in range(3):
+            _, by = self.scan(geometry, [(27.0, 160, 0), None, self.FURNITURE], 50.0 * k)
+        self.assertNotEqual(by, "left")
+
+    def test_a_lone_node_reading_off_the_side_of_the_board_is_not_confident(self):
+        # 5 Oct: the left node turned out to 59 found something 112 cm away,
+        # 40 cm off the left edge of the board.
+        geometry = TwoSensorGeometry()
+        for k in range(3):
+            _, by = self.scan(geometry, [(112.0, 59, 0), None, self.FURNITURE], 50.0 * k)
+        self.assertNotEqual(by, "left")
 
 
 class TwoSensorGeometryBehaviour(unittest.TestCase):
@@ -803,18 +980,24 @@ class TwoSensorGeometryBehaviour(unittest.TestCase):
                  for slot, node_x in ((0, 25.0), (2, 125.0))]
         off = max(math.dist(point, truth) for point in aimed)
         self.assertGreater(off, 7.0)
+        # The line-of-sight track itself, not Dynamic (whose centre rule
+        # takes over in the centre column).
+        geometry = TwoSensorGeometry(method="los")
         for k in range(40):
-            fix = self.scan(sample, now_ms=50.0 * k)
+            fix = self.scan(sample, now_ms=50.0 * k, geometry=geometry)
         self.assertLess(math.dist((fix.x_cm, fix.y_cm), truth), 1.0)
 
     def test_readings_far_from_the_track_are_left_out_then_taken(self):
+        # The line-of-sight track itself, not Dynamic (the right node's last
+        # aim and the left node's new one cross in the centre column).
+        geometry = TwoSensorGeometry(method="los")
         for k in range(10):
-            self.scan(scanner_sample(40.0, 70.0), now_ms=50.0 * k)
+            self.scan(scanner_sample(40.0, 70.0), now_ms=50.0 * k, geometry=geometry)
         # One node's readings only, so each update is one outlier.
         relock = self.config.los_relock_readings
         for k in range(relock):
             fix = self.scan(scanner_sample(120.0, 60.0), now_ms=500.0 + 50.0 * k,
-                            fresh=(True, True, False))
+                            fresh=(True, True, False), geometry=geometry)
             if k < relock - 1:
                 self.assertLess(fix.x_cm, 60.0, f"outlier {k + 1} of {relock} moved the track")
         self.assertAlmostEqual(fix.x_cm, 120.0, delta=1.0)
@@ -834,11 +1017,14 @@ class TwoSensorGeometryBehaviour(unittest.TestCase):
         # the left node's new reading can still pass the gate on the slack
         # across its line (the player's width) while the right node's distance
         # says the track is far off. The right node's turned-away readings are
-        # counted on their own, so the track moves within a few updates.
+        # counted on their own, so the track moves within a few updates. The
+        # line-of-sight track itself, not Dynamic (whose centre rule holds the
+        # centre for a moment after the lines leave it).
+        geometry = TwoSensorGeometry(method="los")
         for k in range(20):
-            self.scan(scanner_sample(80.0, 95.0), now_ms=50.0 * k)
+            self.scan(scanner_sample(80.0, 95.0), now_ms=50.0 * k, geometry=geometry)
         for k in range(self.config.los_relock_readings + 2):
-            fix = self.scan(scanner_sample(120.0, 60.0), now_ms=1000.0 + 50.0 * k)
+            fix = self.scan(scanner_sample(120.0, 60.0), now_ms=1000.0 + 50.0 * k, geometry=geometry)
         self.assertLess(math.dist((fix.x_cm, fix.y_cm), (120.0, 60.0)), 5.0)
 
     def test_an_unknown_method_is_refused(self):

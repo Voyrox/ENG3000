@@ -148,6 +148,21 @@ class FilterConfig:
     # (DynamicPicker).
     dynamic_steady_ms: float = 1000.0
 
+    # Dynamic's two rules, checked before the steadiest method
+    # (TwoSensorGeometry._rule(); tuning.centreSeenMs, tuning.centreHoldMs,
+    # tuning.confidentReadings, tuning.confidentMs; Aaron, 5 Oct). The centre
+    # rule crosses each node's servo line from its last reading that found or
+    # half-found the player, if both are within centre_seen_ms, and keeps the
+    # player in the centre column for centre_hold_ms after the lines last
+    # crossed in it while both are recent. A node is confident when its last
+    # confident_readings readings found the player, the latest within
+    # confident_ms, and its own reading is inside the play area; a lone
+    # confident node places the player by itself.
+    centre_seen_ms: float = 1500.0
+    centre_hold_ms: float = 1000.0
+    confident_readings: int = 2
+    confident_ms: float = 1500.0
+
     # Out of bounds, the only one the pipeline reports (Aaron, 5 Oct): both
     # nodes are lost, with no hold. A node is lost when its last lost_readings
     # readings, scored found +1, half 0, lost -1, add up to 0 or less, and not
@@ -697,7 +712,8 @@ EDGE_INSET = 0.1
 SENSOR_MIN_CM = 2.0
 SENSOR_MAX_CM = 400.0
 SCAN_FOUND = 0         # scanState: both heads hear the player
-SCAN_LOST = 2          # scanState: sweeping, the player is not in its line of sight
+SCAN_HALF = 1          # scanState: one head hears the player
+SCAN_LOST = 2         # scanState: sweeping, the player is not in its line of sight
 
 
 def lost_score(state) -> int:
@@ -993,9 +1009,12 @@ class TwoSensorGeometry(Geometry):
     first (body_centre_cm()). method picks how that becomes a position, as the
     game's position switch does:
 
-      "dyn" - Dynamic, the default: whichever of the other three has kept the
-              player in one square the longest (DynamicPicker, stepped by
-              track() once per update).
+      "dyn" - Dynamic, the default: first its two rules (_rule()) - the
+              centre, when both nodes' servo lines cross inside the centre
+              column, then a lone confident node's own reading - and
+              otherwise whichever of the other three has kept the player in
+              one square the longest (DynamicPicker, stepped by track() once
+              per update).
       "los" - line of sight: LineOfSightTracker, fed by track() once per
               update.
       "tri" - trilateration of the two distances: each distance is a circle
@@ -1032,6 +1051,9 @@ class TwoSensorGeometry(Geometry):
         # Each node's scan states this round, one per reading heard, the
         # latest LOST_READINGS_MAX of them.
         self._state_log: list = [[] for _ in range(GRID_SIZE)]
+        self._seen_aim: list = [None] * GRID_SIZE   # (ms, angle) of the last found/half-found reading
+        self._found_streak = [0] * GRID_SIZE         # new readings in a row that found the player
+        self._centre_held: Optional[tuple] = None    # (ms, x, y): when and where the lines last crossed in the centre
         self._now_ms = -math.inf
         self._config: Optional[FilterConfig] = None
 
@@ -1057,6 +1079,9 @@ class TwoSensorGeometry(Geometry):
         self._states = [None] * GRID_SIZE
         self._found_ms = [-math.inf] * GRID_SIZE
         self._state_log = [[] for _ in range(GRID_SIZE)]
+        self._seen_aim = [None] * GRID_SIZE
+        self._found_streak = [0] * GRID_SIZE
+        self._centre_held = None
         self._now_ms = -math.inf
 
     def channels(self, sample) -> list:
@@ -1094,6 +1119,19 @@ class TwoSensorGeometry(Geometry):
                 log.append(state)
             if len(log) > LOST_READINGS_MAX:
                 log.pop(0)
+        # stepDynamicRules() in game.js.
+        for slot in (self.LEFT, self.RIGHT):
+            if not fresh[slot]:
+                continue
+            state, angle = self._states[slot], self._angles[slot]
+            reading = filtered[slot] is not None
+            self._found_streak[slot] = (self._found_streak[slot] + 1
+                                        if reading and state == SCAN_FOUND else 0)
+            if reading and angle is not None and state in (SCAN_FOUND, SCAN_HALF):
+                self._seen_aim[slot] = (now_ms, angle)
+        crossing = self._lines_crossing(area)
+        if crossing is not None and self._in_centre_column(crossing[0], area):
+            self._centre_held = (now_ms, crossing[0], crossing[1])
         self._dynamic.step(self._picked_from(filtered, area), now_ms, area)
 
     def _lost(self, slot, config) -> bool:
@@ -1130,22 +1168,121 @@ class TwoSensorGeometry(Geometry):
     def _leader(self, picked_from: dict) -> Optional[str]:
         return self._dynamic.leader(picked_from, self._now_ms, self._config or FilterConfig())
 
+    def _lines_recent(self) -> bool:
+        """bothLinesRecent() in game.js: both nodes found or half-found the
+        player within centre_seen_ms."""
+        config = self._config or FilterConfig()
+        left, right = self._seen_aim[self.LEFT], self._seen_aim[self.RIGHT]
+        return (left is not None and right is not None
+                and self._now_ms - left[0] <= config.centre_seen_ms
+                and self._now_ms - right[0] <= config.centre_seen_ms)
+
+    def _lines_crossing(self, area) -> Optional[tuple]:
+        """linesCrossing() in game.js: where the two nodes' servo lines cross,
+        (x_cm, y_cm), or None when one is not recent or they do not meet in
+        front of the nodes."""
+        if not self._lines_recent():
+            return None
+        tan_left = math.tan((self._seen_aim[self.LEFT][1] - 90) * math.pi / 180)
+        tan_right = math.tan((self._seen_aim[self.RIGHT][1] - 90) * math.pi / 180)
+        if not tan_left > tan_right:
+            return None
+        y = ((area.column_centre_cm(self.RIGHT) - area.column_centre_cm(self.LEFT))
+             / (tan_left - tan_right))
+        return area.column_centre_cm(self.LEFT) + y * tan_left, y
+
+    @staticmethod
+    def _in_centre_column(x_cm: float, area) -> bool:
+        pitch = area.width_cm / GRID_SIZE
+        return pitch <= x_cm <= 2 * pitch
+
+    def _centre_crossing(self, area) -> Optional[tuple]:
+        """centreCrossing() in game.js: where the centre rule puts the player,
+        (x_cm, y_cm) - where the lines cross if that is in the centre column,
+        else where they last did so, within centre_hold_ms and while both
+        lines are recent - or None."""
+        config = self._config or FilterConfig()
+        crossing = self._lines_crossing(area)
+        if crossing is not None and self._in_centre_column(crossing[0], area):
+            return crossing
+        held = self._centre_held
+        if (held is not None and self._now_ms - held[0] <= config.centre_hold_ms
+                and self._lines_recent()):
+            return held[1], held[2]
+        return None
+
+    def _confident_point(self, slot, filtered, area) -> Optional[tuple]:
+        """confidentPoint() in game.js: a confident node's own reading,
+        (x_cm, y_cm) - its distance along its servo line - or None when the
+        node is not confident or that point is outside the play area (across
+        the board, and between its column's near and far edges)."""
+        config = self._config or FilterConfig()
+        if (self._found_streak[slot] < config.confident_readings
+                or self._now_ms - self._found_ms[slot] > config.confident_ms
+                or filtered[slot] is None or self._angles[slot] is None):
+            return None
+        x, y = scanner_point(area.column_centre_cm(slot),
+                             body_centre_cm(filtered[slot], config), self._angles[slot])
+        if not 0.0 <= x <= area.width_cm:
+            return None
+        near, far = area.per_column[area.column_at(x)]
+        return (x, y) if near <= y <= far else None
+
+    def _rule(self, filtered, area, steadiest: Optional[tuple]) -> Optional[tuple]:
+        """dynamicRule() in game.js: the rule placing the player for Dynamic,
+        ("centre" | "left" | "right", (x_cm, y_cm)), or None to follow the
+        steadiest method, whose position is `steadiest`. Checked in order
+        (Aaron, 5 Oct):
+
+        1. The centre (_centre_crossing()): both nodes' servo lines, each from
+           its last reading that found or half-found the player within
+           centre_seen_ms, cross inside the centre column - or did within
+           centre_hold_ms, while both lines are still recent. x is the
+           crossing's, kept column_margin_cm inside the column so the column
+           hysteresis cannot hold the player in the column they came from; y
+           is the steadiest method's, or the crossing's when no method has a
+           position.
+        2. A lone confident node (_confident_point()): its distance along its
+           servo line places the player, and the other node is left out. When
+           both are confident, the steadiest method places the player."""
+        config = self._config or FilterConfig()
+        crossing = self._centre_crossing(area)
+        if crossing is not None:
+            pitch = area.width_cm / GRID_SIZE
+            x = _clamp(crossing[0], pitch + config.column_margin_cm,
+                       2 * pitch - config.column_margin_cm)
+            return "centre", (x, steadiest[1] if steadiest else crossing[1])
+        points = [(slot, self._confident_point(slot, filtered, area))
+                  for slot in (self.LEFT, self.RIGHT)]
+        points = [(slot, point) for slot, point in points if point is not None]
+        if len(points) != 1:
+            return None
+        slot, point = points[0]
+        return ("left" if slot == self.LEFT else "right"), point
+
+    def _dynamic_pick(self, picked_from: dict, filtered, area) -> tuple:
+        """What Dynamic follows and where: (placedBy, (x_cm, y_cm) or None)."""
+        leader = self._leader(picked_from)
+        steadiest = picked_from[leader] if leader else None
+        rule = self._rule(filtered, area, steadiest)
+        return rule if rule is not None else (leader, steadiest)
+
     def fixes(self, filtered, area) -> dict:
         """Every method's position: {"dyn", "los", "tri", "avg"} ->
-        (x_cm, y_cm) or None. Pure apart from reading the tracker and the
-        picker."""
+        (x_cm, y_cm) or None. Pure apart from reading the tracker, the
+        picker and the rules' state."""
         fixes = self._picked_from(filtered, area)
-        leader = self._leader(fixes)
-        fixes["dyn"] = fixes[leader] if leader else None
+        fixes["dyn"] = self._dynamic_pick(fixes, filtered, area)[1]
         return fixes
 
     def placed_by(self, filtered, area) -> Optional[str]:
-        """placedBy in game.js: "los", "tri" or "avg", the method the
-        position comes from - the one switched on, or the one Dynamic
-        follows (None when no method has a position)."""
+        """placedBy in game.js: where the position comes from - the method
+        switched on, or with Dynamic, "centre" or "left" / "right" when one
+        of its rules places the player, else the method it follows ("los",
+        "tri" or "avg"; None when no method has a position)."""
         if self.method != "dyn":
             return self.method
-        return self._leader(self._picked_from(filtered, area))
+        return self._dynamic_pick(self._picked_from(filtered, area), filtered, area)[0]
 
     def position(self, filtered, area) -> Optional[tuple]:
         """(x_cm, y_cm) by the chosen method, or None. x is not yet clamped
