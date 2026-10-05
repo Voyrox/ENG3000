@@ -27,8 +27,8 @@ import app  # noqa: E402
 from handover import Handover, bearing_deg  # noqa: E402
 from heading import Track  # noqa: E402
 from search import (CHECK_READINGS, FAR_HOLD_PAIRS, FOUND, HALF_FOUND, LOOK_RETRY_S,  # noqa: E402
-                    LOST, SEARCH_TIMEOUT_S, SERVO_LIMITS, TARGET_MAX_AGE_S, WINDOW_S, Search,
-                    cell_name)
+                    LOST, MIN_VOTES, SEARCH_TIMEOUT_S, SERVO_LIMITS, TARGET_MAX_AGE_S, WINDOW_S,
+                    Search, cell_name)
 from test_app import BrokerTestCase, FakeBrowserSocket, FakeControlSocket, RecordingConn  # noqa: E402
 
 LEFT, RIGHT = 1, 3
@@ -202,15 +202,83 @@ class SearchTests(unittest.TestCase):
         # A later loss is a new search.
         self.assertIsNotNone(rig.lost())
 
-    def test_after_the_sweep_it_searches_again_only_once_it_has_found_someone(self):
+    def test_after_giving_up_it_looks_again_only_for_someone_seen_since(self):
         rig = Rig()
         rig.sees(AT_MIDDLE_CENTRE, 3)
         for _ in range(CHECK_READINGS + 1):
             rig.lost()
-        self.assertEqual(rig.status()["state"], "sweeping")
+        self.assertEqual(rig.status(), {"state": "sweeping", "cell": [1, 1],
+                                        "name": "middle centre"})
         self.assertIsNone(rig.lost())
-        rig.sees(AT_MIDDLE_CENTRE)
+        rig.sees(AT_MIDDLE_CENTRE, MIN_VOTES)
         self.assertIsNotNone(rig.lost())
+
+    def test_a_player_who_has_left_is_given_up_on(self):
+        # Aaron, 6 Oct: it got stuck looking for the player where they last
+        # were. They walk off the board: the node checks the cell once, gives
+        # up, and a stray echo its sweep picks up does not send it back.
+        rig = Rig()
+        rig.sees(AT_MIDDLE_CENTRE, 5)
+        rig.turn_to(90)
+        looks = [rig.lost() for _ in range(CHECK_READINGS + 1)]
+        self.assertEqual(sum(look is not None for look in looks), CHECK_READINGS)
+        # Stray echoes on the board, each in a different cell - one of them in
+        # the cell it gave up on.
+        for angle, distance in ((60, 40.0), (130, 60.0), (150, 100.0), (100, 120.0)):
+            rig.turn_to(angle)
+            rig.read(HALF_FOUND, distance)
+            for _ in range(5):
+                self.assertIsNone(rig.lost())
+        self.assertEqual(len(rig.looks), CHECK_READINGS)
+
+    def test_the_other_node_still_seeing_the_player_sends_it_back(self):
+        clock = [100.0]
+        search = Search()
+        left = Rig(search, "LEFT", clock=clock)
+        right = Rig(search, "RIGHT", clock=clock)
+        right.sees(AT_MIDDLE_CENTRE, 3)
+        left.turn_to(90)
+        for _ in range(CHECK_READINGS + 1):
+            left.lost()
+        # It sweeps until it hears something itself (here off the side of the
+        # board, so no vote); then the other node's newer sighting counts.
+        left.turn_to(40)
+        left.read(HALF_FOUND, 60.0)
+        self.assertIsNone(left.lost())
+        right.sees(AT_MIDDLE_CENTRE, MIN_VOTES)
+        self.assertEqual(left.lost().cell, MIDDLE_CENTRE)
+
+    def test_a_node_that_cannot_see_the_cell_is_not_pulled_back_to_it_for_ever(self):
+        # The RIGHT node cannot turn to the front left cell; the LEFT node
+        # keeps seeing the player there. RIGHT checks once, then sweeps until
+        # it hears something itself.
+        clock = [100.0]
+        search = Search()
+        left = Rig(search, "LEFT", clock=clock)
+        right = Rig(search, "RIGHT", clock=clock)
+        left.sees(AT_FRONT_LEFT, 3)
+        looks = []
+        for _ in range(20):
+            looks.append(right.lost())
+            left.sees(AT_FRONT_LEFT)
+        self.assertEqual(sum(look is not None for look in looks), CHECK_READINGS)
+
+    def test_a_search_that_times_out_gives_up_too(self):
+        rig = Rig()
+        rig.sees(AT_MIDDLE_CENTRE, 3)
+        rig.turn_to(90)
+        for _ in range(int(SEARCH_TIMEOUT_S / READ_EVERY_S) + 2):
+            rig.lost(obey=False)
+        rig.turn_to(60)
+        rig.read(HALF_FOUND, 40.0)
+        self.assertIsNone(rig.lost())
+
+    def test_one_stray_echo_is_not_a_sighting(self):
+        rig = Rig()
+        rig.sees(AT_MIDDLE_CENTRE, 1)
+        self.assertIsNone(rig.search.target_cell(rig.t))
+        rig.sees(AT_MIDDLE_CENTRE, 1)
+        self.assertEqual(rig.search.target_cell(rig.t), MIDDLE_CENTRE)
 
     # --- Which cell -----------------------------------------------------------------
 
@@ -257,6 +325,7 @@ class SearchTests(unittest.TestCase):
         distance, angle = reading_of("LEFT", AT_FRONT_LEFT)
         rig.turn_to(angle)
         rig.read(HALF_FOUND, distance)
+        rig.read(HALF_FOUND, distance)
         self.assertEqual(rig.search.target_cell(rig.t), FRONT_LEFT)
 
     def test_a_long_gone_player_leaves_no_cell(self):
@@ -274,7 +343,7 @@ class SearchTests(unittest.TestCase):
         right = Rig(search, "RIGHT", clock=clock)
         self.assertIsNone(left.lost())
         # The other node finds the player: the next lost reading searches.
-        right.sees(AT_MIDDLE_CENTRE)
+        right.sees(AT_MIDDLE_CENTRE, MIN_VOTES)
         self.assertEqual(left.lost().cell, MIDDLE_CENTRE)
 
     def test_a_new_round_forgets_where_the_player_was(self):
@@ -329,6 +398,21 @@ class SearchTests(unittest.TestCase):
         self.walking_back(rig)
         rig.turn_to(90)
         self.assertEqual(rig.lost().cell, MIDDLE_CENTRE)
+
+    def test_a_heading_from_before_giving_up_does_not_count(self):
+        rig = Rig()
+        rig.sees(AT_MIDDLE_CENTRE, 3)
+        self.walking_back(rig)
+        rig.turn_to(90)
+        for _ in range(CHECK_READINGS + 1):
+            rig.lost()
+        self.assertEqual(rig.status()["state"], "sweeping")
+        rig.turn_to(40)
+        rig.read(HALF_FOUND, 60.0)              # hears something off the board
+        self.assertIsNone(rig.lost())
+        # A newer track: the game has seen them moving since.
+        self.walking_back(rig)
+        self.assertEqual(rig.lost().by, "heading")
 
     def test_a_new_round_forgets_the_track(self):
         rig = Rig()

@@ -20,9 +20,10 @@ cell its own point is in (the node's distance plus the body radius, along
 its servo angle: scanner_point(), body_centre_cm()); points off the board
 vote for nothing. The votes counted are those from WINDOW_S before the
 latest one, so a loss of both nodes keeps the memory; ties go to the cell
-voted for last. With no vote in the last TARGET_MAX_AGE_S there is no
-target, and a lost node sweeps as it always has, asking again at each lost
-reading (the other node may find the player meanwhile).
+voted for last, and a cell needs MIN_VOTES, so one stray echo is not a
+sighting. With no vote in the last TARGET_MAX_AGE_S there is no target, and
+a lost node sweeps as it always has, asking again at each lost reading (the
+other node may find the player meanwhile).
 
 A moving player (Aaron's other pick there): the cell they were walking into,
 from the game's position track (track:update; heading.py, uni-2026-s2-0c),
@@ -43,8 +44,14 @@ A search, for one node:
   4. A found or half-found reading ends the search: the firmware tracks
      whatever it heard, as usual.
   5. After CHECK_READINGS checks, or SEARCH_TIMEOUT_S, nothing more is
-     sent and the firmware's sweep takes over ("panic"). The node is not
-     searched for again until it has found the player.
+     sent and the firmware's sweep takes over ("panic").
+  6. Giving up (Aaron, 6 Oct: "it gets stuck finding the player in their
+     last known location; after some time it should just give up if not
+     found"). A node that has given up on a cell looks again only for a
+     sighting made after it gave up - votes, or a heading track, newer than
+     that - never for what it knew before. Re-arming on any echo used to
+     send it straight back to the same place after every stray echo the
+     sweep picked up.
 
 A LOOK may reach a node that does not hold the scan turn: it swings while it
 is quiet, and its next turn starts at the cell.
@@ -74,7 +81,8 @@ AT_CELL_DEG = 1           # a reading this close to the LOOK's angle was read at
 LOOK_RETRY_S = 0.5        # re-send a LOOK not yet acted on after this long
 SEARCH_TIMEOUT_S = 5.0    # a search that has not finished by then is given up
 WINDOW_S = 3.0            # the votes counted: this long before the latest one
-TARGET_MAX_AGE_S = 10.0   # no vote for this long: nowhere to look
+MIN_VOTES = 2             # fewer votes than this for the cell: no sighting
+TARGET_MAX_AGE_S = 5.0    # no vote for this long: nowhere to look
 
 # src/Config.h: the far hold, and each mount's servo limits (min, max).
 FAR_RANGE_CM = 100.0
@@ -113,7 +121,7 @@ class SearchLook:
 
 class _Node:
     __slots__ = ("last_echo_cm", "lost_streak", "state", "cell", "by", "target_deg",
-                 "checks", "started_at", "look_sent_at")
+                 "checks", "started_at", "look_sent_at", "gave_up_at", "gave_up_on")
 
     def __init__(self):
         self.last_echo_cm = None   # its latest found or half-found distance, for far hold
@@ -125,6 +133,13 @@ class _Node:
         self.checks = 0
         self.started_at = None
         self.look_sent_at = None
+        self.gave_up_at = None     # when its last search found nobody: only newer sightings count
+        self.gave_up_on = None     # the cell it gave up on
+
+    def give_up(self, now_s):
+        self.state = "sweeping"
+        self.gave_up_at = now_s
+        self.gave_up_on = self.cell
 
     def ready(self):
         self.state = "ready"
@@ -158,6 +173,7 @@ class Search:
         self._track = None
         for node in self._nodes.values():
             node.ready()
+            node.gave_up_at = node.gave_up_on = None
 
     def cell_of(self, role: str, distance_cm: float,
                 angle_deg: float) -> Optional[Tuple[int, int]]:
@@ -174,27 +190,35 @@ class Search:
         while self._votes and now_s - self._votes[0][0] > TARGET_MAX_AGE_S + WINDOW_S:
             self._votes.popleft()
 
-    def target(self, now_s: float) -> Optional[Tuple[Tuple[int, int], str]]:
+    def target(self, now_s: float,
+               since_s: Optional[float] = None) -> Optional[Tuple[Tuple[int, int], str]]:
         """The cell a lost node checks and how it was chosen: where a moving
         player was heading ("heading"), else the cell of target_cell()
-        ("readings"); None with neither."""
-        if self.heading:
-            cell = heading_target(self._track, now_s, self.area)
+        ("readings"); None with neither. since_s: only what was seen after
+        then counts (the node gave up then)."""
+        track = self._track
+        if self.heading and (since_s is None or (track is not None and track.at_s > since_s)):
+            cell = heading_target(track, now_s, self.area)
             if cell is not None:
                 return cell, "heading"
-        cell = self.target_cell(now_s)
+        cell = self.target_cell(now_s, since_s)
         return None if cell is None else (cell, "readings")
 
-    def target_cell(self, now_s: float) -> Optional[Tuple[int, int]]:
+    def target_cell(self, now_s: float,
+                    since_s: Optional[float] = None) -> Optional[Tuple[int, int]]:
         """The cell the readings put a still player in: the one voted for most
-        in the WINDOW_S up to the latest vote, ties to the latest; None with
-        no vote in the last TARGET_MAX_AGE_S."""
-        if not self._votes or now_s - self._votes[-1][0] > TARGET_MAX_AGE_S:
+        in the WINDOW_S up to the latest vote, ties to the latest, with at
+        least MIN_VOTES; None with no vote in the last TARGET_MAX_AGE_S.
+        since_s: only votes after then count."""
+        votes = [(t, cell) for t, cell in self._votes if since_s is None or t > since_s]
+        if not votes or now_s - votes[-1][0] > TARGET_MAX_AGE_S:
             return None
-        latest = self._votes[-1][0]
-        recent = [cell for t, cell in self._votes if t >= latest - WINDOW_S]
+        latest = votes[-1][0]
+        recent = [cell for t, cell in votes if t >= latest - WINDOW_S]
         counts = Counter(recent)
         best = max(counts.values())
+        if best < MIN_VOTES:
+            return None
         return next(cell for cell in reversed(recent) if counts[cell] == best)
 
     def cell_centre(self, cell: Tuple[int, int]) -> Tuple[float, float]:
@@ -266,7 +290,7 @@ class Search:
         if node.state == "ready":
             if self._far_holding(node, role, angle_deg, far_hold):
                 return None
-            target = self.target(now_s)
+            target = self.target(now_s, node.gave_up_at)
             if target is None:
                 # Nowhere to look yet: it sweeps, and its next lost reading
                 # asks again (the other node may have found the player).
@@ -280,13 +304,13 @@ class Search:
         if node.state != "checking":
             return None
         if now_s - node.started_at > SEARCH_TIMEOUT_S:
-            node.state = "sweeping"
+            node.give_up(now_s)
             return None
         at_cell = abs(angle_deg - node.target_deg) <= AT_CELL_DEG
         if at_cell:
             node.checks += 1
             if node.checks >= CHECK_READINGS:
-                node.state = "sweeping"
+                node.give_up(now_s)
                 return None
         elif node.look_sent_at is not None and now_s - node.look_sent_at < LOOK_RETRY_S:
             # Read before the last LOOK took effect: it is on its way.
@@ -312,13 +336,14 @@ class Search:
 
     def status(self, node_id: int) -> Optional[dict]:
         """A node's search for nodes:update: None unless it is checking a cell
-        or sweeping after one."""
+        or has given up on one and is sweeping."""
         node = self._nodes.get(node_id)
-        if not self.enabled or node is None or node.state == "ready":
+        if not self.enabled or node is None:
             return None
-        out = {"state": node.state, "checks": node.checks, "of": CHECK_READINGS}
-        if node.cell is not None:
-            out["cell"] = list(node.cell)
-            out["name"] = cell_name(node.cell)
-            out["by"] = node.by
-        return out
+        if node.state == "checking":
+            return {"state": "checking", "checks": node.checks, "of": CHECK_READINGS,
+                    "cell": list(node.cell), "name": cell_name(node.cell), "by": node.by}
+        if node.state == "sweeping" and node.gave_up_on is not None:
+            return {"state": "sweeping", "cell": list(node.gave_up_on),
+                    "name": cell_name(node.gave_up_on)}
+        return None

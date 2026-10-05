@@ -191,8 +191,9 @@
             node is aimed (no LOOK).</p>
         <p class="note">Search: a node that loses the player is first aimed back at the cell both
             nodes' readings put them in most often over the last 3 s, and only sweeps after 3 lost
-            readings there; State says "checking" and the cell, then "sweeping" until it finds
-            someone. After a far echo the far hold comes first. Heading: if the game says the
+            readings there; State says "checking" and the cell, then "sweeping (gave up on ...)".
+            It gives up for good on what it knew then: it only looks again for someone seen after
+            that (2 readings in a cell, in the last 5 s), so a stray echo never sends it back. After a far echo the far hold comes first. Heading: if the game says the
             player was moving (the Tracking detector), the cell they were walking into instead
             ("heading" in State). Off: a lost node sweeps at once. The server does it (LOOK), so
             it works on the firmware as flashed.</p>
@@ -739,7 +740,7 @@
         function searchState(s) {
             const by = s.by === "heading" ? " (heading)" : "";
             if (s.state === "checking") return `checking ${s.name}${by} ${s.checks}/${s.of}`;
-            return s.name ? `sweeping (not in ${s.name})` : "sweeping";
+            return s.name ? `sweeping (gave up on ${s.name})` : "sweeping";
         }
 
         // A node's confidence (handover.py): the score, and ± the spread of
