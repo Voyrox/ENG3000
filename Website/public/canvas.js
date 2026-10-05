@@ -340,12 +340,16 @@ function learnRoom() {
   }
 }
 
+// A round is on screen: the game, or the alert it raised.
+function roundOnScreen() {
+  return screen === "game" || (screen === "alert" && alertReturnScreen === "game");
+}
+
 // The loop keeps running across the game <-> alert boundary so the sensors are
 // still read while the alert is up - that is what lets it clear itself once the
 // player steps back past the threshold.
 function gameLoopTick(timestamp) {
-  const runningScreen = screen === "game" || (screen === "alert" && alertReturnScreen === "game");
-  if (!runningScreen) {
+  if (!roundOnScreen()) {
     gameLoopId = null;
     return;
   }
@@ -470,19 +474,18 @@ function startGameWithMode(mode) {
   startGameLoop();
 }
 
-// Touching the phone pad takes the cursor over from the sensors; lifting the
-// finger hands it straight back. The phone re-sends its position while a
-// finger is held, so if it goes quiet (lost release, phone locked) the
-// sensors take over again after REMOTE_IDLE_MS.
+// Touching the phone pad takes the cursor over from whichever mode is
+// running (sensors or mouse), and nothing else on the screen changes; lifting
+// the finger hands it straight back. The phone re-sends its position while a
+// finger is held, so if it goes quiet (lost release, phone locked) the mode
+// takes over again after REMOTE_IDLE_MS.
 const REMOTE_IDLE_MS = 1000;
 let remoteIdleTimer = null;
 
 function releaseRemote() {
   window.clearTimeout(remoteIdleTimer);
   remoteIdleTimer = null;
-  if (screen === "game" && window.getGameInputMode() === "remote") {
-    window.setGameInputMode("sensor");
-  }
+  window.releaseRemotePoint();
 }
 
 // Commands relayed from the phone control panel (/control). The server only
@@ -490,8 +493,8 @@ function releaseRemote() {
 function handleRemoteCommand(command) {
   switch (command.action) {
     case "point":
-      if (screen !== "game") break;
-      if (window.getGameInputMode() !== "remote") window.setGameInputMode("remote");
+      // Also over the too-close alert: the phone placing the player clears it.
+      if (!roundOnScreen()) break;
       window.setRemotePoint(command.x, command.y);
       window.clearTimeout(remoteIdleTimer);
       remoteIdleTimer = window.setTimeout(() => {
@@ -503,7 +506,7 @@ function handleRemoteCommand(command) {
       releaseRemote();
       break;
     case "start":
-      startGameWithMode(command.mode || "remote");
+      startGameWithMode(command.mode || "sensor");
       break;
     case "mode":
       if (screen === "game") window.setGameInputMode(command.mode);
@@ -526,11 +529,15 @@ function handleRemoteCommand(command) {
       window.setGameSettings({ testMode: Boolean(command.enabled) });
       break;
     case "position":
-      // The position switch, as the buttons above the sensor panel do it:
-      // Dynamic, line of sight, trilateration or their average. An unknown
-      // method is ignored.
+      // The position switch, which is on the control panel only: Dynamic,
+      // line of sight, trilateration or their average. An unknown method is
+      // ignored.
       window.setPositionMethod(command.method);
       syncServerFilterSetup();
+      break;
+    case "compare":
+      // Compare: each method's ring on the control panel's pad.
+      window.setPositionCompare(command.enabled);
       break;
     case "lostReadings":
       // How many readings each node's lost score is taken over (Out of
@@ -556,12 +563,12 @@ function handleRemoteCommand(command) {
 function sendGameStatus() {
   if (!socket || socket.readyState !== WebSocket.OPEN) return;
   const state = window.getGameState();
-  const loopRunning = screen === "game" || (screen === "alert" && alertReturnScreen === "game");
   socket.send(JSON.stringify({
     type: "game:status",
     screen,
     status: state.status,
     mode: state.inputMode,
+    remote: window.isRemoteActive(),
     score: state.score,
     lives: state.lives,
     level: state.level,
@@ -569,10 +576,12 @@ function sendGameStatus() {
     activeHole: state.activeHole,
     moleType: state.moleType,
     remoteHole: state.remoteHole,
-    cursor: loopRunning ? window.getGameCursorStatus(c) : null,
+    cursor: roundOnScreen() ? window.getGameCursorStatus(c) : null,
     testMode: window.getGameSettings().testMode,
     positionMethod: window.getPositionMethod(),
     positionMethods: window.getPositionMethods(),
+    dynamicFollowing: window.getDynamicFollowing(),
+    compare: window.getPositionCompare(),
     lostReadings: window.getLostReadings(),
     lostScores: window.getLostScores(),
     kalman: window.getKalman(),
@@ -752,18 +761,10 @@ c.addEventListener("click", (event) => {
       return;
     }
 
-    // The position switch above the sensor panel: line of sight,
-    // trilateration or their average, and Compare (sensor mode only).
-    const positionHit = window.getPositionSwitchAtPoint(c, point.x, point.y);
-    if (positionHit) {
-      window.applyPositionSwitch(positionHit);
-      syncServerFilterSetup();
-      draw();
-      return;
-    }
-
-    // Clicking to whack is a mouse-mode affordance only.
-    if (window.getGameInputMode() === "mouse" && window.handleGameClick(c, point.x, point.y)) {
+    // Clicking to whack is a mouse-mode affordance only, and not while the
+    // phone pad has the cursor.
+    if (window.getGameInputMode() === "mouse" && !window.isRemoteActive() &&
+        window.handleGameClick(c, point.x, point.y)) {
       draw();
     }
     return;
@@ -806,8 +807,6 @@ c.addEventListener("click", (event) => {
       } else if (hit.type === "testMode") {
         const current = window.getGameSettings();
         window.setGameSettings({ testMode: !current.testMode });
-      } else if (hit.type === "position") {
-        window.setPositionMethod(hit.value);
       }
       draw();
     }

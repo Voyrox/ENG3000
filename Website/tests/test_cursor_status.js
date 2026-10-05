@@ -8,13 +8,17 @@
 //   1. in sensor mode the status carries the player's position in cm, the
 //      sensor state and a board position whose hole is the one that scores
 //   2. no signal means no board position and no (x, y), rather than a stale one
-//   3. remote and mouse mode mirror their cursor but carry no sensor block
-//   4. the sensor block carries every position method's fix, with its ring
-//      on the board as Compare draws it, the method in use and Compare's
-//      switch
-//   5. Dynamic's rules: servo lines crossing in the centre column put the
+//   3. mouse mode mirrors its cursor but carries no sensor block
+//   4. the phone pad overrides either mode's cursor and nothing else: the
+//      sensors carry on underneath (their own cursor, the sensor panel), but
+//      cannot hold the round or put up an overlay, and lifting the finger
+//      hands the cursor straight back
+//   5. the sensor block carries every position method's fix, with its ring
+//      on the control panel's pad, the method in use and Compare's switch;
+//      the game board itself draws no switch and no rings
+//   6. Dynamic's rules: servo lines crossing in the centre column put the
 //      player there, and a lone confident node places them by itself, as
-//      placedBy and the Dynamic button say
+//      placedBy and the control panel's Dynamic button say
 //
 // Run with:
 //
@@ -95,6 +99,25 @@ function holeUnder(w, board) {
   return hole ? hole.index : -1;
 }
 
+// Draws the game screen into a canvas that only records the text drawn on it.
+function textsDrawn(w) {
+  const texts = [];
+  const handler = {
+    get(target, prop) {
+      if (prop in target) return target[prop];
+      if (prop === "fillText") return (text) => texts.push(String(text));
+      if (prop === "measureText") return (text) => ({ width: String(text).length * 7 });
+      return () => new Proxy({}, handler);
+    },
+    set(target, prop, value) {
+      target[prop] = value;
+      return true;
+    },
+  };
+  w.renderGame(new Proxy({}, handler), CANVAS);
+  return texts;
+}
+
 test("sensor mode reports the player's (x, y) in cm, and the hole under the drawn cursor", () => {
   const w = loadWindow();
   w.setGameInputMode("sensor");
@@ -156,22 +179,107 @@ test("no signal: no board position and no (x, y)", () => {
   assert.strictEqual(status.sensor.yCm, null);
 });
 
-test("remote mode mirrors the finger's cursor and carries no sensor block", () => {
+test("the phone pad takes the cursor from the sensors; they carry on underneath, and get it straight back", () => {
   const w = loadWindow();
-  w.setGameInputMode("remote");
+  w.setGameInputMode("sensor");
   w.resetGame();
-  // Compared as JSON: objects made inside the vm context have its prototypes.
-  assert.strictEqual(JSON.stringify(w.getGameCursorStatus(CANVAS)),
-    JSON.stringify({ board: null, hole: -1, sensor: null }), "no finger, no cursor");
+  run(w, scannersSeeing(75, 80));
+  const before = w.getGameCursorStatus(CANVAS);
+  assert.strictEqual(before.remote, false);
+  assert.strictEqual(before.hole, 4);
+  assert.strictEqual(JSON.stringify(before.sensor.board), JSON.stringify(before.board), "the sensors' cursor is the drawn one");
+
+  // A mole up under the sensors' cursor, which the sensors would score.
+  const state = w.getGameState();
+  Object.assign(state, { activeHole: 4, moleType: "mole", moleSpawnedAt: 0 });
 
   w.setRemotePoint(0.15, 0.85);
-  run(w, [], 30);
+  run(w, scannersSeeing(75, 80), 30);
   const status = w.getGameCursorStatus(CANVAS);
-  assert.strictEqual(status.sensor, null);
+  assert.strictEqual(w.getGameInputMode(), "sensor", "the pad is not a mode");
+  assert.strictEqual(status.remote, true);
   assert.ok(Math.abs(status.board.nx - 0.15) < 1e-6, `nx was ${status.board.nx}`);
   assert.ok(Math.abs(status.board.ny - 0.85) < 1e-6, `ny was ${status.board.ny}`);
   assert.strictEqual(status.hole, 6, "bottom-left hole");
-  assert.strictEqual(status.hole, w.getGameState().remoteHole, "agrees with the remote hole");
+  assert.strictEqual(status.hole, state.remoteHole, "agrees with the remote hole");
+  assert.strictEqual(state.score, 0, "only the pad's cursor scores");
+  assert.strictEqual(state.activeHole, 4);
+
+  // The sensors still place the player, on their own cursor, and the sensor
+  // panel stays up.
+  assert.strictEqual(status.sensor.status, "ok");
+  assert.ok(Math.hypot(status.sensor.xCm - 75, status.sensor.yCm - 80) < 3, `(${status.sensor.xCm}, ${status.sensor.yCm})`);
+  assert.ok(Math.abs(status.sensor.board.nx - 0.5) < 0.03 && Math.abs(status.sensor.board.ny - 0.5) < 0.03,
+    JSON.stringify(status.sensor.board));
+  assert.ok(textsDrawn(w).includes("NODE"), "the sensor panel is drawn");
+
+  w.releaseRemotePoint();
+  const after = w.getGameCursorStatus(CANVAS);
+  assert.strictEqual(after.remote, false);
+  assert.strictEqual(after.hole, 4, "the sensors' cursor, without waiting for a frame");
+  run(w, scannersSeeing(75, 80), 2);
+  assert.strictEqual(state.score, 1, "and the sensors score again");
+});
+
+test("while the pad has the cursor the sensors cannot hold the round or put up an overlay", () => {
+  const w = loadWindow();
+  w.setGameInputMode("sensor");
+  w.resetGame();
+  const offline = [1, 2, 3].map((id) => ({ id, online: false, latest: null }));
+  // One clock across every step (run() starts its own again at 0), so the
+  // round clock only ever moves forward.
+  let t = 0;
+  const step = (frames) => {
+    for (let i = 0; i < frames; i += 1) {
+      t += FRAME_MS;
+      w.performance.now = () => t;
+      w.markSensorFrame();
+      w.updateGame(t, CANVAS, offline);
+    }
+  };
+  step(30);
+  const state = w.getGameState();
+  const held = state.remainingMs;
+  step(30);
+  assert.strictEqual(state.remainingMs, held, "Sensors offline holds the round");
+  assert.ok(textsDrawn(w).includes("Sensors offline"));
+
+  w.setRemotePoint(0.5, 0.5);
+  step(30);
+  assert.strictEqual(state.remainingMs, held - 30 * FRAME_MS, "the round runs while the phone places the player");
+  assert.strictEqual(state.sensor.status, "offline", "the sensors still say so");
+  assert.ok(!textsDrawn(w).includes("Sensors offline"), "but the overlay is not drawn");
+  assert.ok(textsDrawn(w).includes("OFFLINE"), "the sensor panel shows it instead");
+  assert.strictEqual(w.isGameAlertActive(), false);
+
+  w.releaseRemotePoint();
+  assert.ok(textsDrawn(w).includes("Sensors offline"));
+});
+
+test("the pad over a mouse round hands the mouse's cursor back, and the old Remote mode is the sensors", () => {
+  const w = loadWindow();
+  w.setGameInputMode("mouse");
+  w.resetGame();
+  const layout = w.getGameGridLayout(CANVAS);
+  w.setGameCursor(CANVAS, layout.gridLeft + layout.gridSize / 2, layout.gridTop + layout.gridSize / 2);
+
+  w.setRemotePoint(0.15, 0.85);
+  run(w, [], 30);
+  // The mouse moving while the finger is down is remembered, not drawn.
+  w.setGameCursor(CANVAS, layout.gridLeft + 1, layout.gridTop + 1);
+  const status = w.getGameCursorStatus(CANVAS);
+  assert.strictEqual(status.remote, true);
+  assert.strictEqual(status.sensor, null);
+  assert.strictEqual(status.hole, 6);
+
+  w.releaseRemotePoint();
+  assert.strictEqual(w.getGameInputMode(), "mouse", "lifting the finger never switches mode");
+  assert.strictEqual(w.getGameCursorStatus(CANVAS).hole, 0, "the mouse where it was left");
+
+  // A /control page from before the pad became an override still asks for "remote".
+  w.setGameInputMode("remote");
+  assert.strictEqual(w.getGameInputMode(), "sensor");
+  assert.strictEqual(w.getGameCursorStatus(CANVAS).remote, false);
 });
 
 test("mouse mode mirrors the mouse cursor, and switching mode drops it", () => {
@@ -192,7 +300,7 @@ test("mouse mode mirrors the mouse cursor, and switching mode drops it", () => {
   assert.strictEqual(after.sensor.status, "no-signal");
 });
 
-test("every method's fix comes with its ring on the board, the method in use and Compare", () => {
+test("every method's fix comes with its ring on the pad, the method in use and Compare", () => {
   const w = loadWindow();
   w.setGameInputMode("sensor");
   w.resetGame();
@@ -216,7 +324,8 @@ test("every method's fix comes with its ring on the board, the method in use and
 
   // Switching method and turning Compare off both show up in the status.
   w.setPositionMethod("tri");
-  w.applyPositionSwitch({ kind: "compare" });
+  assert.strictEqual(w.setPositionCompare(false), false);
+  assert.strictEqual(w.getPositionCompare(), false);
   run(w, scannersSeeing(75, 80), 2);
   const after = w.getGameCursorStatus(CANVAS).sensor;
   assert.strictEqual(after.method, "tri");
@@ -382,6 +491,21 @@ test("a ring off the side of the board stays at the board's edge; no signal has 
   assert.strictEqual(JSON.stringify(none), JSON.stringify({ dyn: null, los: null, tri: null, avg: null }));
 });
 
+test("the game board draws one cursor: no position switch and no rings", () => {
+  const w = loadWindow();
+  w.setGameInputMode("sensor");
+  w.resetGame();
+  run(w, scannersSeeing(75, 80));
+  assert.strictEqual(w.getGameCursorStatus(CANVAS).sensor.compare, true, "Compare is on");
+  const texts = textsDrawn(w);
+  ["Dynamic", "DYN MID", "LOS", "TRI", "AVG", "Compare"].forEach((label) => {
+    assert.ok(!texts.includes(label), `${label} is not drawn on the board`);
+  });
+  assert.strictEqual(w.getPositionSwitchAtPoint, undefined, "nothing on the board switches the method");
+  // The sensor panel still lists every method's position.
+  assert.ok(texts.some((t) => t.startsWith("LOS ")), JSON.stringify(texts));
+});
+
 test("the switch offers Dynamic first, and picking another method turns it off", () => {
   const w = loadWindow();
   assert.strictEqual(JSON.stringify(w.getPositionMethods().map((m) => m.id)), JSON.stringify(["dyn", "los", "tri", "avg"]));
@@ -411,24 +535,6 @@ function scanners(left, right) {
 const aimAt = (slot, x, y) => Math.round(90 + (Math.atan2(x - SENSOR_X[slot], y) * 180) / Math.PI);
 const FURNITURE = { avg: 150, angle: 60, scanState: 1 };   // the right node half-finding something
 
-// Draws the game screen into a canvas that only records the text drawn on it.
-function textsDrawn(w) {
-  const texts = [];
-  const handler = {
-    get(target, prop) {
-      if (prop in target) return target[prop];
-      if (prop === "fillText") return (text) => texts.push(String(text));
-      if (prop === "measureText") return (text) => ({ width: String(text).length * 7 });
-      return () => new Proxy({}, handler);
-    },
-    set(target, prop, value) {
-      target[prop] = value;
-      return true;
-    },
-  };
-  w.renderGame(new Proxy({}, handler), CANVAS);
-  return texts;
-}
 
 test("Dynamic: both servo lines crossing in the centre column put the player there, ahead of a lone confident node", () => {
   const w = loadWindow();
@@ -442,7 +548,7 @@ test("Dynamic: both servo lines crossing in the centre column put the player the
   assert.strictEqual(sensor.placedBy, "centre");
   assert.strictEqual(sensor.column, 1);
   assert.ok(sensor.xCm >= 58 && sensor.xCm <= 92, `x was ${sensor.xCm}`);
-  assert.ok(textsDrawn(w).includes("DYN MID"), "the Dynamic button names the rule");
+  assert.strictEqual(w.getDynamicFollowing(), "MID", "the Dynamic button names the rule");
 });
 
 test("Dynamic: in front of the left node with its servo leant in is not the centre", () => {
@@ -466,12 +572,13 @@ test("Dynamic: a lone confident node places the player by itself", () => {
   assert.strictEqual(sensor.placedBy, "left");
   assert.strictEqual(sensor.column, 0);
   assert.ok(Math.abs(sensor.xCm - 25) < 0.5 && Math.abs(sensor.yCm - 85) < 0.5, `(${sensor.xCm}, ${sensor.yCm})`);
-  assert.ok(textsDrawn(w).includes("DYN L"));
+  assert.strictEqual(w.getDynamicFollowing(), "L");
 
   // Line of sight, switched on by itself, takes the furniture too.
   w.setPositionMethod("los");
   run(w, scanners({ avg: echoCm(0, 25, 85), angle: 90, scanState: 0 }, FURNITURE), 2);
   assert.strictEqual(w.getGameState().sensor.placedBy, "los");
+  assert.strictEqual(w.getDynamicFollowing(), null, "Dynamic is off");
 });
 
 test("Dynamic: the centre holds for centreHoldMs while the servo lines stray just outside it", () => {

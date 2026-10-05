@@ -84,11 +84,12 @@ SERVER_FILTERING = server_filtering_enabled(os.environ)
 #   CON=1 python app.py
 CONTROL_ENABLED = os.environ.get("CON") == "1"
 # "position" is the position switch: Dynamic, line of sight, trilateration or their average.
+# "compare" turns Compare's rings (each method's position) on the control panel's pad on or off.
 # "lostReadings" sets how many readings each node's lost score is taken over
 # (Out of bounds when both nodes are lost).
 # "kalman" turns the game's Kalman filters on or off.
 CONTROL_ACTIONS = {"point", "release", "start", "mode", "pause", "resume", "restart", "menu", "testMode",
-                   "position", "lostReadings", "kalman"}
+                   "position", "compare", "lostReadings", "kalman"}
 # Every raw node reading to logs/raw-*.csv, for the bench noise test
 # (tools/bench_noise.py). Off unless started with REC=1; see sessionRecorder.py.
 recorder = SessionRecorder.from_env(os.environ)

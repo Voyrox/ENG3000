@@ -21,8 +21,9 @@
 //   window.getGameCursorStatus(canvas)          - the cursor and sensor (x, y) for the phone panel
 //   window.setServerFilteringActive(active)     - the server has SERVER_FILTERING on
 //   window.setServerCoordinate(coordinate)      - latest filtered coordinate from the server
+//   window.setRemotePoint(nx, ny) / window.releaseRemotePoint() - the phone pad's override
 //
-// Three input modes share all of the game logic. Only the cursor source differs:
+// Two input modes share all of the game logic. Only the cursor source differs:
 //   "mouse"  - canvas.js feeds raw canvas pixels straight from mousemove.
 //              Reached via Skip on the calibration screen.
 //   "sensor" - readSensorCoordinate() places the player from the LEFT and
@@ -39,11 +40,14 @@
 //              When the server runs filterRules.py (SERVER_FILTERING on), its
 //              coordinate replaces readSensorCoordinate() for the cursor and
 //              alert; with the flag off (the default) nothing here changes.
-//   "remote" - the phone control panel (/control, only served when the server
-//              runs with CON=1) acts as a touchpad: the finger's position on
-//              the pad maps onto the grid and the cursor eases towards it.
-//              canvas.js switches into this mode while a finger is on the
-//              pad and back to "sensor" when it lifts.
+//
+// The phone pad is not a mode but an override on top of either: while a
+// finger is on the control panel's pad (/control, only served when the server
+// runs with CON=1) the cursor eases towards the finger and scores, and lifting
+// it hands the cursor straight back. Nothing else changes (Aaron, 5 Oct): the
+// sensors keep running underneath, so the sensor panel, the live stats and
+// charts carry on, but they cannot hold the round or raise an alert while the
+// phone places the player.
 
 (function () {
   const GAME_DURATION_MS = 60000; // overall round length shown as the countdown
@@ -300,7 +304,6 @@
   const HUD_GAP = 10;             // px between stacked panels
   const SENSOR_PANEL_W = 380;     // px
   const SENSOR_PANEL_H = 150;     // px
-  const POSITION_SWITCH_H = 28;   // px; the method buttons above the sensor panel
   const STATS_PANEL_W = 270;      // px; LIVE STATS, left gutter
   const STATS_PANEL_MIN_W = 190;  // px; narrower and the values collide with the labels
   const CHARTS_PANEL_MAX_H = 300; // px; LIVE DATA, under the legend
@@ -393,7 +396,8 @@
 
   const gameState = {
     status: "idle", // "idle" | "playing" | "paused" | "gameover"
-    inputMode: "mouse", // "mouse" | "sensor" | "remote"
+    inputMode: "mouse", // "mouse" | "sensor"
+    remoteActive: false, // a finger on the phone pad has the cursor, in either mode
     remoteTarget: null, // { nx, ny } 0-1 across the grid, straight from the phone pad
     remotePos: null, // smoothed copy of remoteTarget, eased every frame
     remoteLastFrame: null,
@@ -415,6 +419,11 @@
     hitFlash: { hole: -1, until: 0, type: null },
     cursor: { x: null, y: null, inBounds: true },
   };
+
+  // The cursor each mode would draw without the phone pad: the sensors'
+  // (updateGame()) and the mouse's, kept while a finger has the drawn one.
+  let sensorCursor = { x: null, y: null, inBounds: true };
+  let mouseCursor = { x: null, y: null, inBounds: true };
 
   function randomBetween(min, max) {
     return min + Math.random() * (max - min);
@@ -527,6 +536,7 @@
     gameState.nextSpawnAt = 0;
     gameState.hitFlash = { hole: -1, until: 0, type: null };
     gameState.cursor = { x: null, y: null, inBounds: true };
+    sensorCursor = { x: null, y: null, inBounds: true };
     gameState.sensor = emptySensorState();
     resetSensorFilters();
     roundStats()?.reset(gameState.inputMode);
@@ -543,13 +553,14 @@
   };
 
   window.setGameInputMode = function setGameInputMode(mode) {
-    gameState.inputMode = mode === "sensor" || mode === "remote" ? mode : "mouse";
+    // "remote" was a mode before the pad became an override; a /control page
+    // from then still asks for it, and gets the sensors with the pad on top.
+    gameState.inputMode = mode === "sensor" || mode === "remote" ? "sensor" : "mouse";
     // Drop any stale cursor so the modes never inherit each other's position.
     gameState.cursor = { x: null, y: null, inBounds: true };
-    gameState.remoteTarget = null;
-    gameState.remotePos = null;
-    gameState.remoteLastFrame = null;
-    gameState.remoteHole = -1;
+    sensorCursor = { x: null, y: null, inBounds: true };
+    mouseCursor = { x: null, y: null, inBounds: true };
+    clearRemote();
     gameState.sensor = emptySensorState();
     resetSensorFilters();
   };
@@ -560,10 +571,12 @@
 
   // The full-screen alert is driven purely by the raw distance, and only in
   // sensor mode mid-round - the mouse has no notion of standing too close, and
-  // a paused or finished round should not be hijacked.
+  // a paused or finished round should not be hijacked. Nor while the phone pad
+  // places the player.
   window.isGameAlertActive = function isGameAlertActive() {
     return (
       gameState.inputMode === "sensor" &&
+      !gameState.remoteActive &&
       gameState.status === "playing" &&
       gameState.sensor.status === "too-close"
     );
@@ -600,13 +613,19 @@
   window.updateGame = function updateGame(now, canvas, orderedNodes) {
     updateRoomStatus(orderedNodes);
     if (gameState.inputMode === "sensor" && canvas) {
+      // The sensors move their own cursor, even while the phone pad has the
+      // one drawn, so lifting the finger hands back a cursor that kept up.
+      gameState.cursor = { ...sensorCursor };
       if (serverCoordinateActive) {
         applyServerCoordinate(canvas, orderedNodes);
       } else {
         updateSensorCursor(canvas, orderedNodes);
       }
+      sensorCursor = { ...gameState.cursor };
       recordSensorReading(now, orderedNodes);
-    } else if (gameState.inputMode === "remote" && canvas) {
+    }
+    // The phone pad, on top of either mode: its cursor replaces the one above.
+    if (gameState.remoteActive && canvas) {
       updateRemoteCursor(canvas, now);
     }
 
@@ -752,31 +771,52 @@
   }
 
   // Mouse-mode coordinate input. Ignored in sensor mode so a stray mouse
-  // movement cannot fight the sensors for control of the cursor.
+  // movement cannot fight the sensors for control of the cursor, and only
+  // remembered while the phone pad has it.
   window.setGameCursor = function setGameCursor(canvas, x, y) {
     if (gameState.inputMode !== "mouse") return;
     const width = canvas.clientWidth || canvas.width;
     const height = canvas.clientHeight || canvas.height;
-    gameState.cursor.x = x;
-    gameState.cursor.y = y;
-    gameState.cursor.inBounds = x >= 0 && x <= width && y >= 0 && y <= height;
+    mouseCursor = { x, y, inBounds: x >= 0 && x <= width && y >= 0 && y <= height };
+    if (!gameState.remoteActive) gameState.cursor = { ...mouseCursor };
   };
 
-  // Remote-mode input: the finger's position on the phone pad, normalised to
-  // 0-1 with (0,0) at the top-left, same orientation as the on-screen grid.
-  // Anything non-numeric lifts the cursor off the board.
+  // The phone pad: the finger's position, normalised to 0-1 with (0,0) at the
+  // top-left, same orientation as the on-screen grid. The first point takes
+  // the cursor over from whichever mode is running; anything non-numeric
+  // lets go of it, as lifting the finger does.
   window.setRemotePoint = function setRemotePoint(nx, ny) {
-    if (gameState.inputMode !== "remote") return;
     if (!Number.isFinite(nx) || !Number.isFinite(ny)) {
-      gameState.remoteTarget = null;
+      window.releaseRemotePoint();
       return;
     }
     const clamp = (v) => Math.min(1, Math.max(0, v));
+    gameState.remoteActive = true;
     gameState.remoteTarget = { nx: clamp(nx), ny: clamp(ny) };
   };
 
+  // The finger lifted: the mode's own cursor is drawn again straight away.
+  window.releaseRemotePoint = function releaseRemotePoint() {
+    if (!gameState.remoteActive) return;
+    clearRemote();
+    gameState.cursor = { ...(gameState.inputMode === "sensor" ? sensorCursor : mouseCursor) };
+  };
+
+  window.isRemoteActive = function isRemoteActive() {
+    return gameState.remoteActive;
+  };
+
+  function clearRemote() {
+    gameState.remoteActive = false;
+    gameState.remoteTarget = null;
+    gameState.remotePos = null;
+    gameState.remoteLastFrame = null;
+    gameState.remoteHole = -1;
+  }
+
   // Stored normalised rather than as pixels, so a resize keeps the cursor on
-  // the same spot of the grid. Hovering scores, exactly as in sensor mode.
+  // the same spot of the grid. Hovering scores, exactly as in sensor mode (and
+  // the sensors' own cursor does not, see hoverFromSensors()).
   function updateRemoteCursor(canvas, now) {
     const target = gameState.remoteTarget;
     if (!target) {
@@ -810,34 +850,42 @@
     window.handleGameHover(canvas, x, y);
   }
 
-  // The cursor as the phone control panel mirrors it, in any input mode.
-  // board is the drawn cursor as a fraction of the board - 0-1 with (0,0) at
-  // the top-left, the pad's own orientation - and hole is the hole under it,
-  // which is the one that scores. sensor is only filled in sensor mode: the
-  // player's position in play-area cm (x across from screen-left, y the depth
-  // from the screen), the cell, and the state the sensors are in.
-  window.getGameCursorStatus = function getGameCursorStatus(canvas) {
-    const cursor = gameState.cursor;
-    let board = null;
-    let hole = -1;
-    if (canvas && cursor.x !== null) {
-      const layout = window.getGameGridLayout(canvas);
-      board = {
+  // A cursor as a fraction of the board - 0-1 with (0,0) at the top-left, the
+  // pad's own orientation - and the hole under it, or null and -1.
+  function cursorOnBoard(canvas, cursor) {
+    if (!canvas || cursor.x === null) return { board: null, hole: -1 };
+    const layout = window.getGameGridLayout(canvas);
+    const over = holeAtPoint(layout, cursor.x, cursor.y);
+    return {
+      board: {
         nx: (cursor.x - layout.gridLeft) / layout.gridSize,
         ny: (cursor.y - layout.gridTop) / layout.gridSize,
-      };
-      const over = holeAtPoint(layout, cursor.x, cursor.y);
-      hole = over ? over.index : -1;
-    }
+      },
+      hole: over ? over.index : -1,
+    };
+  }
 
-    if (gameState.inputMode !== "sensor") return { board, hole, sensor: null };
+  // The cursor as the phone control panel mirrors it, in any input mode.
+  // board is the drawn cursor (cursorOnBoard()) and hole the hole under it,
+  // which is the one that scores; remote says the phone pad has it. sensor is
+  // only filled in sensor mode, and carries on while the pad has the cursor:
+  // the player's position in play-area cm (x across from screen-left, y the
+  // depth from the screen), the cell, the state the sensors are in, and board,
+  // the sensors' own cursor.
+  window.getGameCursorStatus = function getGameCursorStatus(canvas) {
+    const { board, hole } = cursorOnBoard(canvas, gameState.cursor);
+    const remote = gameState.remoteActive;
+
+    if (gameState.inputMode !== "sensor") return { board, hole, remote, sensor: null };
 
     const sensor = gameState.sensor;
     const hasCell = Number.isInteger(sensor.gx) && Number.isInteger(sensor.gy);
     return {
       board,
       hole,
+      remote,
       sensor: {
+        board: cursorOnBoard(canvas, sensorCursor).board,
         status: sensor.status,
         held: Boolean(sensor.held),
         source: sensor.source || null,
@@ -848,15 +896,16 @@
         gy: hasCell ? sensor.gy : null,
         method: positioning.method,
         placedBy: sensor.placedBy || null,
-        // Compare's rings: drawn on the board only while Compare is on and
-        // the browser places the player itself (renderPositionMarkers()).
+        // Compare's rings, on the control panel's pad: only while Compare is
+        // on and the browser places the player itself (the server's
+        // coordinate carries no fixes).
         compare: positioning.compare && !serverCoordinateActive,
         fixes: compareFixes(canvas, sensor.fixes),
       },
     };
   };
 
-  // Every method's position as Compare draws it: { dyn, los, tri, avg }, each
+  // Every method's position as Compare's rings show it: { dyn, los, tri, avg }, each
   // { xCm, yCm, nx, ny } or null. xCm and yCm are as the method placed the
   // player; nx and ny are its ring on the board, as fractions like board above
   // (x clamped to the board first, as the ring is).
@@ -1387,8 +1436,8 @@
   // The two nodes sit on the screen line at the centres of the outer columns.
   // Each is a servo scanner that reports its distance to the player and the
   // servo angle it read at. Three ways to turn that into a position, and a
-  // fourth that picks between them, switched with the buttons above the sensor
-  // panel (positioning.method):
+  // fourth that picks between them, switched on the phone control panel
+  // (positioning.method):
   //
   //   "dyn" - Dynamic, the default: whichever of the other three has kept the
   //           player in one square of the board the longest (dynamicLeader()).
@@ -1415,8 +1464,8 @@
   //           by its own distance along its servo angle.
   //   "avg" - the midpoint of the two.
   //
-  // All of them are worked out on every update, so the board can show them
-  // side by side (Compare). Every method places the middle of the player: each
+  // All of them are worked out on every update, so the sensor panel and the
+  // control panel's pad can show them side by side (Compare). Every method places the middle of the player: each
   // distance has tuning.bodyRadiusCm added first (bodyCentreCm()). x picks the
   // column (the centre one included) and y, the depth from the screen, picks
   // the row. filterRules.py (TwoSensorGeometry) is the parity-tested Python
@@ -1991,9 +2040,11 @@
   // --- Which method places the player ----------------------------------------
   // In switch order. Choosing any but Dynamic turns Dynamic off.
   const POSITION_METHODS = ["dyn", "los", "tri", "avg"];
+  // Both are switched on the phone's /control page only; the game board only
+  // ever draws the one cursor (Aaron, 5 Oct).
   const positioning = {
     method: "dyn",   // what drives the cursor and the game
-    compare: true,   // draw line of sight, trilateration and the average on the board
+    compare: true,   // ring line of sight, trilateration and the average on the control panel's pad
   };
 
   window.getPositionMethod = function getPositionMethod() {
@@ -2012,6 +2063,25 @@
       console.info(`[position] ${method}`);
     }
     return positioning.method;
+  };
+
+  window.getPositionCompare = function getPositionCompare() {
+    return positioning.compare;
+  };
+
+  window.setPositionCompare = function setPositionCompare(on) {
+    positioning.compare = Boolean(on);
+    return positioning.compare;
+  };
+
+  // What the control panel's Dynamic button adds to its name while Dynamic is
+  // on and placing the player: the method it follows ("LOS", "TRI", "AVG") or
+  // the rule ("MID", "L", "R"); null otherwise.
+  window.getDynamicFollowing = function getDynamicFollowing() {
+    const following = gameState.sensor && gameState.sensor.placedBy;
+    if (positioning.method !== "dyn" || !following) return null;
+    if (METHOD_STYLES[following]) return METHOD_STYLES[following].short;
+    return DYNAMIC_RULE_SHORT[following] || null;
   };
 
   // The Kalman switch, on by default; see tuning.kalman. Takes effect from
@@ -2425,6 +2495,12 @@
     return stableCell;
   }
 
+  // The sensors' cursor over a hole scores, as the mouse's does - unless the
+  // phone pad has the cursor, whose own hover scores instead.
+  function hoverFromSensors(canvas, point) {
+    if (!gameState.remoteActive) window.handleGameHover(canvas, point.x, point.y);
+  }
+
   // Reads the sensors, maps the fix into grid space, and drives the cursor from
   // it. Hovering the active mole scores, exactly as the mouse does.
   function updateSensorCursor(canvas, orderedNodes) {
@@ -2475,7 +2551,7 @@
         xCm: world.x, yCm: world.y, resolved: world.resolved,
       };
       const point = moveCursor(canvas, world, cell.gx, dt);
-      if (point) window.handleGameHover(canvas, point.x, point.y);
+      if (point) hoverFromSensors(canvas, point);
       return;
     }
 
@@ -2511,7 +2587,7 @@
       // The spring keeps running while held, so the cursor eases to a stop
       // instead of freezing mid-board the moment a frame is dropped.
       const point = moveCursor(canvas, world, held.gx, dt);
-      if (point) window.handleGameHover(canvas, point.x, point.y);
+      if (point) hoverFromSensors(canvas, point);
       return;
     }
 
@@ -2612,7 +2688,7 @@
 
     const point = window.gridToCanvasPoint(canvas, c.gx, c.gy);
     gameState.cursor = { x: point.x, y: point.y, inBounds: true };
-    window.handleGameHover(canvas, point.x, point.y);
+    hoverFromSensors(canvas, point);
   }
 
   // Everything the sensor pipeline currently knows. Callable from the browser
@@ -2656,9 +2732,11 @@
   // clock is held during these states so the player is not penalised for a
   // dropout they cannot control.
   // While the nodes learn the room, their echoes are the furniture's, not the
-  // player's, so the round waits for that too.
+  // player's, so the round waits for that too. Never while the phone pad
+  // places the player.
   function isSensorBlocked() {
-    return gameState.inputMode === "sensor" && (gameState.sensor.status !== "ok" || roomStatus === "learning");
+    return gameState.inputMode === "sensor" && !gameState.remoteActive &&
+      (gameState.sensor.status !== "ok" || roomStatus === "learning");
   }
 
   window.getGameOverButtonAtPoint = function getGameOverButtonAtPoint(canvas, x, y) {
@@ -2990,15 +3068,16 @@
     { index: RIGHT_SENSOR, label: "R", source: "right" },
   ];
   const SOURCE_LABELS = { both: "L+R", left: "L only", right: "R only" };
-  // The ways of placing the player, as the switch and the board show them.
+  // The ways of placing the player, as the sensor panel and the control panel
+  // show them.
   const METHOD_STYLES = {
     dyn: { label: "Dynamic", short: "DYN", colour: "#a3e635" },
     los: { label: "Line of sight", short: "LOS", colour: "#22d3ee" },
     tri: { label: "Trilateration", short: "TRI", colour: "#e879f9" },
     avg: { label: "Average", short: "AVG", colour: "#f8fafc" },
   };
-  // What the Dynamic button says when one of its rules places the player
-  // (dynamicRule()): the centre rule, or a lone confident node.
+  // What the control panel's Dynamic button says when one of its rules places
+  // the player (dynamicRule()): the centre rule, or a lone confident node.
   const DYNAMIC_RULE_SHORT = { centre: "MID", left: "L", right: "R" };
   // The scanner's state (src/scanning.cpp): both sensors agree, one sees the
   // player, or it is sweeping for them.
@@ -3160,101 +3239,10 @@
     ctx.textAlign = "start";
   }
 
-  // --- Position switch ---------------------------------------------------------
-  // Sensor mode only: buttons above the sensor panel pick the method that
-  // places the player, and Compare shows line of sight, trilateration and the
-  // average on the board. The buttons share the width of the panel equally.
-  const POSITION_SWITCH_GAP = 4;   // px between buttons
-
-  function getPositionSwitchLayout(canvas) {
-    const height = canvas.clientHeight || canvas.height;
-    const y = height - HUD_EDGE - SENSOR_PANEL_H - HUD_GAP - POSITION_SWITCH_H;
-    const count = POSITION_METHODS.length + 1;
-    const width = (SENSOR_PANEL_W - (count - 1) * POSITION_SWITCH_GAP) / count;
-    const buttons = POSITION_METHODS.map((method) => ({ kind: "method", method }));
-    buttons.push({ kind: "compare" });
-    buttons.forEach((b, k) => {
-      Object.assign(b, { x: HUD_EDGE + k * (width + POSITION_SWITCH_GAP), y, width, height: POSITION_SWITCH_H });
-    });
-    return { top: y, buttons };
-  }
-
-  // A method button's label: short, to fit, and Dynamic says which method or
-  // rule it is following while it is on.
-  function positionButtonLabel(method) {
-    if (method !== "dyn") return METHOD_STYLES[method].short;
-    const following = gameState.sensor && gameState.sensor.placedBy;
-    if (positioning.method !== "dyn" || !following) return "Dynamic";
-    const short = METHOD_STYLES[following] ? METHOD_STYLES[following].short : DYNAMIC_RULE_SHORT[following];
-    return short ? `DYN ${short}` : "Dynamic";
-  }
-
-  // The button under (x, y), while a sensor-mode round is playing, or null.
-  window.getPositionSwitchAtPoint = function getPositionSwitchAtPoint(canvas, x, y) {
-    if (gameState.inputMode !== "sensor" || gameState.status !== "playing") return null;
-    return getPositionSwitchLayout(canvas).buttons.find((b) => pointInRect(x, y, b)) || null;
-  };
-
-  window.applyPositionSwitch = function applyPositionSwitch(button) {
-    if (!button) return;
-    if (button.kind === "method") window.setPositionMethod(button.method);
-    else if (button.kind === "compare") positioning.compare = !positioning.compare;
-  };
-
-  function renderPositionSwitch(ctx, canvas) {
-    getPositionSwitchLayout(canvas).buttons.forEach((b) => {
-      const on = b.kind === "method" ? b.method === positioning.method : positioning.compare;
-      const colour = b.kind === "method" ? METHOD_STYLES[b.method].colour : "#f8fafc";
-      if (on) {
-        ctx.fillStyle = colour;
-        ctx.beginPath();
-        ctx.roundRect(b.x, b.y, b.width, b.height, 8);
-        ctx.fill();
-      } else {
-        drawHudPanel(ctx, b.x, b.y, b.width, b.height, 8);
-      }
-      ctx.textAlign = "center";
-      ctx.font = "bold 11px monospace";
-      ctx.fillStyle = on ? "#13131c" : colour;
-      const label = b.kind === "method" ? positionButtonLabel(b.method) : "Compare";
-      ctx.fillText(label, b.x + b.width / 2, b.y + b.height / 2 + 4);
-    });
-    ctx.textAlign = "start";
-  }
-
-  // Compare: where line of sight, trilateration and the average put the player
-  // right now, each a small labelled ring on the board. The big cursor follows
-  // the one placing the player (thick ring), eased by the spring.
-  const MARKER_LABEL_OFFSET = { los: [0, -13], tri: [0, 22], avg: [16, 4] };
-
-  function renderPositionMarkers(ctx, canvas) {
-    const fixes = gameState.sensor && gameState.sensor.fixes;
-    if (!positioning.compare || !fixes) return;
-    DYNAMIC_METHODS.forEach((method) => {
-      const fix = fixes[method];
-      if (!fix) return;
-      const x = Math.max(0, Math.min(PLAY_WIDTH_CM, fix.x));
-      const point = worldToCanvasPoint(canvas, x, fix.y, columnAtCm(x));
-      if (!point) return;
-      const style = METHOD_STYLES[method];
-      ctx.save();
-      ctx.strokeStyle = style.colour;
-      ctx.lineWidth = method === gameState.sensor.placedBy ? 3 : 2;
-      ctx.beginPath();
-      ctx.arc(point.x, point.y, 7, 0, Math.PI * 2);
-      ctx.stroke();
-      ctx.fillStyle = style.colour;
-      ctx.font = "bold 10px monospace";
-      ctx.textAlign = method === "avg" ? "left" : "center";
-      const [dx, dy] = MARKER_LABEL_OFFSET[method];
-      ctx.fillText(style.short, point.x + dx, point.y + dy);
-      ctx.restore();
-    });
-  }
-
   // --- HUD layout ------------------------------------------------------------
-  // Bottom-left: in sensor mode the sensor panel sits in the corner with the
-  // position switch above it (mouse and remote need no input box). LIVE STATS
+  // Bottom-left: in sensor mode the sensor panel sits in the corner (the mouse
+  // needs no input box), and stays there while the phone pad has the cursor.
+  // The position switch is on the control panel only. LIVE STATS
   // fills the room left between that and the score panel, showing as many
   // rows as fit. LIVE DATA (box plot and bar charts) sits under the How to
   // Play legend.
@@ -3268,11 +3256,8 @@
     let stackTop = height - HUD_EDGE;
 
     if (gameState.inputMode === "sensor") {
-      if (!serverCoordinateActive) renderPositionMarkers(ctx, canvas);
       stackTop -= SENSOR_PANEL_H;
       renderSensorPanel(ctx, HUD_EDGE, stackTop);
-      renderPositionSwitch(ctx, canvas);
-      stackTop = getPositionSwitchLayout(canvas).top;
     }
 
     const stats = roundStats();
@@ -3574,7 +3559,8 @@
 
     renderHud(ctx, canvas);
 
-    if (gameState.inputMode === "sensor" && gameState.status === "playing") {
+    // The phone pad places the player over whatever the sensors say.
+    if (gameState.inputMode === "sensor" && !gameState.remoteActive && gameState.status === "playing") {
       renderSensorStatusOverlay(ctx, canvas);
     }
 

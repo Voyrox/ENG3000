@@ -1,9 +1,7 @@
-// options.js - Options screen: round duration, starting lives, sound toggle,
-// test mode, and how the sensors place the player (line of sight,
-// trilateration or their average). Reads/writes settings via
-// window.getGameSettings() / window.setGameSettings(), and the position method
-// via window.getPositionMethods() / window.setPositionMethod(), exposed by
-// game.js.
+// options.js - Options screen: round duration, starting lives, sound toggle
+// and test mode. Reads/writes settings via window.getGameSettings() /
+// window.setGameSettings(), exposed by game.js. How the sensors place the
+// player is switched on the phone's /control page only (Aaron, 5 Oct).
 
 window.getOptionsLayout = function getOptionsLayout(canvas) {
   const width = canvas.clientWidth || canvas.width;
@@ -51,23 +49,6 @@ window.getOptionsLayout = function getOptionsLayout(canvas) {
     height: buttonHeight,
   };
 
-  // The same switch as the buttons above the sensor panel and on the phone's
-  // /control page, so all three always agree.
-  const positionMethods = window.getPositionMethods
-    ? window.getPositionMethods()
-    : [{ id: "dyn", label: "Dynamic" }, { id: "los", label: "Line of sight" },
-      { id: "tri", label: "Trilateration" }, { id: "avg", label: "Average" }];
-  const positionWidth = 150;
-  const positionTotal = positionMethods.length * positionWidth + (positionMethods.length - 1) * buttonGap;
-  const positionButtons = positionMethods.map((method, index) => ({
-    value: method.id,
-    label: method.label,
-    x: centerX - positionTotal / 2 + index * (positionWidth + buttonGap),
-    y: firstRowY + rowGap * 4,
-    width: positionWidth,
-    height: buttonHeight,
-  }));
-
   return {
     width,
     height,
@@ -79,7 +60,6 @@ window.getOptionsLayout = function getOptionsLayout(canvas) {
     livesButtons,
     soundButton,
     testModeButton,
-    positionButtons,
   };
 };
 
@@ -159,10 +139,6 @@ window.renderOptions = function renderOptions(ctx, canvas) {
     testModeButton.y + testModeButton.height / 2 + 6
   );
 
-  drawSectionLabel("Placing the Player - sensor mode", layout.firstRowY + layout.rowGap * 4);
-  const positionMethod = window.getPositionMethod ? window.getPositionMethod() : null;
-  drawButtonRow(layout.positionButtons, (value) => value === positionMethod);
-
   ctx.textAlign = "start";
 };
 
@@ -183,9 +159,6 @@ window.getOptionsButtonAtPoint = function getOptionsButtonAtPoint(canvas, x, y) 
 
   if (within(layout.soundButton)) return { type: "sound" };
   if (within(layout.testModeButton)) return { type: "testMode" };
-
-  const positionHit = layout.positionButtons.find(within);
-  if (positionHit) return { type: "position", value: positionHit.value };
 
   return null;
 };

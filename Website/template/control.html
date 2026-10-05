@@ -24,21 +24,22 @@
     </section>
 
     <section>
-        <h2>Holes <small>green mole · blue hat mole · red bomb · cyan cursor</small></h2>
+        <h2>Holes <small>green mole · blue hat mole · red bomb · cyan the sensors' cursor</small></h2>
         <div id="pad"></div>
         <div class="coord">
             <div><span>Sensor (x, y) cm</span><b id="coordXY">--</b></div>
             <div><span>Sensors</span><b id="coordState">--</b></div>
         </div>
         <div id="methodFixes" class="fixes"></div>
-        <p class="note">x runs across from screen-left (0-150 cm), y out from the screen. Rings: where each
-            method puts the player, as Compare draws them on the game board; the bold one moves the cursor.</p>
+        <p class="note">x runs across from screen-left (0-150 cm), y out from the screen. Rings (Compare):
+            where each method puts the player; the bold one moves the cursor. The game board only draws the
+            one cursor. While your finger is on the pad it has the game's cursor, and the sensors' cursor, the
+            rings and the game's panels carry on as before.</p>
     </section>
 
     <section>
-        <h2>Input</h2>
+        <h2>Input <small>a finger on the pad takes over from either</small></h2>
         <div class="row">
-            <button data-mode="remote">Remote</button>
             <button data-mode="sensor">Sensors</button>
             <button data-mode="mouse">Mouse</button>
         </div>
@@ -48,6 +49,7 @@
         <h2>Placing the player <small>sensor mode</small></h2>
         <div class="row" id="position"></div>
         <div class="row">
+            <button id="compareBtn" data-action="compare">Compare: on</button>
             <button id="kalmanBtn" data-action="kalman">Kalman: on</button>
         </div>
         <p class="note">Kalman off: each node's distance goes median → FFT, and line of sight puts the
@@ -72,7 +74,7 @@
     <section>
         <h2>Game</h2>
         <div class="grid2">
-            <button data-action="start" data-start-mode="remote" class="primary">Start remote round</button>
+            <button data-action="start" data-start-mode="sensor" class="primary">Start sensor round</button>
             <button data-action="start" data-start-mode="mouse">Start mouse round</button>
             <button id="pauseBtn" data-action="pause">Pause</button>
             <button data-action="restart">Restart</button>
@@ -121,26 +123,27 @@
             }
         }
 
-        // The pad is a touchpad: while a finger is down the game switches to
-        // remote input and the cursor follows it smoothly; lifting hands control
-        // back to the sensors. Positions go out at most once per animation
+        // The pad is a touchpad: while a finger is down it has the game's
+        // cursor, which follows it smoothly, on top of whichever mode is
+        // running; lifting hands the cursor back. Positions go out at most once per animation
         // frame so a fast drag does not flood the socket, and a still finger
         // re-sends every HEARTBEAT_MS so the game knows it is still held.
         const finger = document.createElement("div");
         finger.id = "finger";
         pad.appendChild(finger);
 
-        // The game's own cursor, mirrored from game:status: in sensor mode
-        // that is where the sensors put the player. Hidden while a finger is
-        // down, because then it is only a delayed copy of the finger.
+        // The cursor mirrored from game:status. In sensor mode it is the
+        // sensors' own, where they put the player, finger or not; in mouse
+        // mode the game's, hidden while a finger is down, because then it is
+        // only a delayed copy of the finger.
         const gameCursor = document.createElement("div");
         gameCursor.id = "gameCursor";
         pad.appendChild(gameCursor);
 
-        // Compare, as on the game board: a ring for where line of sight,
-        // trilateration and the average put the player, in the game's colours.
-        // The cursor above follows the one placing the player (with Dynamic on,
-        // the one Dynamic follows), eased; the rings are where each is right now.
+        // Compare: a ring for where line of sight, trilateration and the
+        // average put the player, in the game's colours. The cursor above
+        // follows the one placing the player (with Dynamic on, the one Dynamic
+        // follows), eased; the rings are where each is right now.
         const METHOD_STYLES = {
             los: { short: "LOS", colour: "#22d3ee" },
             tri: { short: "TRI", colour: "#e879f9" },
@@ -187,8 +190,6 @@
             pad.setPointerCapture(e.pointerId);
             dragging = true;
             finger.classList.add("down");
-            gameCursor.classList.remove("on");
-            Object.values(rings).forEach((ring) => ring.classList.remove("on"));
             queuePoint(e);
             clearInterval(heartbeat);
             heartbeat = setInterval(() => {
@@ -235,16 +236,19 @@
                 if (action === "testMode") return send({ action, enabled: !(game && game.testMode) });
                 // On until the game says otherwise, so the first press turns it off.
                 if (action === "kalman") return send({ action, enabled: Boolean(game) && game.kalman === false });
+                if (action === "compare") return send({ action, enabled: Boolean(game) && game.compare === false });
                 if (action === "pause" && game && game.status === "paused") return send({ action: "resume" });
                 send({ action });
             });
         });
 
-        // The position switch: how the sensors place the player - Dynamic (the
-        // steadiest of the other three), line of sight, trilateration or their
-        // average. The game sends the methods it
-        // has, and the one in use, with its status, so a new method shows up
-        // here without changing this page.
+        // The position switch, which the game no longer draws: how the sensors
+        // place the player - Dynamic (the steadiest of the other three, or one
+        // of its rules), line of sight, trilateration or their average. The
+        // game sends the methods it has, and the one in use, with its status,
+        // so a new method shows up here without changing this page. While
+        // Dynamic is on its button says what it is following, as the game's
+        // own button did (dynamicFollowing: LOS, TRI, AVG, MID, L or R).
         const DEFAULT_POSITION_METHODS = [
             { id: "dyn", label: "Dynamic" },
             { id: "los", label: "Line of sight" },
@@ -263,6 +267,7 @@
                 methods.forEach((m) => {
                     const btn = document.createElement("button");
                     btn.dataset.method = m.id;
+                    btn.dataset.label = m.label;
                     btn.textContent = m.label;
                     btn.addEventListener("click", () => send({ action: "position", method: m.id }));
                     box.appendChild(btn);
@@ -270,6 +275,8 @@
             }
             box.querySelectorAll("[data-method]").forEach((btn) => {
                 btn.classList.toggle("selected", Boolean(game) && btn.dataset.method === game.positionMethod);
+                const following = btn.dataset.method === "dyn" && game && game.dynamicFollowing;
+                btn.textContent = following ? `${btn.dataset.label} (${following})` : btn.dataset.label;
             });
         }
 
@@ -322,13 +329,15 @@
             renderPositionMethods();
             renderLostReadings();
             $("screen").textContent = game.screen;
-            $("mode").textContent = game.mode;
+            $("mode").textContent = game.remote ? `${game.mode} + pad` : game.mode;
             $("score").textContent = game.score;
             $("lives").textContent = game.lives;
             $("time").textContent = `${Math.ceil(game.remainingMs / 1000)}s`;
             $("status").textContent = game.status;
             $("pauseBtn").textContent = game.status === "paused" ? "Resume" : "Pause";
             $("testBtn").textContent = `Test mode: ${game.testMode ? "on" : "off"}`;
+            $("compareBtn").textContent = `Compare: ${game.compare === false ? "off" : "on"}`;
+            $("compareBtn").classList.toggle("selected", game.compare !== false);
             $("kalmanBtn").textContent = `Kalman: ${game.kalman === false ? "off" : "on"}`;
             $("kalmanBtn").classList.toggle("selected", game.kalman === false);
             document.querySelectorAll("[data-mode]").forEach((btn) => {
@@ -357,21 +366,21 @@
         const SOURCE_LABELS = { both: "both", left: "left only", right: "right only" };
         const cm = (v) => v.toFixed(1);
 
-        // Mirrors the game's cursor onto the pad and, in sensor mode, shows
-        // where the sensors put the player. A position off the board is pinned
-        // to its edge on the pad; the numbers stay exact.
+        // Mirrors the cursor onto the pad and, in sensor mode, shows where the
+        // sensors put the player - also while a finger has the game's cursor.
+        // A position off the board is pinned to its edge on the pad; the
+        // numbers stay exact.
         function renderCursor() {
             const cursor = game && game.cursor;
-            const board = cursor && cursor.board;
-            const show = Boolean(board) && !dragging && game.mode !== "remote";
-            gameCursor.classList.toggle("on", show);
-            if (show) {
+            const sensor = cursor && cursor.sensor;
+            const board = sensor ? sensor.board : cursor && !dragging && !game.remote ? cursor.board : null;
+            gameCursor.classList.toggle("on", Boolean(board));
+            if (board) {
                 const clamp = (v) => Math.min(1, Math.max(0, v));
                 gameCursor.style.left = `${clamp(board.nx) * 100}%`;
                 gameCursor.style.top = `${clamp(board.ny) * 100}%`;
             }
 
-            const sensor = cursor && cursor.sensor;
             gameCursor.classList.toggle("held", Boolean(sensor && sensor.held));
             renderRings(sensor);
             renderMethodFixes(sensor);
@@ -390,11 +399,11 @@
             $("coordState").textContent = state;
         }
 
-        // The rings, while Compare is on in a sensor round and no finger is
-        // down. A ring off the board is pinned to its edge, as the cursor is.
+        // The rings, while Compare is on in a sensor round, finger or not. A
+        // ring off the board is pinned to its edge, as the cursor is.
         function renderRings(sensor) {
             const fixes = (sensor && sensor.fixes) || {};
-            const show = Boolean(sensor && sensor.compare) && !dragging && game.mode === "sensor";
+            const show = Boolean(sensor && sensor.compare);
             Object.entries(rings).forEach(([method, ring]) => {
                 const fix = fixes[method];
                 const on = show && Boolean(fix) && fix.nx != null && fix.ny != null;
@@ -665,6 +674,7 @@
 
     .row { display: flex; gap: 8px; }
     .row button { flex: 1; }
+    .row + .row { margin-top: 8px; }
     .stepper { flex: 0 0 64px; align-self: center; text-align: center; font-size: 22px; }
 
     .grid2 {

@@ -1557,6 +1557,10 @@ class ControlPanelTests(BrokerTestCase):
         sent = self.relayed({"action": "position", "method": "tri"})
         self.assertEqual(sent, [{"action": "position", "method": "tri", "type": "remote:command"}])
 
+    def test_the_compare_switch_is_relayed_to_the_game(self):
+        sent = self.relayed({"action": "compare", "enabled": False})
+        self.assertEqual(sent, [{"action": "compare", "enabled": False, "type": "remote:command"}])
+
     def test_the_kalman_switch_is_relayed_to_the_game(self):
         sent = self.relayed({"action": "kalman", "enabled": False})
         self.assertEqual(sent, [{"action": "kalman", "enabled": False, "type": "remote:command"}])
