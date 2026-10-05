@@ -24,9 +24,29 @@ Each ESP32 is a servo scanner (`src/Scanner.cpp`; every pin and setting is in `s
 - `angle` is the servo angle the pair was read at: 90 points straight out into the play area, larger turns towards screen-left
 - `scanState` is `0` found (both readings agree), `1` half-found (one sees the player), `2` lost (sweeping)
 
-The server sends control lines back: `SYNC <tick>`, `TURN` / `HALT`, `ROLE LEFT` / `ROLE RIGHT` once the game's calibration screen has identified the node (again whenever it reconnects), which sets that mount's servo limits, and `AIM 90` / `SCAN` while the calibration screen is open / after it closes, `PULSES <n>` (multi-pulse, below), and `LOOK <deg>` (handover, below). A node boots holding its servo at 90 and sweeps only once told `SCAN`; the server sends `AIM 90` or `SCAN` the moment a node connects, so one that reboots mid-calibration never moves.
+The server sends control lines back: `SYNC <tick>`, `TURN` / `HALT`, `ROLE LEFT` / `ROLE RIGHT` once the game's calibration screen has identified the node (again whenever it reconnects), which sets that mount's servo limits, and `AIM 90` / `SCAN` while the calibration screen is open / after it closes, `PULSES <n>` (multi-pulse, below), `LOOK <deg>` (handover, below), and `FARHOLD <0|1>` / `FARSTEER <0|1>` (far hold and far steer, below). A node boots holding its servo at 90 and sweeps only once told `SCAN`; the server sends `AIM 90` or `SCAN` the moment a node connects, so one that reboots mid-calibration never moves.
 
 **Multi-pulse** is the `PULSES <n>` command: in found or half-found, the node takes `n` pulse pairs at one angle (1 = off, the default; at most 5), averages each sensor's readings with outliers left out, and only then reports one reading and moves. A lost pair still sweeps straight away. "Outliers" means: pulses with no echo are skipped, echoes outside the play area are skipped if any pulse saw the player inside it, then an echo more than `OUTLIER_TOLERANCE_CM` (20 cm) from the median is dropped (for two echoes that disagree, the nearer one is kept), and the rest are averaged. It is switched with the **Pulses** button on the game screen (top right: Off, 2, 3), which sends `{"type": "nodes:pulses", "count": 3}`; the server passes the count on to every node, and again to each node as it connects. With multi-pulse on, a node reports about once every `n` pairs while it has the player, instead of after every pair.
+
+**Far hold and far steer** are two server → node lines, `FARHOLD <0|1>` and `FARSTEER <0|1>` (`src/CommandHandler.cpp`): `1` turns the setting on, `0` off. Far hold: after an echo at least `FAR_RANGE_CM` (100 cm) out, a lost pair keeps the servo where it is, for up to `FAR_HOLD_PAIRS` (3) lost pairs in a row, before the sweep starts. Far steer: a half-found echo that far out steers by `FAR_STEER_STEP_DEG` (1 degree) instead of `STEER_STEP_DEG` (3). Both are on in the firmware until the server says otherwise (`DEFAULT_FAR_HOLD`, `DEFAULT_FAR_STEER` in `src/Config.h`) and on in the server (`nodes_far` in `app.py`), which sends both lines to every node as it connects, and the changed one to every connected node when a switch changes:
+
+```text
+FARHOLD 1
+FARSTEER 0
+```
+
+They are switched with **Far hold** and **Far steer** on the phone control panel (`/control`, `CON=1`, under *Sensors*). Those buttons go straight to the server, so they work with no game page open; `enabled` (boolean) is the new setting, and anything that is not `true` or `false` is ignored:
+
+```json
+{"action": "farHold",  "enabled": false}
+{"action": "farSteer", "enabled": true}
+```
+
+The server answers every control panel with `far:status` (server → control panel), and sends it to each panel as it connects; `hold` and `steer` (booleans) are the two settings as the server holds them, and the panel's buttons show them:
+
+```json
+{"type": "far:status", "hold": true, "steer": false}
+```
 
 **Handover** (`Website/handover.py`): when one node has seen the player in one place for 5 s, the server aims the other node at them. A node's confidence is the share of its readings in the last 5 s that land inside the play area within 20 cm of their median point; dropped echoes count against it. It is confident at 80% or more, once it has been reporting for 5 s. While one node is confident and the other is not seeing the player there, the server sends the other `LOOK <deg>`, the bearing from it to that point. It is only ever sent while that node does not hold the turn, and is sent again whenever the bearing moves by more than 5 degrees, until the node's own reading agrees (within 30 cm). `LOOK` is not a hold: the node turns there and tracks, steers and sweeps from that angle as usual, after waiting out the swing (`LOOK_SETTLE_MS_PER_DEG`). Every node's confidence, the ± spread of its points and which node it is following go out in `nodes:update` as `confidence`, and the phone control panel shows them in its Sensors table. `HANDOVER=0 python Website/app.py` keeps the confidence but sends no `LOOK`; the control panel's Handover switch (Sensors) does the same while the server runs, and the server tells the panel which it is (`handover:status`). With the empty-room firmware, a node learning the room is never aimed, and one whose room is not learnt yet never counts as confident, because a chair is the steadiest "player" there is.
 
@@ -59,7 +79,7 @@ build_flags =
 
 The game puts each node on the screen edge at the centre of an outer column. How the player is placed is switched on the phone's `/control` page only (Aaron, 5 Oct; the game board draws one cursor and no buttons): **Dynamic** (the default), **Line of sight**, **Trilateration** or **Average**, under *Placing the player*. Picking one of the last three turns Dynamic off. With Dynamic on, its button says which one it is following (e.g. `Dynamic (TRI)`), or which of its rules is placing the player: `FAR` (far priority: both nodes read past 110 cm and agree), `A1` / `A3` (the near node in its far corner), `MID`, `COL L` / `COL R` (the column lock: where the two servo lines cross) or `L` / `R` (a lone confident node); each rule has its own switch under *Dynamic's rules*. **Compare**, beside it, rings where line of sight, trilateration and the average put the player (LOS, TRI, AVG) on the control panel's pad, while the cyan cursor follows the one placing the player (the thick ring). The game's sensor panel lists all three positions. See *Placing the player* under the filtering pipeline. With no `angle` from either node there is no line of sight, and every method is trilateration.
 
-**Out of bounds** appears in one case only: both nodes are lost (Aaron, 5 Oct). Each node's last *n* readings are scored as the control panel shows them - *found* +1, *half* 0, *lost* -1 - and a node whose scores add up to 0 or less is lost, so the odd found reading among lost ones does not stop it, and a node mostly finding the player never is. *n* is 8 by default; set it on the phone control panel under *Out of bounds* (minus and plus), which also shows each node's score now. The game keeps it in that browser, and passes it to the server when `SERVER_FILTERING` is on. Each reading counts once, when it arrives; a node waiting for its turn keeps the readings of its last one, and a node is not lost until it has had *n* readings in the round. A position off the board keeps the player on the edge square, a tenth of a square inside the edge (`EDGE_INSET`), and the game carries on; the sensor panel says `off board: edge`. Unusable readings are ridden out on the last square for as long as they last. If neither node sends anything for 5 s (`tuneSensor({ offlineMs })`), or the server says both are offline, the game says **Sensors offline** instead and the round waits. Waiting for a first position shows no message.
+**Out of bounds** appears in one case only: both nodes are lost (Aaron, 5 Oct). Each node's last *n* readings are scored as the control panel shows them - *found* +1, *half* 0, *lost* -1 - and a node whose scores add up to 0 or less is lost, so the odd found reading among lost ones does not stop it, and a node mostly finding the player never is. *n* is 21 by default; set it on the phone control panel under *Out of bounds* (minus and plus), which also shows each node's score now. The game keeps it in that browser, and passes it to the server when `SERVER_FILTERING` is on. Each reading counts once, when it arrives; a node waiting for its turn keeps the readings of its last one, and a node is not lost until it has had *n* readings in the round. A position off the board keeps the player on the edge square, a tenth of a square inside the edge (`EDGE_INSET`), and the game carries on; the sensor panel says `off board: edge`. Unusable readings are ridden out on the last square for as long as they last. If neither node sends anything for 5 s (`tuneSensor({ offlineMs })`), or the server says both are offline, the game says **Sensors offline** instead and the round waits. Waiting for a first position shows no message.
 
 The board is drawn with the row **nearest the screen at the top**, so stepping towards the screen moves the cursor up. Only the drawing is flipped (`boardRow()` in `game.js`, one switch, `NEAR_ROW_AT_TOP`): grid row `gy = 0` is still the row nearest the screen everywhere else, and left/right is unchanged. The phone control panel's touchpad maps onto the board as drawn. A finger on it takes the game's cursor over from whichever mode is running (sensors or mouse) and lifting it hands the cursor straight back; nothing else on the game screen changes (Aaron, 5 Oct). The sensors keep running underneath - the sensor panel, LIVE STATS and LIVE DATA carry on - but while the finger is down they cannot hold the round, put up Out of bounds or Sensors offline, or raise the too-close alert, and only the finger's cursor scores. There is no Remote mode any more: the panel's *Input* row is Sensors and Mouse, and *Start sensor round* replaces *Start remote round*.
 
@@ -114,6 +134,56 @@ does any more, so the server keeps its default bounds. Each is sent again
 only if it changes or the socket reconnects, because `sensors:assign` resets
 the server's filters. `perColumn` is sent as captured; the server applies the
 same shallow-column fallback as `getBounds()`.
+
+The game also passes the control panel's filter switches on to the server,
+so the server's chain filters the way the game does. Each goes browser →
+server (`syncServerFilterSetup()` in `canvas.js`), only while the server
+reports the flag on, whenever the switch changes, and again after the socket
+reconnects (a restarted server has forgotten them):
+
+```json
+{"type": "filter:kalman",         "on": false}
+{"type": "filter:deadZone",       "on": true}
+{"type": "filter:cellDecision",   "on": true}
+{"type": "filter:trackMoving",    "on": true}
+{"type": "filter:cellConfidence", "on": false}
+{"type": "sensor:farHalf",        "on": true}
+{"type": "sensor:dynamicRules",   "rules": {"farPriority": true, "confidenceNode": true, "columnLock": false, "loneNode": true, "cornerNode": true}}
+```
+
+The control panel never sends these itself. Its button sends
+`{"action": "<action>", "enabled": true|false}` to the server, which relays it
+to every game page as `remote:command`; the game sets its own switch and then
+sends the message above. Dynamic's rule buttons send
+`{"action": "dynamicRules", "rules": {"<switch>": true|false}}`, only the
+switch pressed; the game's `sensor:dynamicRules` carries all five. The server
+applies each one to its chain (`apply_filter_event()` in `app.py`, the setters
+in `serverFilter.py`); a message without its field is ignored, and so is a
+`sensor:dynamicRules` with an unknown switch or a value that is not `true` or
+`false`. A `sensor:dynamicRules` changes only the switches it names.
+
+| Message | Field | `/control` switch (section) | Panel `action` | Default | Server side |
+|---|---|---|---|---|---|
+| `filter:kalman` | `on` (boolean) | Kalman (*Placing the player*) | `kalman` | on | `set_kalman()`, `FilterConfig.kalman` |
+| `filter:deadZone` | `on` (boolean) | Dead zone (*Too close*) | `deadZone` | on | `set_dead_zone()`, `FilterConfig.dead_zone` |
+| `filter:cellDecision` | `on` (boolean) | Cell decision (*Placing the player*) | `cellDecision` | on | `set_cell_decision()`, `FilterConfig.cell_decision` |
+| `filter:trackMoving` | `on` (boolean) | Tracking (*Placing the player*) | `trackMoving` | off | `set_track_moving()`, `FilterConfig.track_moving` |
+| `filter:cellConfidence` | `on` (boolean) | Cell confidence (*Placing the player*) | `cellConfidence` | on | `set_cell_confidence()`, `FilterConfig.cell_confidence` |
+| `sensor:farHalf` | `on` (boolean) | Far half (*Out of bounds*) | `farHalf` | on | `set_far_half()`, `FilterConfig.far_half` |
+| `sensor:dynamicRules` | `rules` (object: `farPriority`, `confidenceNode`, `columnLock`, `loneNode`, `cornerNode`, each boolean) | Far priority, Confidence, Far corners, Column lock, Lone node (*Dynamic's rules*) | `dynamicRules` | all on | `set_dynamic_rules()`, `FilterConfig.far_priority`, `confidence_node`, `column_lock`, `lone_node`, `corner_node` |
+
+What each switches, from the game's `tuning` comments in `game.js` (the
+Python copy is the `FilterConfig` field named). **Kalman**: see *Kalman
+switch* below. **Dead zone**: on, a node's raw reading is too close when its
+point along the servo line is in the 10 cm strip at the front of the grid;
+off, the raw reading itself is checked, whatever the angle. **Cell
+decision**: on, the cell is decided by the margin, the dwell and each node
+against itself; off, by the older majority vote. **Tracking**: while the
+player is moving, the cell decision follows them with a shorter dwell.
+**Cell confidence**: the cell decision uses how sure the game is that the
+player has stood in each cell. **Far half**: a half reading whose own point
+is in the back row scores +1 towards Out of bounds, as found does.
+**Dynamic's rules**: see *Placing the player* below.
 
 ## Filtering pipeline (`Website/filterRules.py`)
 
