@@ -447,6 +447,14 @@ class StagePathPrediction(unittest.TestCase):
         self.assertEqual(self.stage.predicted_cm, [None, None, None])
         self.assertFalse(any(t.alive for t in self.predictor.trackers))
 
+    def test_a_new_round_resets_the_chain_but_keeps_the_slots(self):
+        self.ramp(LEFT, 5)
+        self.stage.new_round()
+        self.assertIsNone(self.stage.latest)
+        self.assertEqual(self.stage.predicted_cm, [None, None, None])
+        self.assertFalse(any(t.alive for t in self.predictor.trackers))
+        self.assertEqual(self.stage.sensor_slots, [LEFT, CENTRE, RIGHT])
+
     def test_coordinate_is_unchanged_by_the_trackers(self):
         # The trackers only publish: the chain's result is exactly what the
         # pipeline gives on its own, including the raw-reading too-close alert.

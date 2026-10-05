@@ -438,6 +438,14 @@ class AppSearchTests(BrokerTestCase):
             app.apply_search_event({"type": "cells:confidence", "scores": [1, 2]})
         self.assertIn("Ignored bad cells:confidence", printed.call_args.args[0])
 
+    def test_a_new_round_restarts_the_server_side_chain(self):
+        chain = mock.Mock()
+        with mock.patch.object(app, "server_filter", chain):
+            app.apply_search_event({"type": "round:start"})
+        chain.new_round.assert_called_once_with()
+        with mock.patch.object(app, "server_filter", None):
+            app.apply_search_event({"type": "round:start"})
+
     def test_game_status_reaches_the_search_from_the_browser(self):
         message = json.dumps({"type": "game:status", "cursor": a_round(MIDDLE_CENTRE)})
         with mock.patch.object(app, "server_filter", None):

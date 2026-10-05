@@ -1020,13 +1020,17 @@ def note_game_status(cursor):
 def apply_search_event(event):
     """The game's cell confidence map (cells:confidence, nine scores, index
     gx * 3 + gy), a new round (round:start) or the corner calibration
-    (calibration:update), for the search."""
+    (calibration:update), for the search; a new round restarts the
+    server-side chain too."""
     try:
         with state_lock:
             if event.get("type") == "cells:confidence":
                 search.set_scores(event["scores"])
             elif event.get("type") == "round:start":
+                # The browser starts its chain afresh too (resetSensorFilters()).
                 search.reset()
+                if server_filter is not None:
+                    server_filter.new_round()
             elif event.get("type") == "calibration:update":
                 search.set_calibration([(c["near"], c["far"]) for c in event["perColumn"]])
     except (KeyError, TypeError, ValueError) as exc:

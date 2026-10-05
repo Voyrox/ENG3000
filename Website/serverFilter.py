@@ -170,6 +170,16 @@ class ServerFilterStage:
         right as captured, the centre derived by the browser."""
         self.pipeline.set_area(PlayArea.calibrated(per_column))
 
+    def new_round(self) -> None:
+        """A round starts (the game's round:start): the chain starts afresh, as
+        the browser's does (resetSensorFilters() in game.js), but keeps the
+        sensor slots, the calibration, every switch and each node's latest
+        reading."""
+        self.pipeline.reset()
+        self.predictor.reset()
+        self.latest = None
+        self.predicted_cm = [None] * GRID_SIZE
+
     def on_missing(self, node_id) -> None:
         """A node went offline: its channel has no reading from now on, and
         its track is dropped rather than extrapolated."""
