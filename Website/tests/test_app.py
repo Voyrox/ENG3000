@@ -626,6 +626,30 @@ class ReadingPipelineTests(BrokerTestCase):
         self.assertEqual(node["filtered_distance"], 50.0)
         self.assertNotIn(-1.0, node["median_samples"])
 
+    def test_a_non_finite_reading_leaves_the_distance_alone(self):
+        """NaN or +/-inf is missing, like no echo: it never enters the median
+        window, where it would turn the median and the Kalman's input NaN."""
+        for bad in (float("nan"), float("inf"), float("-inf"), "nan", "inf", "-inf"):
+            with self.subTest(bad=bad):
+                _, node = self.add_node()
+                t = self.feed_at(node, [50.0] * 3)
+                window = list(node["median_samples"])
+                history = list(node["distance_samples"])
+                app.update_distance(node, {"avg": bad}, t)
+                self.assertEqual(node["filtered_distance"], 50.0)
+                self.assertEqual(list(node["median_samples"]), window)
+                self.assertEqual(list(node["distance_samples"]), history)
+
+    def test_a_non_finite_json_reading_leaves_the_distance_alone(self):
+        """Python's json reads the NaN and Infinity literals a node could send."""
+        node_id, node = self.add_node()
+        app.update_node(node_id, '{"avg":7}')
+        for bad in ('{"avg":NaN}', '{"avg":Infinity}', '{"avg":-Infinity}'):
+            with self.subTest(bad=bad):
+                app.update_node(node_id, bad)
+                self.assertEqual(node["filtered_distance"], 7.0)
+                self.assertEqual(list(node["median_samples"]), [7.0])
+
     def test_a_gap_starts_the_windows_again(self):
         """A node that waited out the other node's turn starts afresh rather
         than blending where the player was a second ago into where they are."""

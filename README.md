@@ -141,7 +141,21 @@ median's output rather than replacing it.) Tunables, all named constants
 in `tracking.py` / `serverFilter.py`: process noise 400 cm/s², measurement
 noise 0.91 cm, track dropped after 0.5 s without a reading (or when its node
 goes offline), extrapolation capped at 250 ms, extra display lead 0 s until
-the end-to-end latency is measured. Tests are in
+the end-to-end latency is measured.
+Hardening, so one bad reading cannot run away with a track: a NaN or ±inf
+reading is missing, like no echo (`app.py` keeps it out of the node's median
+window too); the 250 ms lead cap counts from the last accepted reading, so a
+run of no-echo readings cannot push a prediction further; and a distance
+channel's output is clamped to [0, 400] cm (`DEFAULT_MAX_RANGE_CM`), while a
+signed channel (`negative_is_missing` off, e.g. an x coordinate) is not.
+`PathPredictor` feeds its trackers raw readings, so it also turns on a spike
+gate - a reading whose normalised innovation squared is above 6.63
+(`DEFAULT_NIS_GATE`, χ² 99 %, 1 degree of freedom) is dropped, unless 3 gated
+readings in a row agree to within 20 cm (`REACQ_READINGS`,
+`REACQ_SPREAD_CM`), which restarts the track on the latest (the player really
+moved) - and a velocity limit of 300 cm/s (`DEFAULT_V_MAX_CM_S`). Both stay
+off in the filtering chain's Kalman stage, for parity with `game.js`'s
+`kalmanUpdate()`. Tests are in
 `Website/tests/test_tracking.py` and `Website/tests/test_serverFilter.py`.
 
 ### Placing the player: Dynamic, line of sight, trilateration, average
