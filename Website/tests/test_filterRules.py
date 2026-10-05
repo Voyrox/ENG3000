@@ -38,6 +38,7 @@ from filterRules import (  # noqa: E402
     DYNAMIC_RULE_SWITCHES,
     DynamicPicker,
     FilterConfig,
+    GRID_LENGTH_CM,
     LOST_READINGS_MAX,
     MajorityWindowHold,
     OFF_BOARD,
@@ -46,6 +47,7 @@ from filterRules import (  # noqa: E402
     StreakHold,
     TwoSensorGeometry,
     UltrasonicArrayGeometry,
+    angle_limit_cm,
     body_centre_cm,
     fft_lowpass_last,
     in_beam,
@@ -53,6 +55,7 @@ from filterRules import (  # noqa: E402
     line_of_sight,
     lost_score,
     scanner_point,
+    within_angle_limit,
 )
 from tracking import ConstantVelocityTracker  # noqa: E402
 
@@ -76,6 +79,7 @@ class ParityWithGameJs(unittest.TestCase):
         # Dynamic's rule switches, as the run set them (setDynamicRules()).
         switches = run.get("dynamicRules") or {}
         config = FilterConfig(kalman=run.get("kalman", True),
+                              angle_limit=run.get("angleLimit", True),
                               **{DYNAMIC_RULE_SWITCHES[name]: on for name, on in switches.items()})
         pipeline = CoordinatePipeline(TwoSensorGeometry(method=run["method"]), area=area,
                                       config=config)
@@ -147,6 +151,12 @@ class ParityWithGameJs(unittest.TestCase):
 
     def test_dynamic_with_the_kalman_off(self):
         self.assertGreater(self._replay("kalmanOffDynamic"), 0)
+
+    def test_line_of_sight_with_the_angle_limit_off(self):
+        self.assertGreater(self._replay("angleLimitOff"), 0)
+
+    def test_dynamic_with_the_angle_limit_off(self):
+        self.assertGreater(self._replay("angleLimitOffDynamic"), 0)
 
     def test_the_kalman_switch_changes_the_recorded_stream(self):
         # Otherwise the two runs above would not show the switch doing anything.
@@ -915,7 +925,9 @@ class TwoSensorGeometryBehaviour(unittest.TestCase):
         # Every method, each on its own geometry (a line-of-sight track would
         # carry over). 80 cm (95 to the player's middle) from the left scanner
         # at 50 degrees: x = 25 - 95 sin 40 = -36, kept a tenth of a column
-        # (5 cm) inside the left edge.
+        # (5 cm) inside the left edge. With the angle limit off: on, line of
+        # sight drops both readings (the next test).
+        self.config = FilterConfig(angle_limit=False)
         for method in ("los", "tri", "avg"):
             left = self.scan([(80.0, 50), None, None], geometry=TwoSensorGeometry(method=method))
             self.assertEqual(left.status, STATUS_OK, method)
@@ -924,6 +936,16 @@ class TwoSensorGeometryBehaviour(unittest.TestCase):
             right = self.scan([None, None, (80.0, 130)], geometry=TwoSensorGeometry(method=method))
             self.assertEqual(right.status, STATUS_OK, method)
             self.assertEqual((right.x_cm, right.column), (145.0, 2), method)
+
+    def test_the_angle_limit_drops_those_readings_for_line_of_sight_only(self):
+        # 80 cm from the left node at 50 degrees, where its line leaves the
+        # grid after 38.9 cm: past the limit. Line of sight has nothing;
+        # trilateration ignores the limit, and the average follows it.
+        fix = self.scan([(80.0, 50), None, None], geometry=TwoSensorGeometry(method="los"))
+        self.assertEqual(fix.status, STATUS_NO_SIGNAL)
+        for method in ("tri", "avg"):
+            fix = self.scan([(80.0, 50), None, None], geometry=TwoSensorGeometry(method=method))
+            self.assertEqual((fix.status, fix.x_cm, fix.column), (STATUS_OK, 5.0, 0), method)
 
     def test_just_inside_the_side_edge_is_in_bounds(self):
         # 80 cm (95 to the middle) from the left scanner at 75 degrees:
@@ -1415,6 +1437,67 @@ class CartesianGeometryBehaviour(unittest.TestCase):
         self.pipe = CoordinatePipeline(CartesianGeometry(),
                                        config=FilterConfig(hold_readings=0))
         self.assertEqual(self.pipe.update(None, 0).status, STATUS_NO_SIGNAL)
+
+
+class AngleLimit(unittest.TestCase):
+    """The angle limit (Aaron, 5 Oct): on the 150 x 160 cm grid, a node's
+    filtered distance further than its servo line runs on the grid (+5 cm)
+    is not a player; line of sight and Dynamic's node rules drop it, and
+    trilateration ignores it."""
+
+    def test_the_limit_is_where_the_servo_line_leaves_the_grid(self):
+        self.assertEqual(GRID_LENGTH_CM, 160.0)
+        self.assertEqual(angle_limit_cm(25.0, 90), 160.0)
+        self.assertEqual(angle_limit_cm(25.0, None), 160.0)
+        self.assertAlmostEqual(angle_limit_cm(25.0, 70), 73.1, places=1)    # left wall
+        self.assertAlmostEqual(angle_limit_cm(25.0, 40), 32.6, places=1)    # its servo's limit
+        self.assertAlmostEqual(angle_limit_cm(25.0, 120), 184.8, places=1)  # far edge
+        self.assertAlmostEqual(angle_limit_cm(25.0, 150), 144.3, places=1)  # right wall
+        corner = 90 + math.degrees(math.atan2(125.0, 160.0))                 # the far right corner
+        self.assertAlmostEqual(angle_limit_cm(25.0, corner), math.hypot(125.0, 160.0), places=6)
+        # The right node is the left one mirrored.
+        for angle in (30, 52, 75, 90, 99, 110, 140):
+            self.assertAlmostEqual(angle_limit_cm(125.0, angle), angle_limit_cm(25.0, 180 - angle),
+                                   places=9)
+
+    def test_a_reading_up_to_five_cm_past_it_still_counts(self):
+        area, config = PlayArea.default(), FilterConfig()
+        limit = angle_limit_cm(25.0, 70)
+        self.assertTrue(within_angle_limit(25.0, limit + 4.99, 70, area, config))
+        self.assertFalse(within_angle_limit(25.0, limit + 5.01, 70, area, config))
+        self.assertTrue(within_angle_limit(25.0, 400.0, 70, area, FilterConfig(angle_limit=False)))
+
+    def test_a_servo_line_past_the_limit_does_not_lock_the_centre(self):
+        # The 4 Oct centre-test angles (141 and 49) cross in the centre column.
+        # A left reading of 170 cm at 141 degrees is past its line's 160.8 cm
+        # (+5), so the left aim does not count and nothing locks the centre.
+        def placed(config):
+            geometry = TwoSensorGeometry()
+            area = PlayArea.default()
+            for k in range(3):
+                readings = geometry.channels([(170.0, 141, 0), None, (80.0, 49, 0)])
+                geometry.track(readings, [True] * 3, 100.0 * k, area, config)
+            return geometry.placed_by(readings, area)
+
+        self.assertEqual(placed(FilterConfig(angle_limit=False)), "centre")
+        self.assertNotEqual(placed(FilterConfig()), "centre")
+
+    def test_the_pipeline_switch_changes_only_the_angle_limit(self):
+        pipeline = CoordinatePipeline(TwoSensorGeometry(method="los"))
+        pipeline.set_angle_limit(False)
+        self.assertFalse(pipeline.config.angle_limit)
+        self.assertEqual(pipeline.config, FilterConfig(angle_limit=False))
+        pipeline.set_angle_limit(True)
+        self.assertTrue(pipeline.config.angle_limit)
+
+    def test_the_parity_runs_show_the_switch_doing_something(self):
+        with open(FIXTURE, encoding="utf-8") as fh:
+            trace = json.load(fh)
+        runs = trace["runs"]
+        at = trace["fields"].index("x")
+        changed = sum(1 for a, b in zip(runs["default"]["steps"], runs["angleLimitOff"]["steps"])
+                      if a[at] != b[at])
+        self.assertGreater(changed, 20, "line of sight should differ with the angle limit off")
 
 
 if __name__ == "__main__":

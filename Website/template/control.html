@@ -51,9 +51,13 @@
         <div class="row">
             <button id="compareBtn" data-action="compare">Compare: on</button>
             <button id="kalmanBtn" data-action="kalman">Kalman: on</button>
+            <button id="angleLimitBtn" data-action="angleLimit">Angle limit: on</button>
         </div>
         <p class="note">Kalman off: each node's distance goes median → FFT, and line of sight puts the
             player at the newest reading, with no gate. The servos do not use it.</p>
+        <p class="note">Angle limit on: a node's reading further than its servo line runs on the
+            150 × 160 cm grid (+5 cm) is dropped by line of sight and Dynamic's rules;
+            trilateration still uses it.</p>
     </section>
 
     <section>
@@ -279,6 +283,7 @@
                 if (action === "testMode") return send({ action, enabled: !(game && game.testMode) });
                 // On until the game says otherwise, so the first press turns it off.
                 if (action === "kalman") return send({ action, enabled: Boolean(game) && game.kalman === false });
+                if (action === "angleLimit") return send({ action, enabled: Boolean(game) && game.angleLimit === false });
                 if (action === "compare") return send({ action, enabled: Boolean(game) && game.compare === false });
                 if (action === "pause" && game && game.status === "paused") return send({ action: "resume" });
                 send({ action });
@@ -384,6 +389,8 @@
             $("compareBtn").classList.toggle("selected", game.compare !== false);
             $("kalmanBtn").textContent = `Kalman: ${game.kalman === false ? "off" : "on"}`;
             $("kalmanBtn").classList.toggle("selected", game.kalman === false);
+            $("angleLimitBtn").textContent = `Angle limit: ${game.angleLimit === false ? "off" : "on"}`;
+            $("angleLimitBtn").classList.toggle("selected", game.angleLimit === false);
             document.querySelectorAll("[data-rule]").forEach((btn) => {
                 const on = ruleOn(btn.dataset.rule);
                 btn.textContent = `${RULE_LABELS[btn.dataset.rule]}: ${on ? "on" : "off"}`;

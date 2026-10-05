@@ -80,6 +80,9 @@
   const LEFT_SENSOR = 0;
   const RIGHT_SENSOR = 2;
   const PLAY_WIDTH_CM = 150; // matches PlayArea.width_cm in filterRules.py
+  // How long the grid is, from the nodes' edge (Aaron, 5 Oct): the angle
+  // limit's far edge. filterRules.py GRID_LENGTH_CM.
+  const GRID_LENGTH_CM = 160;
   // Hard ceiling before any calibration exists, and the deepest a calibration
   // corner can be captured at (SENSOR_LIMITS.maxCm). The nodes hear out to
   // src/Config.h's MAX_TARGET_CM, 190 cm, and a capture is the depth to the
@@ -172,6 +175,14 @@
     // see it: the nodes steer on their own readings. Python: FilterConfig
     // kalman.
     kalman: true,
+    // The angle limit (Aaron, 5 Oct): a node's filtered distance further than
+    // its servo line runs on the grid (angleLimitCm()), plus
+    // angleLimitToleranceCm, is not a player on it. Line of sight and
+    // Dynamic's node rules drop such a reading; trilateration ignores the
+    // limit. Switched on the control panel. Python: FilterConfig angle_limit,
+    // angle_limit_tolerance_cm.
+    angleLimit: true,
+    angleLimitToleranceCm: 5,
     // The smoothing after each sensor's median (see conditionSensor()).
     // kalmanSigmaA: the player's acceleration noise, cm/s^2 - higher follows a
     // lunge faster, lower smooths more. kalmanSigmaR: one reading's noise, cm.
@@ -1572,6 +1583,31 @@
     return false;
   }
 
+  // How far the servo line of the node at nodeX runs before it leaves the
+  // grid, PLAY_WIDTH_CM across and GRID_LENGTH_CM long, with the nodes on its
+  // near edge (Aaron, 5 Oct). 90 degrees is straight down the grid and a larger
+  // angle turns towards screen-right, as in scannerPoint(); no angle is
+  // straight down. filterRules.py angle_limit_cm().
+  function angleLimitCm(nodeX, angle) {
+    const phi = ((angle === null ? 90 : angle) - 90) * Math.PI / 180;
+    const across = Math.sin(phi);
+    const down = Math.cos(phi);
+    let limit = Infinity;
+    if (across > 0) limit = Math.min(limit, (PLAY_WIDTH_CM - nodeX) / across);
+    if (across < 0) limit = Math.min(limit, nodeX / -across);
+    if (down > 0) limit = Math.min(limit, GRID_LENGTH_CM / down);
+    return limit;
+  }
+
+  // Whether a node's filtered distance at its servo angle can be a player on
+  // the grid: no further than angleLimitCm() plus
+  // tuning.angleLimitToleranceCm. Always, with tuning.angleLimit off.
+  // filterRules.py within_angle_limit().
+  function withinAngleLimit(slot, distance, angle) {
+    return !tuning.angleLimit ||
+      distance <= angleLimitCm(columnCentreCm(slot), angle) + tuning.angleLimitToleranceCm;
+  }
+
   // The sensors' datasheet range (HC-SR04; the RCWL-1601 is a pin-compatible
   // copy): a distance outside it is not a reading. filterRules.py SENSOR_*_CM.
   const SENSOR_MIN_CM = 2;
@@ -1856,11 +1892,13 @@
   // new when the servo has moved, or the node has just come back for its turn;
   // after that each reading at the same aim counts for less across the line
   // (lineOfSight()). With tuning.kalman off, each reading starts the track
-  // again at its own point: no gate, nothing kept from before.
+  // again at its own point: no gate, nothing kept from before. A reading past
+  // the angle limit (withinAngleLimit()) is not used at all.
   function stepLosTrack(filtered, scans, fresh, now) {
     [LEFT_SENSOR, RIGHT_SENSOR].forEach((slot) => {
       const scan = scans[slot];
       if (!fresh[slot] || filtered[slot] === null || scan.angle === null || scan.state === SCAN_LOST) return;
+      if (!withinAngleLimit(slot, filtered[slot], scan.angle)) return;
       const newAim = losTrack.x === null || scan.angle !== losTrack.aimedAt[slot] ||
         now - losTrack.fedAt[slot] > SENSOR_HOLD_MS;
       const repeats = newAim ? 0 : losTrack.aimRepeats[slot] + 1;
@@ -2040,12 +2078,14 @@
   }
 
   // Once per update: this update's new readings. foundAt, which the
-  // confidence also reads, is noted by bothNodesLost().
+  // confidence also reads, is noted by bothNodesLost(). A reading past the
+  // angle limit counts as none: it neither builds a found streak nor aims a
+  // servo line.
   function stepDynamicRules(filtered, scans, fresh, now) {
     [LEFT_SENSOR, RIGHT_SENSOR].forEach((slot) => {
       if (!fresh[slot]) return;
       const { state, angle } = scans[slot];
-      const reading = filtered[slot] !== null;
+      const reading = filtered[slot] !== null && withinAngleLimit(slot, filtered[slot], angle);
       foundStreak[slot] = reading && state === SCAN_FOUND ? foundStreak[slot] + 1 : 0;
       if (reading && angle !== null && (state === SCAN_FOUND || state === SCAN_HALF)) {
         seenAim[slot] = { at: now, angle };
@@ -2116,11 +2156,12 @@
   }
 
   // A confident node's own reading, { x, y } - its distance along its servo
-  // line - or null when the node is not confident or that point is outside
-  // the play area.
+  // line - or null when the node is not confident, the reading is past the
+  // angle limit, or that point is outside the play area.
   function confidentPoint(slot, filtered, scans, now) {
     if (foundStreak[slot] < tuning.confidentReadings || now - foundAt[slot] > tuning.confidentMs ||
       filtered[slot] === null || scans[slot].angle === null) return null;
+    if (!withinAngleLimit(slot, filtered[slot], scans[slot].angle)) return null;
     const point = scannerPoint(columnCentreCm(slot), bodyCentreCm(filtered[slot]), scans[slot].angle);
     if (point.x < 0 || point.x > PLAY_WIDTH_CM) return null;
     const span = columnSpan(columnAtCm(point.x));
@@ -2220,6 +2261,24 @@
     tuning.kalman = Boolean(on);
     console.info(`[kalman] ${tuning.kalman ? "on" : "off"}`);
     return tuning.kalman;
+  };
+
+  // The angle limit switch, on by default; see tuning.angleLimit. Takes effect
+  // from the next reading.
+  window.getAngleLimit = function getAngleLimit() {
+    return tuning.angleLimit;
+  };
+
+  window.setAngleLimit = function setAngleLimit(on) {
+    tuning.angleLimit = Boolean(on);
+    console.info(`[angle limit] ${tuning.angleLimit ? "on" : "off"}`);
+    return tuning.angleLimit;
+  };
+
+  // How far each node's servo line runs on the grid at an angle (angleLimitCm()),
+  // for the tests and the console: slot 0 is the left node, 2 the right.
+  window.getAngleLimitCm = function getAngleLimitCm(slot, angle) {
+    return angleLimitCm(columnCentreCm(slot), angle);
   };
 
   // Which slots carry a reading not seen before. The server stamps each node's

@@ -255,7 +255,7 @@ function buildStream() {
 
 // --- Run the real JS -----------------------------------------------------------
 
-function runJs(stream, calibration, method, kalman = true, dynamicRules = null) {
+function runJs(stream, calibration, method, kalman = true, dynamicRules = null, angleLimit = true) {
   let clock = 0;
   const context = {
     console,
@@ -291,6 +291,7 @@ function runJs(stream, calibration, method, kalman = true, dynamicRules = null) 
 
   w.setPositionMethod(method);
   w.setKalman(kalman);
+  w.setAngleLimit(angleLimit);
   if (dynamicRules) w.setDynamicRules(dynamicRules);
   w.setGameInputMode("sensor");
   w.resetGame();
@@ -372,6 +373,9 @@ const trace = {
     kalmanOffDynamic: { method: "dyn", kalman: false, ...runJs(stream, null, "dyn", false) },
     // Dynamic with all three of its rules switched off: the steadiest method only.
     dynamicRulesOff: { method: "dyn", dynamicRules: RULES_OFF, ...runJs(stream, null, "dyn", true, RULES_OFF) },
+    // Line of sight and Dynamic with the angle limit off: every reading counts.
+    angleLimitOff: { method: "los", angleLimit: false, ...runJs(stream, null, "los", true, null, false) },
+    angleLimitOffDynamic: { method: "dyn", angleLimit: false, ...runJs(stream, null, "dyn", true, null, false) },
   },
 };
 

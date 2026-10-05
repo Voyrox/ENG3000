@@ -401,6 +401,7 @@ let sentCalibrationKey = null;
 let sentPositionMethod = null;
 let sentLostReadings = null;
 let sentKalman = null;
+let sentAngleLimit = null;
 let sentDynamicRules = null;
 
 function sendToServer(message) {
@@ -453,6 +454,12 @@ function syncServerFilterSetup() {
   const kalman = window.getKalman();
   if (kalman !== sentKalman && sendToServer({ type: "filter:kalman", on: kalman })) {
     sentKalman = kalman;
+  }
+
+  // The angle limit switch, so the server's chain drops the same readings.
+  const angleLimit = window.getAngleLimit();
+  if (angleLimit !== sentAngleLimit && sendToServer({ type: "filter:angleLimit", on: angleLimit })) {
+    sentAngleLimit = angleLimit;
   }
 
   // Dynamic's rule switches, so the server's chain places the player the same way.
@@ -558,6 +565,12 @@ function handleRemoteCommand(command) {
       window.setKalman(command.enabled);
       syncServerFilterSetup();
       break;
+    case "angleLimit":
+      // The angle limit: line of sight and Dynamic's node rules drop a reading
+      // further than its servo line runs on the grid, or take every one.
+      window.setAngleLimit(command.enabled);
+      syncServerFilterSetup();
+      break;
     case "dynamicRules":
       // Dynamic's rules on or off: { columnLock, loneNode, cornerNode }, only
       // the switches named.
@@ -599,6 +612,7 @@ function sendGameStatus() {
     lostReadings: window.getLostReadings(),
     lostScores: window.getLostScores(),
     kalman: window.getKalman(),
+    angleLimit: window.getAngleLimit(),
     dynamicRules: window.getDynamicRules(),
   }));
 }
@@ -659,11 +673,12 @@ function connectSocket() {
     // playing on a frozen one.
     if (serverFiltering) window.setServerCoordinate(null);
     // A restarted server has forgotten the position method, the lost
-    // readings, the Kalman switch and Dynamic's rule switches; send them
-    // again.
+    // readings, the Kalman and angle limit switches and Dynamic's rule
+    // switches; send them again.
     sentPositionMethod = null;
     sentLostReadings = null;
     sentKalman = null;
+    sentAngleLimit = null;
     sentDynamicRules = null;
     if (reconnectTimer === null) {
       reconnectTimer = window.setTimeout(() => {

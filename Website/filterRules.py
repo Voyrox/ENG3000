@@ -74,6 +74,9 @@ from tracking import (ConstantVelocityTracker, DEFAULT_SIGMA_A_CM_S2,
                       DEFAULT_SIGMA_R_CM)
 
 GRID_SIZE = 3
+# How long the grid is from the nodes' edge (Aaron, 5 Oct): the angle limit's
+# far edge. GRID_LENGTH_CM in game.js.
+GRID_LENGTH_CM = 160.0
 
 STATUS_OK = "ok"
 STATUS_TOO_CLOSE = "too-close"
@@ -106,6 +109,14 @@ class FilterConfig:
     # of sight starts its track again at every reading, with no gate
     # (LineOfSightTracker). CoordinatePipeline.set_kalman() flips it live.
     kalman: bool = True
+
+    # The angle limit (tuning.angleLimit, tuning.angleLimitToleranceCm; Aaron,
+    # 5 Oct). A node's filtered distance further than its servo line runs on
+    # the grid (angle_limit_cm()) plus the tolerance is not a player on it:
+    # line of sight and Dynamic's node rules drop the reading; trilateration
+    # ignores the limit. CoordinatePipeline.set_angle_limit() flips it live.
+    angle_limit: bool = True
+    angle_limit_tolerance_cm: float = 5.0
 
     # Smoothing after the median (tuning.kalmanSigmaA, tuning.kalmanSigmaR,
     # tuning.fftWindow, tuning.fftCutoffHz, FFT_MIN_SAMPLES). The Kalman is
@@ -853,6 +864,10 @@ class LineOfSightTracker:
             if (not fresh[slot] or filtered[slot] is None or angle is None
                     or state == SCAN_LOST):
                 continue
+            # A reading past the angle limit is not used at all.
+            if not within_angle_limit(area.column_centre_cm(slot), filtered[slot], angle,
+                                      area, config):
+                continue
             new_aim = (self.x is None or angle != self.aimed_at[slot]
                        or now_ms - self.fed_ms[slot] > config.hold_ms)
             repeats = 0 if new_aim else self.aim_repeats[slot] + 1
@@ -1158,12 +1173,15 @@ class TwoSensorGeometry(Geometry):
                 log.append(state)
             if len(log) > LOST_READINGS_MAX:
                 log.pop(0)
-        # stepDynamicRules() in game.js.
+        # stepDynamicRules() in game.js. A reading past the angle limit counts
+        # as none: it neither builds a found streak nor aims a servo line.
         for slot in (self.LEFT, self.RIGHT):
             if not fresh[slot]:
                 continue
             state, angle = self._states[slot], self._angles[slot]
-            reading = filtered[slot] is not None
+            reading = (filtered[slot] is not None
+                       and within_angle_limit(area.column_centre_cm(slot), filtered[slot],
+                                              angle, area, config))
             self._found_streak[slot] = (self._found_streak[slot] + 1
                                         if reading and state == SCAN_FOUND else 0)
             if reading and angle is not None and state in (SCAN_FOUND, SCAN_HALF):
@@ -1278,12 +1296,16 @@ class TwoSensorGeometry(Geometry):
     def _confident_point(self, slot, filtered, area) -> Optional[tuple]:
         """confidentPoint() in game.js: a confident node's own reading,
         (x_cm, y_cm) - its distance along its servo line - or None when the
-        node is not confident or that point is outside the play area (across
-        the board, and between its column's near and far edges)."""
+        node is not confident, the reading is past the angle limit, or that
+        point is outside the play area (across the board, and between its
+        column's near and far edges)."""
         config = self._config or FilterConfig()
         if (self._found_streak[slot] < config.confident_readings
                 or self._now_ms - self._found_ms[slot] > config.confident_ms
                 or filtered[slot] is None or self._angles[slot] is None):
+            return None
+        if not within_angle_limit(area.column_centre_cm(slot), filtered[slot],
+                                  self._angles[slot], area, config):
             return None
         x, y = scanner_point(area.column_centre_cm(slot),
                              body_centre_cm(filtered[slot], config), self._angles[slot])
@@ -1667,6 +1689,13 @@ class CoordinatePipeline:
         for channel in self._channels:
             channel._cfg = self.config
 
+    def set_angle_limit(self, on: bool) -> None:
+        """The angle limit switch (setAngleLimit() in game.js), from the next
+        reading; nothing else in the config changes."""
+        self.config = replace(self.config, angle_limit=bool(on))
+        for channel in self._channels:
+            channel._cfg = self.config
+
     def reset(self) -> None:
         for channel in self._channels:
             channel.reset()
@@ -1787,6 +1816,38 @@ def scanner_point(node_x_cm: float, distance_cm: float,
     """
     phi = ((90.0 if angle_deg is None else angle_deg) - 90) * math.pi / 180
     return node_x_cm + distance_cm * math.sin(phi), distance_cm * math.cos(phi)
+
+
+def angle_limit_cm(node_x_cm: float, angle_deg: Optional[float],
+                   width_cm: float = 150.0, length_cm: float = GRID_LENGTH_CM) -> float:
+    """angleLimitCm() in game.js: how far the servo line of the node at
+    node_x_cm runs before it leaves the grid, width_cm across and length_cm
+    long, with the nodes on its near edge (Aaron, 5 Oct). 90 degrees is
+    straight down the grid and a larger angle turns towards screen-right, as
+    in scanner_point(); None is straight down. Same arithmetic, operation for
+    operation."""
+    phi = ((90.0 if angle_deg is None else angle_deg) - 90) * math.pi / 180
+    across = math.sin(phi)
+    down = math.cos(phi)
+    limit = math.inf
+    if across > 0:
+        limit = min(limit, (width_cm - node_x_cm) / across)
+    if across < 0:
+        limit = min(limit, node_x_cm / -across)
+    if down > 0:
+        limit = min(limit, length_cm / down)
+    return limit
+
+
+def within_angle_limit(node_x_cm: float, distance_cm: float, angle_deg: Optional[float],
+                       area: "PlayArea", config: FilterConfig) -> bool:
+    """withinAngleLimit() in game.js: whether a node's filtered distance at
+    its servo angle can be a player on the grid - no further than
+    angle_limit_cm() plus angle_limit_tolerance_cm. Always, with
+    config.angle_limit off."""
+    return (not config.angle_limit
+            or distance_cm <= angle_limit_cm(node_x_cm, angle_deg, area.width_cm)
+            + config.angle_limit_tolerance_cm)
 
 
 def body_centre_cm(distance_cm: float, config: FilterConfig) -> float:

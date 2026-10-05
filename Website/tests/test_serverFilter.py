@@ -229,6 +229,13 @@ class StageTwoSensorRig(unittest.TestCase):
         stage.set_kalman(True)
         self.assertTrue(stage.pipeline.config.kalman)
 
+    def test_the_angle_limit_switch_reaches_the_config(self):
+        stage = ServerFilterStage()
+        stage.set_angle_limit(False)
+        self.assertFalse(stage.pipeline.config.angle_limit)
+        stage.set_angle_limit(True)
+        self.assertTrue(stage.pipeline.config.angle_limit)
+
     def test_dynamic_rule_switches_reach_the_config(self):
         stage = ServerFilterStage()
         stage.set_dynamic_rules({"columnLock": False})
@@ -489,6 +496,13 @@ class AppWiring(unittest.TestCase):
         self.assertFalse(app.server_filter.pipeline.config.kalman)
         app.apply_filter_event({"type": "filter:kalman", "on": True})
         self.assertTrue(app.server_filter.pipeline.config.kalman)
+
+    def test_the_angle_limit_switch_reaches_the_chain(self):
+        app.server_filter = ServerFilterStage()
+        app.apply_filter_event({"type": "filter:angleLimit", "on": False})
+        self.assertFalse(app.server_filter.pipeline.config.angle_limit)
+        app.apply_filter_event({"type": "filter:angleLimit", "on": True})
+        self.assertTrue(app.server_filter.pipeline.config.angle_limit)
 
     def test_dynamic_rule_switches_reach_the_chain(self):
         app.server_filter = ServerFilterStage()

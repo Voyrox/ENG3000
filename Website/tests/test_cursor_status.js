@@ -478,10 +478,19 @@ test("a ring off the side of the board stays at the board's edge; no signal has 
   w.resetGame();
   // 20 cm off the left edge of the board: the fix keeps the measured x, the
   // ring is drawn from x clamped to the board, as renderPositionMarkers() does.
+  // With the angle limit off: on, line of sight drops readings off the grid.
+  w.setAngleLimit(false);
   run(w, scannersSeeing(-20, 80));
   const fixes = w.getGameCursorStatus(CANVAS).sensor.fixes;
   assert.ok(fixes.los.xCm < -10, `x was ${fixes.los.xCm}`);
   assert.ok(fixes.los.nx > -0.05 && fixes.los.nx < 0.05, `nx was ${fixes.los.nx}`);
+
+  const limited = loadWindow();
+  limited.setGameInputMode("sensor");
+  limited.resetGame();
+  run(limited, scannersSeeing(-20, 80));
+  assert.strictEqual(limited.getGameCursorStatus(CANVAS).sensor.fixes.los, null,
+    "line of sight drops readings past the angle limit");
 
   const silent = loadWindow();
   silent.setGameInputMode("sensor");
@@ -521,6 +530,18 @@ test("the Kalman switch is on until the control panel turns it off", () => {
   assert.strictEqual(w.setKalman(false), false);
   assert.strictEqual(w.tuneSensor({}).kalman, false, "the filters read it from tuning");
   assert.strictEqual(w.setKalman(true), true);
+});
+
+test("the angle limit is on until the control panel turns it off, and follows the grid", () => {
+  const w = loadWindow();
+  assert.strictEqual(w.getAngleLimit(), true);
+  assert.strictEqual(w.setAngleLimit(false), false);
+  assert.strictEqual(w.setAngleLimit(true), true);
+  // The left node at (25, 0) and the right at (125, 0) on the 150 x 160 cm grid.
+  assert.strictEqual(w.getAngleLimitCm(0, 90), 160);
+  assert.ok(Math.abs(w.getAngleLimitCm(0, 70) - 73.1) < 0.05, "left wall");
+  assert.ok(Math.abs(w.getAngleLimitCm(2, 140) - 32.6) < 0.05, "right wall");
+  assert.ok(Math.abs(w.getAngleLimitCm(2, 60) - 184.8) < 0.05, "far edge");
 });
 
 // --- Dynamic's rules (Aaron, 5 Oct) ----------------------------------------------

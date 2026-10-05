@@ -380,6 +380,20 @@ steers on its own pulse pairs. `app.py`'s per-node `filtered_distance` keeps
 its Kalman either way. The parity trace has a run of line of sight and one of
 Dynamic with it off.
 
+**Angle limit.** The grid is 150 cm across and 160 cm long, with the nodes at
+(25, 0) and (125, 0). At each servo angle a node's line runs a set distance
+before it leaves the grid: 160 cm straight down it, 203 cm to the far opposite
+corner, and only 32.6 cm towards the near side wall at the servo's limit
+(`angleLimitCm()` / `angle_limit_cm()`). A filtered distance further than
+that, plus 5 cm (`tuning.angleLimitToleranceCm`), is not a player on the grid:
+line of sight does not use the reading, and for Dynamic's rules it counts as
+no reading (no found streak, no servo line for the column lock, no lone-node
+point). Trilateration ignores the limit, and the average's trilateration half
+with it. The control panel's *Angle limit* button turns it off and on again:
+`tuning.angleLimit`, `setAngleLimit()`, `FilterConfig.angle_limit`,
+`filter:angleLimit` to the server. The parity trace has a run of line of sight
+and one of Dynamic with it off.
+
 The game steps a node's filters only on that node's new readings, not on
 every animation frame. On the server a no-echo reading (negative) is skipped
 rather than put into the median, and the median takes the upper of the two
