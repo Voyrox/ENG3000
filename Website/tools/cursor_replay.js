@@ -516,6 +516,7 @@ function runRecording({ site, method, tune, dir, leftNode, rightNode }) {
   // player hearing it and walking: about half a second more than the
   // simulated steps', which run from the crossing.
   const totals = emptyTotals();
+  const perSpot = {};
   scored.forEach((step) => {
     const spot = frames.filter((f) => f.step === step.name);
     if (step.kind === "step") {
@@ -524,9 +525,10 @@ function runRecording({ site, method, tune, dir, leftNode, rightNode }) {
       return;
     }
     const right = play.cellsNear(step.x_cm, step.y_cm);
-    addStill(totals, stillKind(right), scoreStill(spot, right));
+    perSpot[step.name] = scoreStill(spot, right);
+    addStill(totals, stillKind(right), perSpot[step.name]);
   });
-  return { totals, slots };
+  return { totals, perSpot, slots };
 }
 
 // --- Report -----------------------------------------------------------------

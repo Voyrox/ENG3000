@@ -15,6 +15,7 @@
 //   window.setAlertHeld(on) / window.isAlertHeld() - the control panel's held alert
 //   window.setDeadZone(on) / window.getDeadZone()   - too close by depth, or by the raw reading
 //   window.setCellLock(on) / window.getCellLock()   - the drawn cursor and its hits keep to the voted cell
+//   window.setCellDecision(on) / window.getCellDecision() - the cell decision, or the older vote
 //   window.handleGameClick(canvas, x, y)        - register a hit attempt
 //   window.getGamePauseButtonAtPoint(canvas,x,y)- hit-test the pause icon
 //   window.getPauseMenuButtonAtPoint(canvas,x,y)- hit-test Resume / Restart / Main Menu
@@ -153,14 +154,17 @@
   const FFT_MIN_SAMPLES = 8;          // fewer and the Kalman output passes straight through
 
   // --- Live-tunable smoothing -----------------------------------------------
-  // The server broadcasts on every node message, so with two sensors at 20Hz
-  // roughly 40 readings arrive each second. The window sizes below are counted
-  // in readings (not render frames), so 100 readings is about 2.5 seconds.
+  // The server broadcasts on every node message, and twice at each scan turn
+  // (app.py set_turn()). The nodes take 1 s turns and the one with the turn
+  // reads about 11 times a second, so about 13 broadcasts arrive each second.
+  // The vote's window below is counted in those, not in render frames.
   //
   // Adjust at runtime from the console with tuneSensor({ ... }) - no reload.
   const tuning = {
     // Votes held in the cell window. Bigger = steadier cursor, slower to follow
-    // a real move. At ~40 readings/sec, 25 is roughly 0.6s of history.
+    // a real move. At ~13 broadcasts a second, 25 is about 2 s of history and
+    // a rival needs about 1 s of them to take over. Only used with the cell
+    // decision (below) off.
     cellWindow: 25,
     // Votes a rival cell needs to take over. Must stay above half of
     // cellWindow, otherwise two cells can trade the lead and the cursor flips.
@@ -175,6 +179,29 @@
     // the drawing and the hover change: the cell, the position and the
     // server's copy (filterRules.py) do not. Switched on the control panel.
     cellLock: true,
+    // The cell decision (Aaron, 5 Oct; decideCell()), in place of the vote
+    // above. The cell moves only when the position has gone cellMarginCm past
+    // its edges, and stayed past them for cellDwellMs of readings (twice that
+    // to a cell that is not next to it); and a reading whose node still sees
+    // the player within cellStillCm of where it saw them while the position
+    // was in the cell (its anchor, which eases cellAnchorRate of the way to
+    // each reading taken with the position in the cell: it settles where a
+    // still player stands, and trails one who walks) counts for staying, wherever the two nodes together put them: one node
+    // taking over from the other, each with its own bias, is not a move - for
+    // up to cellStillHoldMs, longer than a scan turn, after which a position
+    // that has stayed out of the cell all that time wins anyway. Off, the
+    // vote decides, as before. Switched on the control panel. The margin
+    // must stay under COLUMN_MARGIN_CM (8): Dynamic's centre lock keeps x
+    // that far inside the centre column, and a bigger margin would never let
+    // it out of a side cell. Python: FilterConfig cell_decision,
+    // cell_margin_cm, cell_dwell_ms, cell_still_cm, cell_still_hold_ms,
+    // cell_anchor_rate.
+    cellDecision: true,
+    cellMarginCm: 6,
+    cellDwellMs: 500,
+    cellStillCm: 25,
+    cellStillHoldMs: 1500,
+    cellAnchorRate: 0.1,
     // Neither node has sent a new reading for this long (ms), or the server
     // says both are offline: the game says Sensors offline and the round
     // waits. Unusable readings are otherwise ridden out on the last good
@@ -2440,6 +2467,20 @@
     return tuning.kalman;
   };
 
+  // The cell decision switch, on by default; see tuning.cellDecision. Either
+  // way the other one starts afresh, from the next reading.
+  window.getCellDecision = function getCellDecision() {
+    return tuning.cellDecision;
+  };
+
+  window.setCellDecision = function setCellDecision(on) {
+    const next = Boolean(on);
+    if (next !== tuning.cellDecision) resetCellFilter();
+    tuning.cellDecision = next;
+    console.info(`[cell decision] ${tuning.cellDecision ? "on" : "off"}`);
+    return tuning.cellDecision;
+  };
+
   // The cell lock switch, on by default; see tuning.cellLock. Takes effect
   // from the next frame.
   window.getCellLock = function getCellLock() {
@@ -2912,6 +2953,7 @@
   function resetCellFilter() {
     cellHistory.length = 0;
     stableCell = null;
+    resetCellDecision();
   }
 
   // Returns the cell the cursor should actually sit in: the most frequent cell
@@ -2948,6 +2990,174 @@
       stableCell = candidate;
     }
     return stableCell;
+  }
+
+  // --- The cell decision (tuning.cellDecision) -------------------------------
+  // Aaron, 5 Oct: steady over jumpy, but a real move into the next cell still
+  // shows. Three parts, each a reason a still player's cell jumped:
+  //   - a margin: the position must go cellMarginCm past the cell's edges
+  //     before another cell is even a candidate, so standing on a line holds
+  //     the cell you came from;
+  //   - a dwell: the candidate must hold for cellDwellMs of readings, counted
+  //     up while readings put the player there and down while they put them
+  //     back, so a short swing never gets there. A cell that is not next to
+  //     the current one needs twice that;
+  //   - each node against itself: a node's reading within cellStillCm of its
+  //     anchor - its own point (ownPoint()) from its first reading with the
+  //     position in the cell, eased cellAnchorRate of the way to each later
+  //     one with the position in the cell, so it settles where a still player
+  //     stands but trails one walking to the edge - says the player has not
+  //     moved, whatever the two nodes together say. A node that has only read with the position
+  //     out of the cell has no anchor, and says nothing: it never saw the
+  //     player in the cell, so it cannot say they are still there. At a
+  //     scan turn the position jumps by the difference between the nodes'
+  //     biases (up to 66 cm on 4 Oct), not because anyone moved. That swing
+  //     comes back with the next turn; a position out of the cell for longer
+  //     than cellStillHoldMs is not a swing (a first cell taken from filters
+  //     still settling, say), and the nodes no longer hold it back. Nor do
+  //     they for the first cellStillHoldMs after the first cell is taken: it
+  //     often comes from one node alone, before the other has found the
+  //     player, and the margin and the dwell are enough to move it.
+  // Python: CellDecider in filterRules.py.
+
+  // A gap between counted readings longer than this counts as this long, so
+  // a node that was lost for a while does not bring a whole dwell with it.
+  const CELL_DWELL_STEP_CAP_MS = 250;
+
+  const cellDecision = {
+    cell: null,           // { gx, gy }: the decided cell
+    challenger: null,     // { gx, gy }: the cell gathering time to take over
+    evidenceMs: 0,        // the challenger's time so far
+    lastAt: null,         // ms: the last counted reading
+    firstAt: null,        // ms: when the first cell was taken
+    away: null,           // { gx, gy }: the cell the position has been in, out of the decided one
+    awaySince: null,      // ms: since when
+    anchors: [null, null, null],   // each node's { x, y } to compare with
+  };
+
+  function resetCellDecision() {
+    cellDecision.cell = null;
+    cellDecision.challenger = null;
+    cellDecision.evidenceMs = 0;
+    cellDecision.lastAt = null;
+    cellDecision.firstAt = null;
+    cellDecision.away = null;
+    cellDecision.awaySince = null;
+    cellDecision.anchors = [null, null, null];
+  }
+
+  function sameCell(a, b) {
+    return Boolean(a) && Boolean(b) && a.gx === b.gx && a.gy === b.gy;
+  }
+
+  // The cell (x, y) is in, by the grid alone: no margin, no hysteresis.
+  function cellOfPosition(x, y) {
+    const gx = columnAtCm(x);
+    return { gx, gy: window.rawToGrid(gx, y, null).gy };
+  }
+
+  // Whether (x, y) is inside a cell grown by margin cm on every side.
+  function nearCell(cell, x, y, margin) {
+    const span = columnSpan(cell.gx);
+    const rowDepth = (span.far - span.near) / GRID_ROWS;
+    const top = span.near + cell.gy * rowDepth;
+    return x >= cell.gx * COLUMN_PITCH_CM - margin && x <= (cell.gx + 1) * COLUMN_PITCH_CM + margin
+      && y >= top - margin && y <= top + rowDepth + margin;
+  }
+
+  // Each node that read this update and sees the player (found or half), and
+  // its own point: [slot, { x, y }] pairs.
+  function readingNodes(fix) {
+    const out = [];
+    [LEFT_SENSOR, RIGHT_SENSOR].forEach((slot) => {
+      if (!fix.fresh[slot] || fix.raw[slot] === null || fix.scans[slot].state === SCAN_LOST) return;
+      const point = ownPoint(slot, fix.filtered, fix.scans);
+      if (point) out.push([slot, point]);
+    });
+    return out;
+  }
+
+  // The decided cell for a fix with status "ok" at (fix.xCm, fix.yCm). Only an
+  // update carrying a node's new reading counts: render frames and the turn
+  // broadcasts do not.
+  function decideCell(fix, now) {
+    const counted = fix.isNewReading && fix.fresh.some((isFresh, slot) => isFresh && fix.raw[slot] !== null);
+    const here = cellOfPosition(fix.xCm, fix.yCm);
+    if (!counted) return cellDecision.cell || here;
+
+    const nodes = readingNodes(fix);
+    if (cellDecision.cell === null) {
+      // The first position is taken at once, so the cursor appears without
+      // waiting, and each node that read is anchored there.
+      cellDecision.cell = here;
+      cellDecision.lastAt = now;
+      cellDecision.firstAt = now;
+      nodes.forEach(([slot, point]) => { cellDecision.anchors[slot] = point; });
+      return cellDecision.cell;
+    }
+
+    const current = cellDecision.cell;
+    const inside = nearCell(current, fix.xCm, fix.yCm, tuning.cellMarginCm);
+    let candidate = inside ? current : here;
+    if (inside) {
+      cellDecision.away = null;
+      cellDecision.awaySince = null;
+    } else if (!sameCell(here, cellDecision.away)) {
+      cellDecision.away = here;
+      cellDecision.awaySince = now;
+    }
+    const swing = !inside && now - cellDecision.awaySince < tuning.cellStillHoldMs
+      && now - cellDecision.firstAt >= tuning.cellStillHoldMs;
+
+    // Each node against its own anchor. A node with none is anchored now if
+    // the position is in the cell; while the position stays in the cell, the
+    // anchor eases towards each reading.
+    let still = 0;
+    let moved = 0;
+    nodes.forEach(([slot, point]) => {
+      const anchor = cellDecision.anchors[slot];
+      if (!anchor) {
+        if (inside) cellDecision.anchors[slot] = point;
+        return;
+      }
+      if (Math.hypot(point.x - anchor.x, point.y - anchor.y) < tuning.cellStillCm) {
+        still += 1;
+      } else {
+        moved += 1;
+      }
+      if (inside) {
+        const rate = tuning.cellAnchorRate;
+        cellDecision.anchors[slot] = { x: anchor.x + rate * (point.x - anchor.x), y: anchor.y + rate * (point.y - anchor.y) };
+      }
+    });
+    if (still > 0 && moved === 0 && swing) candidate = current;
+
+    const step = Math.min(CELL_DWELL_STEP_CAP_MS, now - cellDecision.lastAt);
+    cellDecision.lastAt = now;
+    if (sameCell(candidate, current)) {
+      cellDecision.evidenceMs = Math.max(0, cellDecision.evidenceMs - step);
+      if (cellDecision.evidenceMs === 0) cellDecision.challenger = null;
+    } else if (sameCell(candidate, cellDecision.challenger)) {
+      cellDecision.evidenceMs += step;
+    } else {
+      cellDecision.challenger = candidate;
+      cellDecision.evidenceMs = step;
+    }
+
+    const challenger = cellDecision.challenger;
+    if (challenger) {
+      const nextTo = Math.abs(challenger.gx - current.gx) <= 1 && Math.abs(challenger.gy - current.gy) <= 1;
+      if (cellDecision.evidenceMs >= tuning.cellDwellMs * (nextTo ? 1 : 2)) {
+        cellDecision.cell = challenger;
+        cellDecision.challenger = null;
+        cellDecision.evidenceMs = 0;
+        cellDecision.away = null;
+        cellDecision.awaySince = null;
+        cellDecision.anchors = [null, null, null];
+        nodes.forEach(([slot, point]) => { cellDecision.anchors[slot] = point; });
+      }
+    }
+    return cellDecision.cell;
   }
 
   // The sensors' cursor over a hole scores, as the mouse's does - unless the
@@ -2993,9 +3203,12 @@
 
     if (grid) {
       badReadingStreak = 0;
-      // The cell the reading suggests is only a vote; the cursor follows the
-      // consensus of the recent window.
-      const cell = stabiliseCell(grid.gx, grid.gy, fix.isNewReading);
+      // The cell the reading suggests is only a candidate: the cell decision
+      // (decideCell()), or with it off the vote over the recent window
+      // (stabiliseCell()), says whether the cell moves.
+      const cell = tuning.cellDecision
+        ? decideCell(fix, now)
+        : stabiliseCell(grid.gx, grid.gy, fix.isNewReading);
       const stable = { ...grid, gx: cell.gx, gy: cell.gy };
 
       // Two things come out of one set of readings: the discrete cell, which is

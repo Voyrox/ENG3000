@@ -101,13 +101,16 @@ CONTROL_ENABLED = os.environ.get("CON") == "1"
 # found towards Out of bounds).
 # "deadZone" turns the dead zone on or off (too close by a reading's depth
 # along its servo line, or by the reading itself).
+# "cellDecision" turns the cell decision on or off (the margin, the dwell and
+# each node against itself; off, the older vote).
 # "cellLock" turns the cell lock on or off (the game's cursor, and the hole it
 # scores in, keep to the voted cell).
 # "tooCloseHold" is the hold button: the too-close screen while it is down,
 # re-sent every 250 ms while held.
 CONTROL_ACTIONS = {"point", "release", "start", "mode", "pause", "resume", "restart", "menu", "testMode",
                    "position", "compare", "lostReadings", "kalman", "angleLimit", "triAimTolerance",
-                   "dynamicRules", "confidenceLevel", "farHalf", "deadZone", "cellLock", "tooCloseHold"}
+                   "dynamicRules", "confidenceLevel", "farHalf", "deadZone", "cellLock", "cellDecision",
+                   "tooCloseHold"}
 # Sent many times a second while a finger is down, so not printed.
 QUIET_CONTROL_ACTIONS = {"point", "release", "tooCloseHold"}
 # Every raw node reading to logs/raw-*.csv, for the bench noise test
@@ -848,6 +851,9 @@ def apply_filter_event(event):
             elif event.get("type") == "filter:deadZone":
                 # The control panel's dead zone switch, passed on by the game.
                 server_filter.set_dead_zone(bool(event["on"]))
+            elif event.get("type") == "filter:cellDecision":
+                # The control panel's cell decision switch, passed on by the game.
+                server_filter.set_cell_decision(bool(event["on"]))
             elif event.get("type") == "sensor:dynamicRules":
                 # Dynamic's rule switches, from the control panel by way of the game.
                 server_filter.set_dynamic_rules(event["rules"])

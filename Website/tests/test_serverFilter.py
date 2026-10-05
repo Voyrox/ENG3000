@@ -286,6 +286,13 @@ class StageTwoSensorRig(unittest.TestCase):
         stage.set_dead_zone(True)
         self.assertTrue(stage.pipeline.config.dead_zone)
 
+    def test_the_cell_decision_switch_reaches_the_config(self):
+        stage = ServerFilterStage()
+        stage.set_cell_decision(False)
+        self.assertFalse(stage.pipeline.config.cell_decision)
+        stage.set_cell_decision(True)
+        self.assertTrue(stage.pipeline.config.cell_decision)
+
     def test_dynamic_rule_switches_reach_the_config(self):
         stage = ServerFilterStage()
         stage.set_dynamic_rules({"columnLock": False})

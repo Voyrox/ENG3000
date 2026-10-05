@@ -309,7 +309,7 @@ function buildStream() {
 // --- Run the real JS -----------------------------------------------------------
 
 function runJs(stream, calibration, method, kalman = true, dynamicRules = null, angleLimit = true,
-  deadZone = true, farHalf = true, triAimTolerance = true) {
+  deadZone = true, farHalf = true, triAimTolerance = true, cellDecision = true) {
   let clock = 0;
   const context = {
     console,
@@ -349,6 +349,7 @@ function runJs(stream, calibration, method, kalman = true, dynamicRules = null, 
   w.setDeadZone(deadZone);
   w.setFarHalf(farHalf);
   w.setTriAimTolerance(triAimTolerance);
+  w.setCellDecision(cellDecision);
   if (dynamicRules) w.setDynamicRules(dynamicRules);
   w.setGameInputMode("sensor");
   w.resetGame();
@@ -453,6 +454,15 @@ const trace = {
     triAimToleranceOffDynamic: {
       method: "dyn", triAimTolerance: false,
       ...runJs(stream, null, "dyn", true, null, true, true, true, false),
+    },
+    // Dynamic and line of sight with the cell decision off: the vote decides.
+    cellDecisionOff: {
+      method: "dyn", cellDecision: false,
+      ...runJs(stream, null, "dyn", true, null, true, true, true, true, false),
+    },
+    cellDecisionOffLos: {
+      method: "los", cellDecision: false,
+      ...runJs(stream, null, "los", true, null, true, true, true, true, false),
     },
   },
 };

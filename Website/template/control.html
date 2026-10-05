@@ -54,6 +54,7 @@
             <button id="angleLimitBtn" data-action="angleLimit">Angle limit: on</button>
             <button id="triAimToleranceBtn" data-action="triAimTolerance">Tri aim tolerance: on</button>
             <button id="cellLockBtn" data-action="cellLock">Cell lock: on</button>
+            <button id="cellDecisionBtn" data-action="cellDecision">Cell decision: on</button>
         </div>
         <p class="note">Kalman off: each node's distance goes median → FFT, and line of sight puts the
             player at the newest reading, with no gate. The servos do not use it.</p>
@@ -66,6 +67,10 @@
         <p class="note">Cell lock on: the game's cursor stays inside the cell the vote decided, and
             only that cell's hole scores, until the vote moves. Off: the cursor goes wherever the
             position does and scores whichever hole it is over.</p>
+        <p class="note">Cell decision on: the cell moves once the position is 6 cm past its edges
+            for 0.5 s, and a node that still sees the player where it did before counts for
+            staying, so a scan turn changing over is not a move. Off: the older vote (13 of the
+            last 25 readings).</p>
     </section>
 
     <section>
@@ -350,6 +355,7 @@
                 if (action === "triAimTolerance") return send({ action, enabled: Boolean(game) && game.triAimTolerance === false });
                 if (action === "deadZone") return send({ action, enabled: Boolean(game) && game.deadZone === false });
                 if (action === "cellLock") return send({ action, enabled: Boolean(game) && game.cellLock === false });
+                if (action === "cellDecision") return send({ action, enabled: Boolean(game) && game.cellDecision === false });
                 if (action === "farHalf") return send({ action, enabled: Boolean(game) && game.farHalf === false });
                 if (action === "compare") return send({ action, enabled: Boolean(game) && game.compare === false });
                 if (action === "pause" && game && game.status === "paused") return send({ action: "resume" });
@@ -492,6 +498,8 @@
             $("deadZoneBtn").classList.toggle("selected", game.deadZone === false);
             $("cellLockBtn").textContent = `Cell lock: ${game.cellLock === false ? "off" : "on"}`;
             $("cellLockBtn").classList.toggle("selected", game.cellLock === false);
+            $("cellDecisionBtn").textContent = `Cell decision: ${game.cellDecision === false ? "off" : "on"}`;
+            $("cellDecisionBtn").classList.toggle("selected", game.cellDecision === false);
             $("farHalfBtn").textContent = `Far half: ${game.farHalf === false ? "off" : "on"}`;
             $("farHalfBtn").classList.toggle("selected", game.farHalf === false);
             document.querySelectorAll("[data-rule]").forEach((btn) => {

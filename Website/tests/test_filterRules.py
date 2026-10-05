@@ -32,6 +32,7 @@ from filterRules import (  # noqa: E402
     STATUS_OUT_OF_BOUNDS,
     STATUS_TOO_CLOSE,
     CartesianGeometry,
+    CellDecider,
     CellStabiliser,
     ChannelFilter,
     CoordinatePipeline,
@@ -83,6 +84,7 @@ class ParityWithGameJs(unittest.TestCase):
                               dead_zone=run.get("deadZone", True),
                               far_half=run.get("farHalf", True),
                               tri_aim_tolerance=run.get("triAimTolerance", True),
+                              cell_decision=run.get("cellDecision", True),
                               **{DYNAMIC_RULE_SWITCHES[name]: on for name, on in switches.items()})
         pipeline = CoordinatePipeline(TwoSensorGeometry(method=run["method"]), area=area,
                                       config=config)
@@ -175,6 +177,17 @@ class ParityWithGameJs(unittest.TestCase):
 
     def test_dynamic_with_the_aim_tolerance_off(self):
         self.assertGreater(self._replay("triAimToleranceOffDynamic"), 0)
+
+    def test_dynamic_with_the_cell_decision_off(self):
+        self.assertGreater(self._replay("cellDecisionOff"), 0)
+
+    def test_line_of_sight_with_the_cell_decision_off(self):
+        self.assertGreater(self._replay("cellDecisionOffLos"), 0)
+
+    def test_the_cell_decision_runs_differ_from_the_vote_somewhere(self):
+        on = [(row[1], row[2]) for row in self.trace["runs"]["dynamic"]["steps"]]
+        off = [(row[1], row[2]) for row in self.trace["runs"]["cellDecisionOff"]["steps"]]
+        self.assertNotEqual(on, off, "the switch must change the cell somewhere on the stream")
 
     def test_far_half_keeps_a_back_row_player_in_play_on_the_recorded_stream(self):
         # Segment 28: half readings in the back row are Out of bounds only
@@ -452,6 +465,128 @@ class CellStabiliserRules(unittest.TestCase):
     def test_rejects_a_vote_threshold_that_allows_flicker(self):
         with self.assertRaises(ValueError):
             FilterConfig(cell_window=10, cell_votes=5)
+
+
+class CellDeciderRules(unittest.TestCase):
+    """The cell decision (decideCell() in game.js). The default bounds give
+    columns 50 cm wide and rows 50 cm deep from 10 cm out: the centre cell
+    (1, 1) is x 50-100, y 60-110. Readings 100 ms apart."""
+
+    CENTRE = (75.0, 85.0)
+
+    def setUp(self):
+        self.area = PlayArea.default()
+        self.config = FilterConfig()
+        self.decider = CellDecider(self.config)
+        self.now = 0.0
+
+    def step(self, x, y, points=(), counted=True, ms=100.0):
+        self.now += ms
+        return self.decider.decide(x, y, counted, list(points), self.now, self.area, self.config)
+
+    def settle(self, points=()):
+        """The first cell, the centre, then the start-up time (cell_still_hold_ms),
+        when the nodes do not hold the cell yet, spent standing in it."""
+        self.assertEqual(self.step(*self.CENTRE, points=points), (1, 1))
+        while self.now < self.config.cell_still_hold_ms + 100:
+            self.assertEqual(self.step(*self.CENTRE, points=points), (1, 1))
+
+    def test_the_first_cell_is_taken_at_once(self):
+        self.assertEqual(self.step(30.0, 135.0), (0, 2))
+
+    def test_within_the_margin_of_the_cell_never_moves(self):
+        self.settle()
+        for _ in range(30):
+            self.assertEqual(self.step(104.0, 85.0), (1, 1))   # 4 cm past the line, under the 6 cm margin
+
+    def test_past_the_margin_moves_after_the_dwell(self):
+        self.settle()
+        self.assertEqual([self.step(108.0, 85.0) for _ in range(5)],
+                         [(1, 1)] * 4 + [(2, 1)])   # 500 ms of readings
+
+    def test_a_swing_that_comes_back_never_gets_there(self):
+        self.settle()
+        for _ in range(10):
+            self.assertEqual(self.step(120.0, 85.0), (1, 1))
+            self.assertEqual(self.step(120.0, 85.0), (1, 1))
+            self.assertEqual(self.step(*self.CENTRE), (1, 1))
+            self.assertEqual(self.step(*self.CENTRE), (1, 1))
+
+    def test_a_cell_not_next_to_it_needs_twice_the_dwell(self):
+        self.assertEqual(self.step(25.0, 85.0), (0, 1))
+        cells = [self.step(125.0, 85.0) for _ in range(10)]
+        self.assertEqual(cells[:9], [(0, 1)] * 9)
+        self.assertEqual(cells[9], (2, 1))
+
+    def test_a_gap_between_readings_counts_as_at_most_250_ms(self):
+        self.settle()
+        self.assertEqual(self.step(120.0, 85.0, ms=1000.0), (1, 1))
+        self.assertEqual(self.step(120.0, 85.0), (1, 1))     # 250 + 100 ms
+        self.assertEqual(self.step(120.0, 85.0), (1, 1))     # 450 ms
+        self.assertEqual(self.step(120.0, 85.0), (2, 1))     # 550 ms
+
+    def test_a_render_frame_or_turn_broadcast_changes_nothing(self):
+        self.settle()
+        for _ in range(20):
+            self.assertEqual(self.step(120.0, 85.0, counted=False), (1, 1))
+        # And it did not count towards the dwell either.
+        self.assertEqual(self.step(120.0, 85.0), (1, 1))
+
+    def test_a_node_that_still_sees_the_player_holds_the_cell_at_a_handover(self):
+        node = [(0, (70.0, 80.0))]                          # LEFT's own point, anchored in the cell
+        self.settle(points=node)
+        # The other node takes over and the position jumps right; LEFT, still
+        # reading, sees the player where it did: no move, for the hold.
+        held = [self.step(120.0, 85.0, points=[(0, (72.0, 82.0))])
+                for _ in range(int(self.config.cell_still_hold_ms / 100) - 1)]
+        self.assertEqual(set(held), {(1, 1)})
+
+    def test_past_the_hold_the_position_wins_anyway(self):
+        node = [(0, (70.0, 80.0))]
+        self.settle(points=node)
+        cells = [self.step(120.0, 85.0, points=node) for _ in range(25)]
+        self.assertEqual(cells[0], (1, 1))
+        # 1.5 s of being out of the cell, then the 500 ms dwell.
+        self.assertEqual(cells.index((2, 1)), 19)
+
+    def test_a_node_that_has_moved_does_not_hold_the_cell(self):
+        self.settle(points=[(0, (70.0, 80.0))])
+        cells = [self.step(120.0, 85.0, points=[(0, (110.0, 82.0))]) for _ in range(5)]
+        self.assertEqual(cells, [(1, 1)] * 4 + [(2, 1)])
+
+    def test_a_node_only_seen_with_the_position_out_of_the_cell_says_nothing(self):
+        self.settle()
+        # RIGHT's first reading comes with the position out of the cell: it
+        # never saw the player in it, so it is not anchored and holds nothing.
+        cells = [self.step(120.0, 85.0, points=[(2, (118.0, 84.0))]) for _ in range(5)]
+        self.assertEqual(cells, [(1, 1)] * 4 + [(2, 1)])
+
+    def test_the_nodes_hold_nothing_in_the_first_moments(self):
+        # Straight after the first cell (one node alone, say), only the margin
+        # and the dwell apply.
+        node = [(0, (70.0, 80.0))]
+        self.assertEqual(self.step(*self.CENTRE, points=node), (1, 1))
+        cells = [self.step(120.0, 85.0, points=node) for _ in range(5)]
+        self.assertEqual(cells, [(1, 1)] * 4 + [(2, 1)])
+
+    def test_an_anchor_settles_where_a_still_player_stands_and_trails_a_walker(self):
+        self.settle(points=[(0, (70.0, 80.0))])
+        # Walking 6 cm a reading towards the right edge, inside the cell: the
+        # anchor trails, so by the edge the node has moved more than 25 cm.
+        x = 70.0
+        while x < 100.0:
+            x += 6.0
+            self.step(min(x, 99.0), 85.0, points=[(0, (x, 80.0))])
+        cells = [self.step(112.0, 85.0, points=[(0, (112.0, 80.0))]) for _ in range(5)]
+        self.assertEqual(cells[-1], (2, 1), "the node of a player walking out says moved: no hold")
+
+    def test_the_pipeline_switch_picks_the_vote_or_the_decision(self):
+        pipeline = CoordinatePipeline(TwoSensorGeometry())
+        self.assertTrue(pipeline.config.cell_decision)
+        pipeline.set_cell_decision(False)
+        self.assertFalse(pipeline.config.cell_decision)
+        pipeline.set_cell_decision(True)
+        self.assertTrue(pipeline.config.cell_decision)
 
 
 class HoldPolicies(unittest.TestCase):

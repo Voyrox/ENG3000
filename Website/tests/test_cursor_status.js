@@ -542,14 +542,45 @@ test("the cell lock is on until the control panel turns it off", () => {
   assert.strictEqual(w.setCellLock(true), true);
 });
 
+test("the cell decision is on until the control panel turns it off", () => {
+  const w = loadWindow();
+  assert.strictEqual(w.getCellDecision(), true);
+  assert.strictEqual(w.setCellDecision(false), false);
+  assert.strictEqual(w.tuneSensor({}).cellDecision, false, "the cell reads it from tuning");
+  assert.strictEqual(w.setCellDecision(true), true);
+});
+
+test("the cell decision follows a step into the next row within a second, and holds it", () => {
+  const w = loadWindow();
+  w.setGameInputMode("sensor");
+  w.resetGame();
+  run(w, scannersSeeing(75, 85));
+  assert.deepStrictEqual([w.getGameState().sensor.gx, w.getGameState().sensor.gy], [1, 1]);
+
+  // Back into the far row: 135 cm out, the middle of it.
+  const cells = [];
+  for (let i = 1; i <= 120; i += 1) {
+    const t = (240 + i) * FRAME_MS;
+    w.performance.now = () => t;
+    w.markSensorFrame();
+    w.updateGame(t, CANVAS, scannersSeeing(75, 135));
+    const s = w.getGameState().sensor;
+    cells.push(`${s.gx},${s.gy}`);
+  }
+  const movedAt = cells.indexOf("1,2");
+  assert.ok(movedAt > 0 && movedAt * FRAME_MS <= 1000, `moved after ${movedAt * FRAME_MS} ms`);
+  assert.ok(cells.slice(movedAt).every((c) => c === "1,2"), "and stayed");
+});
+
 // A player settled in the centre (hole 4) steps right (hole 5), where a mole
-// is up. The vote is made slow (39 of 40 readings), so for the frames below
-// the voted cell is still the centre while the position is already in the
-// right column.
+// is up. The cell decision is off and the vote is made slow (39 of 40
+// readings), so for the frames below the voted cell is still the centre
+// while the position is already in the right column.
 function stepRightUnderASlowVote(cellLock) {
   const w = loadWindow();
   w.setGameInputMode("sensor");
   w.resetGame();
+  w.setCellDecision(false);
   w.tuneSensor({ cellWindow: 40, cellVotes: 39 });
   w.setCellLock(cellLock);
   run(w, scannersSeeing(75, 85));

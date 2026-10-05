@@ -230,9 +230,20 @@ class FilterConfig:
     # Safety (TOO_CLOSE_FRAMES)
     too_close_frames: int = 2
 
-    # Cell vote (tuning.cellWindow, tuning.cellVotes)
+    # Cell vote (tuning.cellWindow, tuning.cellVotes), used with the cell
+    # decision off
     cell_window: int = 25
     cell_votes: int = 13
+
+    # The cell decision (tuning.cellDecision, cellMarginCm, cellDwellMs,
+    # cellStillCm, cellStillHoldMs, cellAnchorRate; CellDecider): on, it decides the cell in
+    # place of the vote
+    cell_decision: bool = True
+    cell_margin_cm: float = 6.0
+    cell_dwell_ms: float = 500.0
+    cell_still_cm: float = 25.0
+    cell_still_hold_ms: float = 1500.0
+    cell_anchor_rate: float = 0.1
 
     # StreakHold and MajorityWindowHold, and tools/chain_replay.py. The
     # pipeline itself rides out unusable readings for as long as they last
@@ -701,6 +712,15 @@ class Geometry(ABC):
 
     def reset(self) -> None:
         """Clear any state carried between updates. Override if stateful."""
+
+    def reading_points(self, raw: Sequence[Optional[float]],
+                       filtered: Sequence[Optional[float]], fresh: Sequence[bool],
+                       area: PlayArea) -> list:
+        """readingNodes() in game.js: (slot, (x_cm, y_cm)) for each node that
+        read this update and sees the player, at its own point. A geometry
+        with no servo angles has none, and the cell decision then goes by the
+        position alone."""
+        return []
 
 
 class UltrasonicArrayGeometry(Geometry):
@@ -1386,6 +1406,20 @@ class TwoSensorGeometry(Geometry):
         near, far = area.per_column[area.column_at(x)]
         return (x, y) if near <= y <= far * (1 + config.far_leeway) else None
 
+    def reading_points(self, raw, filtered, fresh, area) -> list:
+        """readingNodes() in game.js: each node with a fresh reading that is
+        not lost (found or half), at its own point (_own_point()), as
+        (slot, (x_cm, y_cm)). Called after track(), so the point is this
+        update's."""
+        points = []
+        for slot in (self.LEFT, self.RIGHT):
+            if not fresh[slot] or raw[slot] is None or self._states[slot] == SCAN_LOST:
+                continue
+            point = self._own_point(slot, filtered, area)
+            if point is not None:
+                points.append((slot, point))
+        return points
+
     def _confident_point(self, slot, filtered, area) -> Optional[tuple]:
         """confidentPoint() in game.js: a confident node's own reading
         (_own_point()), or None when the node is not confident."""
@@ -1679,6 +1713,126 @@ class CellStabiliser:
         return self.cell
 
 
+class CellDecider:
+    """The cell decision. Port of decideCell() in game.js, which says why.
+
+    The cell moves only when the position has gone cell_margin_cm past its
+    edges and stayed past them for cell_dwell_ms of readings (twice that to a
+    cell not next to it), counted up while readings put the player there and
+    down while they put them back. A node whose reading is within
+    cell_still_cm of its anchor - its own point from its first reading with
+    the position in the cell, eased cell_anchor_rate of the way to each later
+    one with the position in the cell - counts for staying, for up to cell_still_hold_ms of the position being
+    out of the cell, and not in the first cell_still_hold_ms after the first
+    cell is taken: a scan turn changing over moves the position by the
+    difference between the nodes' biases, not because anyone moved.
+    """
+
+    # CELL_DWELL_STEP_CAP_MS: a longer gap between counted readings counts as this.
+    DWELL_STEP_CAP_MS = 250.0
+
+    def __init__(self, config: FilterConfig):
+        self.reset()
+
+    def reset(self) -> None:
+        self.cell: Optional[tuple] = None
+        self._challenger: Optional[tuple] = None
+        self._evidence_ms = 0.0
+        self._last_ms: Optional[float] = None
+        self._first_ms: Optional[float] = None
+        self._away: Optional[tuple] = None
+        self._away_since: Optional[float] = None
+        self._anchors: list = [None] * GRID_SIZE
+
+    @staticmethod
+    def _cell_of(x_cm: float, y_cm: float, area: PlayArea) -> tuple:
+        """cellOfPosition(): the cell by the grid alone, no hysteresis."""
+        gx = area.column_at(x_cm)
+        return gx, area.row_for(gx, y_cm)
+
+    @staticmethod
+    def _near(cell: tuple, x_cm: float, y_cm: float, area: PlayArea, margin: float) -> bool:
+        """nearCell(): (x, y) inside the cell grown by margin cm on every side."""
+        near, far = area.per_column[cell[0]]
+        row_depth = (far - near) / GRID_SIZE
+        top = near + cell[1] * row_depth
+        pitch = area.width_cm / GRID_SIZE
+        return (cell[0] * pitch - margin <= x_cm <= (cell[0] + 1) * pitch + margin
+                and top - margin <= y_cm <= top + row_depth + margin)
+
+    def decide(self, x_cm: float, y_cm: float, counted: bool, points: list,
+               now_ms: float, area: PlayArea, config: FilterConfig) -> tuple:
+        """The decided cell for an ok fix at (x_cm, y_cm). counted: the update
+        carries a node's new reading. points: Geometry.reading_points()."""
+        here = self._cell_of(x_cm, y_cm, area)
+        if not counted:
+            return self.cell if self.cell is not None else here
+
+        if self.cell is None:
+            self.cell = here
+            self._last_ms = now_ms
+            self._first_ms = now_ms
+            for slot, point in points:
+                self._anchors[slot] = point
+            return self.cell
+
+        current = self.cell
+        inside = self._near(current, x_cm, y_cm, area, config.cell_margin_cm)
+        candidate = current if inside else here
+        if inside:
+            self._away = None
+            self._away_since = None
+        elif here != self._away:
+            self._away = here
+            self._away_since = now_ms
+        swing = (not inside and now_ms - self._away_since < config.cell_still_hold_ms
+                 and now_ms - self._first_ms >= config.cell_still_hold_ms)
+
+        still = moved = 0
+        for slot, point in points:
+            anchor = self._anchors[slot]
+            if anchor is None:
+                if inside:
+                    self._anchors[slot] = point
+                continue
+            if math.hypot(point[0] - anchor[0], point[1] - anchor[1]) < config.cell_still_cm:
+                still += 1
+            else:
+                moved += 1
+            if inside:
+                rate = config.cell_anchor_rate
+                self._anchors[slot] = (anchor[0] + rate * (point[0] - anchor[0]),
+                                       anchor[1] + rate * (point[1] - anchor[1]))
+        if still > 0 and moved == 0 and swing:
+            candidate = current
+
+        step = min(self.DWELL_STEP_CAP_MS, now_ms - self._last_ms)
+        self._last_ms = now_ms
+        if candidate == current:
+            self._evidence_ms = max(0.0, self._evidence_ms - step)
+            if self._evidence_ms == 0:
+                self._challenger = None
+        elif candidate == self._challenger:
+            self._evidence_ms += step
+        else:
+            self._challenger = candidate
+            self._evidence_ms = step
+
+        challenger = self._challenger
+        if challenger is not None:
+            next_to = abs(challenger[0] - current[0]) <= 1 and abs(challenger[1] - current[1]) <= 1
+            if self._evidence_ms >= config.cell_dwell_ms * (1 if next_to else 2):
+                self.cell = challenger
+                self._challenger = None
+                self._evidence_ms = 0.0
+                self._away = None
+                self._away_since = None
+                self._anchors = [None] * GRID_SIZE
+                for slot, point in points:
+                    self._anchors[slot] = point
+        return self.cell
+
+
 # =============================================================================
 # Stage 5 - hold and recovery (swappable policy)
 # =============================================================================
@@ -1784,6 +1938,7 @@ class CoordinatePipeline:
         self._channels = [ChannelFilter(self.config) for _ in range(geometry.channel_count)]
         self._guard = ProximityGuard(self.config)
         self._stabiliser = CellStabiliser(self.config)
+        self._decider = CellDecider(self.config)
         self._held_cell: Optional[tuple] = None
         self._held_xy: Optional[tuple] = None
 
@@ -1826,11 +1981,23 @@ class CoordinatePipeline:
         for channel in self._channels:
             channel._cfg = self.config
 
+    def set_cell_decision(self, on: bool) -> None:
+        """The cell decision switch (setCellDecision() in game.js): the cell
+        decision or the vote from the next reading, either starting afresh;
+        nothing else in the config changes."""
+        if bool(on) != self.config.cell_decision:
+            self._stabiliser.reset()
+            self._decider.reset()
+        self.config = replace(self.config, cell_decision=bool(on))
+        for channel in self._channels:
+            channel._cfg = self.config
+
     def reset(self) -> None:
         for channel in self._channels:
             channel.reset()
         self._guard.reset()
         self._stabiliser.reset()
+        self._decider.reset()
         self.hold.reset()
         self.geometry.reset()
         self._held_cell = None
@@ -1891,7 +2058,14 @@ class CoordinatePipeline:
         cell = self._resolve_cell(fix)
         if cell is not None:
             raw_gx, raw_gy = cell
-            gx, gy = self._stabiliser.vote(raw_gx, raw_gy)
+            if self.config.cell_decision:
+                # Only an update carrying a node's new reading counts.
+                counted = any(is_fresh and value is not None for is_fresh, value in zip(fresh, raw))
+                points = self.geometry.reading_points(raw, filtered, fresh, self.area)
+                gx, gy = self._decider.decide(fix.x_cm, fix.y_cm, counted, points, now_ms,
+                                              self.area, self.config)
+            else:
+                gx, gy = self._stabiliser.vote(raw_gx, raw_gy)
             self.hold.record(True)
             self._held_cell = (gx, gy)
             self._held_xy = (fix.x_cm, fix.y_cm)

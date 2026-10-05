@@ -156,6 +156,10 @@ class ServerFilterStage:
         """The game's dead zone switch (FilterConfig.dead_zone)."""
         self.pipeline.set_dead_zone(on)
 
+    def set_cell_decision(self, on: bool) -> None:
+        """The game's cell decision switch (FilterConfig.cell_decision)."""
+        self.pipeline.set_cell_decision(on)
+
     def set_calibration(self, per_column: Sequence[tuple]) -> None:
         """Apply the calibration as (near_cm, far_cm) per column: the left and
         right as captured, the centre derived by the browser."""

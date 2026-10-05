@@ -408,6 +408,7 @@ let sentKalman = null;
 let sentAngleLimit = null;
 let sentTriAimTolerance = null;
 let sentDeadZone = null;
+let sentCellDecision = null;
 let sentDynamicRules = null;
 let sentConfidenceLevel = null;
 let sentFarHalf = null;
@@ -481,6 +482,13 @@ function syncServerFilterSetup() {
   const deadZone = window.getDeadZone();
   if (deadZone !== sentDeadZone && sendToServer({ type: "filter:deadZone", on: deadZone })) {
     sentDeadZone = deadZone;
+  }
+
+  // The cell decision switch, so the server's chain decides the cell the same way.
+  const cellDecision = window.getCellDecision();
+  if (cellDecision !== sentCellDecision &&
+      sendToServer({ type: "filter:cellDecision", on: cellDecision })) {
+    sentCellDecision = cellDecision;
   }
 
   // Dynamic's rule switches, so the server's chain places the player the same way.
@@ -649,6 +657,12 @@ function handleRemoteCommand(command) {
       window.setDeadZone(command.enabled);
       syncServerFilterSetup();
       break;
+    case "cellDecision":
+      // The cell decision: the margin, the dwell and each node against
+      // itself, or the older vote.
+      window.setCellDecision(command.enabled);
+      syncServerFilterSetup();
+      break;
     case "cellLock":
       // The cell lock: the drawn cursor, and the hole it scores in, keep to
       // the voted cell. Drawing only, so the server's chain is not told.
@@ -715,6 +729,7 @@ function sendGameStatus() {
     triAimTolerance: window.getTriAimTolerance(),
     deadZone: window.getDeadZone(),
     cellLock: window.getCellLock(),
+    cellDecision: window.getCellDecision(),
     alertHeld: window.isAlertHeld(),
     dynamicRules: window.getDynamicRules(),
     confidenceLevel: window.getConfidenceLevel(),
@@ -787,6 +802,7 @@ function connectSocket() {
     sentAngleLimit = null;
     sentTriAimTolerance = null;
     sentDeadZone = null;
+    sentCellDecision = null;
     sentDynamicRules = null;
     sentConfidenceLevel = null;
     sentFarHalf = null;
