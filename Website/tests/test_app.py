@@ -1407,12 +1407,12 @@ class NodeRoleTests(BrokerTestCase):
         app.assign_node_roles([1, None, None])
         conn = FakeNodeSocket(b"\r\n")
         app.handle_node_connection(conn, ("10.0.0.1", 1000))
-        self.assertEqual(conn.sent, ["1\n", "SCAN\n", "ROLE LEFT\n", "PULSES 1\n"])
+        self.assertEqual(conn.sent, ["1\n", "SCAN\n", "ROLE LEFT\n", "PULSES 1\n", "FARHOLD 1\n", "FARSTEER 1\n"])
 
     def test_a_node_without_a_role_is_sent_none(self):
         conn = FakeNodeSocket(b"\r\n")
         app.handle_node_connection(conn, ("10.0.0.1", 1000))
-        self.assertEqual(conn.sent, ["1\n", "SCAN\n", "PULSES 1\n"])
+        self.assertEqual(conn.sent, ["1\n", "SCAN\n", "PULSES 1\n", "FARHOLD 1\n", "FARSTEER 1\n"])
 
     def test_bad_slots_are_ignored(self):
         app.assign_node_roles([1, 2])
@@ -1460,20 +1460,20 @@ class NodeAimTests(BrokerTestCase):
         app.set_nodes_aim(True)
         conn = FakeNodeSocket(b"\r\n")
         app.handle_node_connection(conn, ("10.0.0.1", 1000))
-        self.assertEqual(conn.sent, ["1\n", "AIM 90\n", "PULSES 1\n"])
+        self.assertEqual(conn.sent, ["1\n", "AIM 90\n", "PULSES 1\n", "FARHOLD 1\n", "FARSTEER 1\n"])
 
     def test_a_node_that_connects_while_nobody_calibrates_is_told_to_scan(self):
         # It boots holding straight, so it only sweeps once told to.
         conn = FakeNodeSocket(b"\r\n")
         app.handle_node_connection(conn, ("10.0.0.1", 1000))
-        self.assertEqual(conn.sent, ["1\n", "SCAN\n", "PULSES 1\n"])
+        self.assertEqual(conn.sent, ["1\n", "SCAN\n", "PULSES 1\n", "FARHOLD 1\n", "FARSTEER 1\n"])
 
     def test_the_hold_is_sent_before_the_role(self):
         app.set_nodes_aim(True)
         app.assign_node_roles([1, None, None])
         conn = FakeNodeSocket(b"\r\n")
         app.handle_node_connection(conn, ("10.0.0.1", 1000))
-        self.assertEqual(conn.sent, ["1\n", "AIM 90\n", "ROLE LEFT\n", "PULSES 1\n"])
+        self.assertEqual(conn.sent, ["1\n", "AIM 90\n", "ROLE LEFT\n", "PULSES 1\n", "FARHOLD 1\n", "FARSTEER 1\n"])
 
     def test_another_page_off_the_calibration_screen_cannot_release_the_hold(self):
         _, node = self.add_node(conn=RecordingConn())
@@ -1545,7 +1545,7 @@ class NodePulsesTests(BrokerTestCase):
         app.set_nodes_pulse_count(2)
         conn = FakeNodeSocket(b"\r\n")
         app.handle_node_connection(conn, ("10.0.0.1", 1000))
-        self.assertEqual(conn.sent, ["1\n", "SCAN\n", "PULSES 2\n"])
+        self.assertEqual(conn.sent, ["1\n", "SCAN\n", "PULSES 2\n", "FARHOLD 1\n", "FARSTEER 1\n"])
 
     def test_a_bad_count_is_ignored(self):
         _, node = self.add_node(conn=RecordingConn())
@@ -1562,6 +1562,63 @@ class NodePulsesTests(BrokerTestCase):
             asyncio.run(app.browser_handler(socket))
         self.assertEqual(node["conn"].sent, ["PULSES 3\n"])
         self.assertEqual(app.nodes_pulse_count, 3)
+
+
+class NodeFarTests(BrokerTestCase):
+    """Far hold and far steer (Aaron, 6 Oct): the control panel's switches
+    reach the scanner nodes' firmware (FARHOLD / FARSTEER)."""
+
+    def setUp(self):
+        super().setUp()
+        self._saved_far = dict(app.nodes_far)
+        app.nodes_far.update(hold=True, steer=True)
+
+    def tearDown(self):
+        app.nodes_far.update(self._saved_far)
+        super().tearDown()
+
+    def test_both_are_on_until_switched(self):
+        self.assertEqual(app.far_message(), {"type": "far:status", "hold": True, "steer": True})
+
+    def test_a_switch_reaches_every_connected_node(self):
+        _, first = self.add_node(conn=RecordingConn())
+        _, second = self.add_node(address=("10.0.0.2", 1001), conn=RecordingConn())
+        with mock.patch("builtins.print"):
+            self.assertTrue(app.set_nodes_far("hold", False))
+            self.assertTrue(app.set_nodes_far("steer", False))
+            self.assertTrue(app.set_nodes_far("hold", True))
+        for node in (first, second):
+            self.assertEqual(node["conn"].sent, ["FARHOLD 0\n", "FARSTEER 0\n", "FARHOLD 1\n"])
+        self.assertEqual(app.far_message(), {"type": "far:status", "hold": True, "steer": False})
+
+    def test_a_node_that_connects_later_is_told_the_current_switches(self):
+        with mock.patch("builtins.print"):
+            app.set_nodes_far("steer", False)
+        conn = FakeNodeSocket(b"\r\n")
+        app.handle_node_connection(conn, ("10.0.0.1", 1000))
+        self.assertEqual(conn.sent[-2:], ["FARHOLD 1\n", "FARSTEER 0\n"])
+
+    def test_a_bad_switch_is_ignored(self):
+        _, node = self.add_node(conn=RecordingConn())
+        with mock.patch("builtins.print"):
+            for switch, on in (("hold", "no"), ("hold", 0), ("steer", None), ("pulses", False)):
+                self.assertFalse(app.set_nodes_far(switch, on))
+        self.assertEqual(node["conn"].sent, [])
+        self.assertEqual(app.far_message(), {"type": "far:status", "hold": True, "steer": True})
+
+    def test_the_control_panel_switches_go_straight_to_the_nodes(self):
+        # No game page needed: the server tells the nodes and answers every
+        # control panel with far:status, and nothing goes to the browsers.
+        _, node = self.add_node(conn=RecordingConn())
+        events = [{"action": "farHold", "enabled": False}, {"action": "farSteer", "enabled": False}]
+        phone = FakeControlSocket(path="/control", incoming=[json.dumps(e) for e in events])
+        with mock.patch.object(app, "broadcast") as broadcast, mock.patch("builtins.print"):
+            asyncio.run(app.control_handler(phone))
+        self.assertEqual(node["conn"].sent, ["FARHOLD 0\n", "FARSTEER 0\n"])
+        self.assertIn(json.dumps({"type": "far:status", "hold": True, "steer": True}), phone.sent)
+        statuses = [json.loads(call.args[1]) for call in broadcast.call_args_list]
+        self.assertEqual(statuses[-1], {"type": "far:status", "hold": False, "steer": False})
+        self.assertTrue(all(status["type"] == "far:status" for status in statuses))
 
 
 class FakeControlSocket(FakeBrowserSocket):

@@ -676,6 +676,50 @@ def send_node_pulses(node_id):
     send_command(node_id, command)
 
 
+# Far hold and far steer (Aaron, 6 Oct), the control panel's two switches, both
+# on: after an echo 100 cm or more out, a scanner node keeps its servo still for
+# up to 3 lost pairs before it sweeps (FARHOLD), and a far half-found echo
+# steers it 1 degree instead of 3 (FARSTEER); see src/Config.h. The server
+# holds the setting: every node is told on arrival (a rebooted node starts with
+# both on) and again whenever a switch changes.
+FAR_COMMANDS = {"hold": "FARHOLD", "steer": "FARSTEER"}
+nodes_far = {"hold": True, "steer": True}
+
+
+def far_command(switch):
+    return f"{FAR_COMMANDS[switch]} {1 if nodes_far[switch] else 0}"
+
+
+def set_nodes_far(switch, on):
+    """Turn far hold ("hold") or far steer ("steer") on or off on every
+    connected node. Anything but one of those, or a value that is not
+    true/false, is ignored. Returns whether it was taken."""
+    if switch not in FAR_COMMANDS or not isinstance(on, bool):
+        print(f"Ignored bad far switch: {switch!r}={on!r}")
+        return False
+    with state_lock:
+        nodes_far[switch] = on
+        command = far_command(switch)
+        node_ids = [node_id for node_id, node in nodes.items() if node.get("conn") is not None]
+    print(f"Far {switch}: {'on' if on else 'off'} (control panel)")
+    for node_id in node_ids:
+        send_command(node_id, command)
+    return True
+
+
+def send_node_far(node_id):
+    """Tell a node that has just connected whether far hold and far steer are on."""
+    with state_lock:
+        commands = [far_command(switch) for switch in FAR_COMMANDS]
+    for command in commands:
+        send_command(node_id, command)
+
+
+def far_message():
+    """What the control panel's Far hold and Far steer switches show."""
+    return {"type": "far:status", "hold": nodes_far["hold"], "steer": nodes_far["steer"]}
+
+
 # The empty room, from the Room button on the game screen (nodes:room), the
 # control panel's Learn room / Forget room ("room" action) or POST /api/room. LEARN: with nobody in the play area, each scanner node sweeps
 # its range and records the room's echoes, and from then on ignores them.
@@ -787,11 +831,12 @@ def handle_node_connection(conn, address):
         print(f"ESP32 connected from {address}, {action} id {node_id}")
         conn.sendall(f"{node_id}\n".encode("utf-8"))
         # A rebooted node has forgotten whether it should be holding straight
-        # for calibration, which mount it is and how many pulses to take; tell
-        # it again.
+        # for calibration, which mount it is, how many pulses to take and
+        # whether far hold and far steer are on; tell it again.
         send_node_aim(node_id)
         send_node_role(node_id)
         send_node_pulses(node_id)
+        send_node_far(node_id)
         if first_message is not None:
             update_node(node_id, first_message)
         with conn.makefile("r") as stream:
@@ -924,14 +969,15 @@ def handover_message():
 
 async def control_handler(websocket):
     """Phone control panel: relays commands to every game browser. The empty
-    room ("room": learn or forget) goes straight to the nodes instead, so it
-    works with no game page open, and the Handover switch ("handover") to the
-    server."""
+    room ("room": learn or forget) and the Far hold and Far steer switches
+    ("farHold", "farSteer") go straight to the nodes instead, so they work with
+    no game page open, and the Handover switch ("handover") to the server."""
     CONTROL_CONNECTIONS.add(websocket)
     print(f"Control panel connected from {websocket.remote_address}")
     try:
         await websocket.send(json.dumps({"type": "nodes:update", "nodes": snapshot_nodes()}))
         await websocket.send(json.dumps(handover_message()))
+        await websocket.send(json.dumps(far_message()))
         async for message in websocket:
             try:
                 event = json.loads(message)
@@ -944,6 +990,12 @@ async def control_handler(websocket):
             if event.get("action") == "handover":
                 set_handover(event.get("enabled"))
                 broadcast(CONTROL_CONNECTIONS.copy(), json.dumps(handover_message()))
+                continue
+            if event.get("action") in ("farHold", "farSteer"):
+                print(f"Control panel: {event}")
+                switch = "hold" if event["action"] == "farHold" else "steer"
+                await asyncio.to_thread(set_nodes_far, switch, event.get("enabled"))
+                broadcast(CONTROL_CONNECTIONS.copy(), json.dumps(far_message()))
                 continue
             if event.get("action") not in CONTROL_ACTIONS:
                 continue

@@ -39,8 +39,11 @@ struct ScanReading {
 // Each step reads a pulse pair - left, a short gap, then right - at a settled
 // angle, and moves the servo on what it saw:
 //   found      stay put
-//   half-found a small step towards the sensor that has the player
-//   lost       a large sweep step, reversing at each servo limit
+//   half-found a small step towards the sensor that has the player (a smaller
+//              one when that echo is far out, with far steer on)
+//   lost       a large sweep step, reversing at each servo limit - unless the
+//              last echo was far out and far hold is on: then the servo stays
+//              put for up to config::FAR_HOLD_PAIRS lost pairs first
 //
 // Multi-pulse: with pulsesPerAngle above 1, a pair that is found or half-found
 // is not acted on straight away. The servo stays where it is for that many
@@ -81,6 +84,12 @@ public:
     // 1 turns multi-pulse off. Clamped to 1..config::MAX_PULSES_PER_ANGLE.
     void setPulsesPerAngle(int count);
     int pulsesPerAngle() const { return pulsesPerAngle_; }
+
+    // Far hold and far steer on or off (FARHOLD / FARSTEER; see Config.h).
+    void setFarHold(bool on);
+    bool farHold() const { return farHold_; }
+    void setFarSteer(bool on);
+    bool farSteer() const { return farSteer_; }
 
     // Drops a half-read pair and any pulses collected at this angle, so a new
     // scan turn starts clean rather than pairing a left reading from before the
@@ -145,6 +154,15 @@ private:
     // steering with it, and vice versa.
     int sweepDir_ = 1;
     int steerDir_ = 1;
+
+    // Far hold: how far out the last echo that found or half-found the player
+    // was (config::NO_ECHO when there is none to hold on to), and how many lost
+    // pairs in a row the servo has stayed put for since.
+    bool farHold_ = config::DEFAULT_FAR_HOLD;
+    bool farSteer_ = config::DEFAULT_FAR_STEER;
+    float lastHeardCm_ = config::NO_ECHO;
+    int farLostPairs_ = 0;
+    void forgetLastHeard();
 
     RoomMap room_;
 

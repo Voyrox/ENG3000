@@ -158,6 +158,8 @@
         <h2>Sensors</h2>
         <div class="row">
             <button id="handoverBtn">Handover: on</button>
+            <button id="farHoldBtn">Far hold: on</button>
+            <button id="farSteerBtn">Far steer: on</button>
         </div>
         <table>
             <thead><tr><th>Node</th><th>State</th><th>Filtered cm</th><th>Angle</th><th>Scan</th><th>Room</th><th>RPS</th><th>Confidence</th></tr></thead>
@@ -168,6 +170,10 @@
             at Dynamic's confidence level; "following n" is a node
             being aimed at node n's fix. Handover off: confidence is still worked out, but no
             node is aimed (no LOOK).</p>
+        <p class="note">Far hold: after an echo 100 cm or more out, a node keeps its servo still for up
+            to 3 lost pairs before it sweeps (not at its servo's stop). Far steer: a half-found echo
+            100 cm or more out steers the servo 1&deg; instead of 3&deg;. Both are in the nodes'
+            firmware: they need the firmware from 6 Oct on, and work with no game page open.</p>
     </section>
 
     <script>
@@ -301,6 +307,20 @@
         // answers with handover:status.
         let handoverOn = true;
         $("handoverBtn").addEventListener("click", () => send({ action: "handover", enabled: !handoverOn }));
+        // Far hold and far steer go straight to the server, which tells the
+        // nodes (FARHOLD / FARSTEER) and answers with far:status.
+        let far = { hold: true, steer: true };
+        $("farHoldBtn").addEventListener("click", () => send({ action: "farHold", enabled: !far.hold }));
+        $("farSteerBtn").addEventListener("click", () => send({ action: "farSteer", enabled: !far.steer }));
+        function renderFar(status) {
+            if (!status || typeof status.hold !== "boolean" || typeof status.steer !== "boolean") return;
+            far = { hold: status.hold, steer: status.steer };
+            $("farHoldBtn").textContent = `Far hold: ${far.hold ? "on" : "off"}`;
+            $("farHoldBtn").classList.toggle("selected", !far.hold);
+            $("farSteerBtn").textContent = `Far steer: ${far.steer ? "on" : "off"}`;
+            $("farSteerBtn").classList.toggle("selected", !far.steer);
+        }
+
         function renderHandover(on) {
             if (typeof on !== "boolean") return;
             handoverOn = on;
@@ -689,6 +709,8 @@
                     renderNodes(payload.nodes);
                 } else if (payload.type === "handover:status") {
                     renderHandover(payload.on);
+                } else if (payload.type === "far:status") {
+                    renderFar(payload);
                 }
             });
             socket.addEventListener("close", () => {

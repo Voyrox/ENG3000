@@ -123,6 +123,26 @@ constexpr int STEER_STEP_DEG = 3;
 // Lost: a large sweep step, reversing at each servo limit.
 constexpr int SWEEP_STEP_DEG = 14;
 
+// Far range (Aaron, 6 Oct). A player far out is a small target, and the rig's
+// serial logs (5-6 Oct, 00:46-00:56) show the scan losing them there: after the
+// right node heard someone 100-140 cm out, its next pair was lost 51 % of the
+// time, 82-84 % past 140 cm, against 14 % under 60 cm. Each of those lost pairs
+// swung the servo a whole sweep step off them.
+//   Far hold: after an echo at least FAR_RANGE_CM out, a lost pair keeps the
+//   servo where it is, for up to FAR_HOLD_PAIRS lost pairs in a row; only then
+//   does the sweep start.
+//   Far steer: a half-found echo at least FAR_RANGE_CM out steers by
+//   FAR_STEER_STEP_DEG instead of STEER_STEP_DEG, so a node with one weak
+//   sensor - which always steers the same way - drifts off a far player more
+//   slowly (3 degrees is 8 cm across at 150 cm).
+// Both are on until the server says otherwise (FARHOLD 0 / FARSTEER 0, the
+// control panel's switches).
+constexpr float FAR_RANGE_CM = 100;
+constexpr int FAR_HOLD_PAIRS = 3;
+constexpr int FAR_STEER_STEP_DEG = 1;
+constexpr bool DEFAULT_FAR_HOLD = true;
+constexpr bool DEFAULT_FAR_STEER = true;
+
 // --- Multi-pulse ----------------------------------------------------------
 // In found or half-found, take this many pulse pairs at one angle and average
 // them before reporting and moving. 1 is off (one pair per move). The server
