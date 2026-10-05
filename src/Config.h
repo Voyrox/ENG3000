@@ -21,7 +21,7 @@
 #define NODE_WIFI_PASSWORD "bruh12345"
 #endif
 #ifndef NODE_SERVER_IP
-#define NODE_SERVER_IP "192.168.1.108"
+#define NODE_SERVER_IP "192.168.137.1"
 #endif
 
 namespace config {
