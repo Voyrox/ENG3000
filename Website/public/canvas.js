@@ -615,6 +615,12 @@ c.addEventListener("click", (event) => {
       return;
     }
 
+    if (window.getStatsToggleAtPoint(c, point.x, point.y)) {
+      window.toggleGameStats();
+      draw();
+      return;
+    }
+
     const overButton = window.getGameOverButtonAtPoint(c, point.x, point.y);
     if (overButton) {
       if (overButton.type === "restart") {

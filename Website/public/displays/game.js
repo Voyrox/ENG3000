@@ -2087,6 +2087,48 @@
     return view;
   }
 
+  // --- Stats toggle ----------------------------------------------------------
+  // Top-right, under the level panel: shows or hides the three stats panels
+  // (LIVE STATS, CURSOR, LIVE DATA). Remembered per browser; the game plays the
+  // same either way.
+  const STATS_VISIBLE_KEY = "eng3000.statsVisible";
+  let statsVisible = true;
+  try {
+    statsVisible = localStorage.getItem(STATS_VISIBLE_KEY) !== "0";
+  } catch (err) {
+    // Storage blocked: start with the stats shown.
+  }
+
+  function getStatsToggleLayout(canvas) {
+    const width = canvas.clientWidth || canvas.width;
+    const w = 130; // the level panel's width, so the two line up
+    return { x: width - 12 - w, y: 60, width: w, height: 32 };
+  }
+
+  window.getStatsToggleAtPoint = function getStatsToggleAtPoint(canvas, x, y) {
+    return pointInRect(x, y, getStatsToggleLayout(canvas)) ? { type: "stats" } : null;
+  };
+
+  window.toggleGameStats = function toggleGameStats() {
+    statsVisible = !statsVisible;
+    try {
+      localStorage.setItem(STATS_VISIBLE_KEY, statsVisible ? "1" : "0");
+    } catch (err) {
+      // Not remembered, but still toggled for this page.
+    }
+    return statsVisible;
+  };
+
+  function drawStatsToggle(ctx, canvas) {
+    const r = getStatsToggleLayout(canvas);
+    drawHudPanel(ctx, r.x, r.y, r.width, r.height, 10);
+    ctx.textAlign = "center";
+    ctx.fillStyle = statsVisible ? "#f4f4f5" : "#9298aa";
+    ctx.font = "bold 14px monospace";
+    ctx.fillText(statsVisible ? "Stats: On" : "Stats: Off", r.x + r.width / 2, r.y + r.height / 2 + 5);
+    ctx.textAlign = "left";
+  }
+
   // --- HUD layout ------------------------------------------------------------
   // Bottom-left, from the corner up: the miniature cursor; in sensor mode the
   // sensor panel on it and the position map on that (mouse and remote need no
@@ -2099,7 +2141,7 @@
     const view = window.GameStatsView || null;
     const miniSize = view ? view.MINI_CURSOR : { w: 150, h: 180 };
     const mini = { x: HUD_EDGE, y: height - HUD_EDGE - miniSize.h, w: miniSize.w, h: miniSize.h };
-    if (view) view.renderMiniCursor(ctx, mini, miniCursorView(canvas));
+    if (view && statsVisible) view.renderMiniCursor(ctx, mini, miniCursorView(canvas));
 
     const score = getScorePanelRect(canvas);
     const minTop = score.y + score.h + HUD_GAP;
@@ -2112,7 +2154,7 @@
     }
 
     const stats = roundStats();
-    if (!view || !stats) return;
+    if (!view || !stats || !statsVisible) return;
     const now = performance.now();
     const snap = stats.snapshot(now);
 
@@ -2216,6 +2258,7 @@
     ctx.fillStyle = "#f4f4f5";
     ctx.font = "bold 20px monospace";
     ctx.fillText(`Level: ${gameState.level}`, levelPanel.x + levelPanel.w - 14, levelPanel.y + 27);
+    drawStatsToggle(ctx, canvas);
 
     ctx.textAlign = "center";
     const secondsLeft = Math.ceil(gameState.remainingMs / 1000);
