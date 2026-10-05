@@ -21,10 +21,12 @@ the proximity alert do not read it, and the median stays the rule owner.
 
 from __future__ import annotations
 
+import dataclasses
 from typing import Optional, Sequence
 
 from filterRules import (
     GRID_SIZE,
+    LOST_READINGS_MAX,
     CoordinatePipeline,
     FilteredCoordinate,
     PlayArea,
@@ -91,6 +93,13 @@ class ServerFilterStage:
         self.latest = None
         self.predicted_cm = [None] * GRID_SIZE
 
+    def set_lost_readings(self, count) -> None:
+        """How many readings each node's lost score is taken over (the game's
+        control panel setting; FilterConfig.lost_readings), clamped to 1..50
+        as the game clamps it. ValueError if it is not a number."""
+        n = max(1, min(LOST_READINGS_MAX, int(round(float(count)))))
+        self.pipeline.config = dataclasses.replace(self.pipeline.config, lost_readings=n)
+
     def set_position_method(self, method: str) -> None:
         """The game's position switch: "dyn" (Dynamic, the steadiest of the
         other three), "los" (line of sight), "tri" (trilateration) or "avg"
@@ -144,7 +153,9 @@ class ServerFilterStage:
         # enters a median window. Only the reporting node's channel is fresh.
         fresh = [slot == node_id or distances[i] is None
                  for i, slot in enumerate(self.sensor_slots)]
-        self.latest = self.pipeline.update(sample, now_ms, fresh=fresh)
+        # Only the reporting node was heard: its scan state counts once.
+        heard = [slot == node_id for slot in self.sensor_slots]
+        self.latest = self.pipeline.update(sample, now_ms, fresh=fresh, heard=heard)
 
         # Trackers: the same raw reading, on the reporting channel only (a
         # negative value is a missing reading, never 0 cm). Every channel's

@@ -157,8 +157,9 @@ function buildStream() {
   }
 
   // 16. Both scanners lose the player for 3 s: the cursor rides it out until
-  //     neither has found them for tuning.nobodyFoundMs (2 s), then nobody is
-  //     on the board at once, with no hold - even while, for the second half,
+  //     each one's last tuning.lostReadings readings add up to 0 or less
+  //     (found +1, half 0, lost -1), then out of bounds at once, with no hold
+  //     - the only out of bounds there is - and on while, for the second half,
   //     the left one half-finds furniture (one head hears it), which is not
   //     the player. Then both find the player again.
   for (let i = 0; i < 40; i++) push(scanned(SENSOR_X_CM[0], 70, 90), scanned(SENSOR_X_CM[1], 70, 90));
@@ -167,6 +168,32 @@ function buildStream() {
     push(i < 75 ? [NO_ECHO, sweep, 2] : [jitter(120, 2), 70, 1], [NO_ECHO, 180 - sweep, 2]);
   }
   for (let i = 0; i < 40; i++) push(scanned(SENSOR_X_CM[0], 70, 90), scanned(SENSOR_X_CM[1], 70, 90));
+
+  // 17. The player steps off the right side of the board and stays there,
+  //     both scanners finding them: the cursor stays on the edge square, and
+  //     never out of bounds, since the nodes are finding them. Then they step
+  //     back on.
+  for (let i = 0; i < 140; i++) push(scanned(SENSOR_X_CM[0], 175, 80), scanned(SENSOR_X_CM[1], 175, 80));
+  for (let i = 0; i < 40; i++) push(scanned(SENSOR_X_CM[0], 110, 80), scanned(SENSOR_X_CM[1], 110, 80));
+
+  // 18. The left scanner finds the player in play while the right one has
+  //     locked on to something past the right edge: never out of bounds.
+  for (let i = 0; i < 140; i++) push(scanned(SENSOR_X_CM[0], 60, 90), scanned(SENSOR_X_CM[1], 190, 60));
+
+  // 19. As on the rig on 5 Oct: the nodes take 500 ms turns and are mostly
+  //     lost, with the odd found (a stray echo) or half reading - one in ten
+  //     of each. Out of bounds once each one's last tuning.lostReadings
+  //     readings add up to 0 or less, however the odd found falls. Then both
+  //     find the player again, and it clears.
+  for (let i = 0; i < 200; i++) {
+    const k = i % 10;
+    const sweep = 40 + ((i * 15) % 120);
+    const reading = (nodeX) =>
+      k === 3 ? scanned(nodeX, 75, 80) : k === 7 ? [jitter(120, 2), sweep, 1] : [NO_ECHO, sweep, 2];
+    const leftTurn = Math.floor(i / 25) % 2 === 0;
+    push(leftTurn ? reading(SENSOR_X_CM[0]) : SILENT, leftTurn ? SILENT : reading(SENSOR_X_CM[1]));
+  }
+  for (let i = 0; i < 60; i++) push(scanned(SENSOR_X_CM[0], 75, 80), scanned(SENSOR_X_CM[1], 75, 80));
 
   return steps;
 }

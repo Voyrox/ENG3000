@@ -84,8 +84,10 @@ SERVER_FILTERING = server_filtering_enabled(os.environ)
 #   CON=1 python app.py
 CONTROL_ENABLED = os.environ.get("CON") == "1"
 # "position" is the position switch: Dynamic, line of sight, trilateration or their average.
+# "lostReadings" sets how many readings each node's lost score is taken over
+# (Out of bounds when both nodes are lost).
 CONTROL_ACTIONS = {"point", "release", "start", "mode", "pause", "resume", "restart", "menu", "testMode",
-                   "position"}
+                   "position", "lostReadings"}
 # Every raw node reading to logs/raw-*.csv, for the bench noise test
 # (tools/bench_noise.py). Off unless started with REC=1; see sessionRecorder.py.
 recorder = SessionRecorder.from_env(os.environ)
@@ -769,6 +771,10 @@ def apply_filter_event(event):
             elif event.get("type") == "position:method":
                 # The game's position switch: Dynamic, line of sight, trilateration or both.
                 server_filter.set_position_method(event["method"])
+            elif event.get("type") == "sensor:lostReadings":
+                # The readings each node's lost score is taken over, from the
+                # control panel by way of the game.
+                server_filter.set_lost_readings(event["count"])
     except (KeyError, TypeError, ValueError) as exc:
         print(f"Ignored bad {event.get('type')} message: {exc}")
 

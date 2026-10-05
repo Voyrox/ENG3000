@@ -225,38 +225,139 @@ test("every method's fix comes with its ring on the board, the method in use and
   assert.deepStrictEqual(JSON.parse(JSON.stringify(after.fixes)).avg, { ...after.fixes.avg });
 });
 
-test("both nodes sweeping and finding nobody: Out of bounds after nobodyFoundMs, not ridden out", () => {
+test("both nodes mostly lost: Out of bounds, despite the odd found or half reading", () => {
   const w = loadWindow();
   w.setGameInputMode("sensor");
   w.resetGame();
-  const nobodyFoundMs = w.tuneSensor({}).nobodyFoundMs;
-  const sweeping = [0, 1, 2].map((slot) => ({
-    id: slot + 1,
-    online: true,
-    latest: JSON.stringify({ avg: -1, angle: slot === 0 ? 60 : 120, scanState: 2 }),
-  }));
-  // One clock across the phases, so the wait is measured from the last
-  // reading that found the player.
+  // Of every ten readings, one found (the player) and one half (furniture).
+  let k = 0;
+  const mostlyLost = () => {
+    k += 1;
+    const state = k % 10 === 3 ? 0 : k % 10 === 7 ? 1 : 2;
+    return [0, 1, 2].map((slot) => ({
+      id: slot + 1,
+      online: true,
+      latest: JSON.stringify(state === 0 ? JSON.parse(scannersSeeing(75, 80)[slot].latest)
+        : { avg: state === 1 ? 120 : -1, angle: slot === 0 ? 60 : 120, scanState: state }),
+    }));
+  };
   let t = 0;
-  const step = (nodes, ms) => {
+  const step = (nodesFor, ms) => {
     for (const end = t + ms; t < end;) {
       t += FRAME_MS;
+      w.performance.now = () => t;
+      w.markSensorFrame();
+      w.updateGame(t, CANVAS, nodesFor());
+    }
+    return w.getGameState().sensor;
+  };
+  assert.strictEqual(step(() => scannersSeeing(75, 80), 2000).status, "ok");
+  // One new reading per frame: the found ones still outweigh the rest.
+  assert.strictEqual(step(mostlyLost, 2 * FRAME_MS).status, "ok", "not at once");
+  const gone = step(mostlyLost, 300);
+  assert.strictEqual(gone.status, "out-of-bounds");
+  assert.strictEqual(gone.nobodyFound, true);
+  assert.strictEqual(gone.held, false, "not ridden out on the last square");
+  assert.strictEqual(w.getGameCursorStatus(CANVAS).board, null);
+  assert.strictEqual(step(mostlyLost, 1000).status, "out-of-bounds", "the odd found does not stop it");
+  assert.strictEqual(step(() => scannersSeeing(75, 80), 300).status, "ok",
+    "back once the nodes mostly find the player");
+});
+
+test("the lost readings are set from the control panel, and each node's score is shown", () => {
+  const w = loadWindow();
+  w.setGameInputMode("sensor");
+  w.resetGame();
+  assert.strictEqual(w.getLostReadings(), 8, "the default");
+  assert.strictEqual(w.setLostReadings(5), 5);
+  assert.strictEqual(w.setLostReadings(0), 1, "at least one");
+  assert.strictEqual(w.setLostReadings(99), 50, "at most fifty");
+  assert.strictEqual(w.setLostReadings("many"), 50, "not a number: unchanged");
+  w.setLostReadings(4);
+  assert.strictEqual(JSON.stringify(w.getLostScores()),
+    JSON.stringify([{ score: null, readings: 0 }, { score: null, readings: 0 }]));
+  run(w, scannersSeeing(75, 80), 10);
+  assert.strictEqual(JSON.stringify(w.getLostScores()),
+    JSON.stringify([{ score: 4, readings: 4 }, { score: 4, readings: 4 }]));
+});
+
+test("off the side of the board, found: the edge square, never Out of bounds", () => {
+  const w = loadWindow();
+  w.setGameInputMode("sensor");
+  w.resetGame();
+  const nodes = scannersSeeing(-30, 80);
+  let t = 0;
+  const until = (end) => {
+    while (t < end) {
+      t += FRAME_MS;
+      w.performance.now = () => t;
+      w.markSensorFrame();
+      w.updateGame(t, CANVAS, nodes);
+    }
+  };
+  // Both nodes find the player, off the left side: kept on the edge square.
+  until(1700);
+  const status = w.getGameCursorStatus(CANVAS);
+  assert.strictEqual(status.sensor.status, "ok");
+  assert.strictEqual(status.sensor.xCm, 5, "a tenth of a column inside the left edge");
+  // 80 cm deep is the middle row: the hole under the cursor is the middle-left one.
+  assert.strictEqual(status.hole, 3);
+  assert.strictEqual(w.getGameState().sensor.offBoard, true);
+  // The nodes are finding the player: never out of bounds, however long.
+  until(6000);
+  assert.strictEqual(w.getGameState().sensor.status, "ok");
+});
+
+test("Sensors offline when neither node sends anything, never Out of bounds", () => {
+  const w = loadWindow();
+  w.setGameInputMode("sensor");
+  w.resetGame();
+  const offlineMs = w.tuneSensor({}).offlineMs;
+  let t = 0;
+  let stamp = 0;
+  // Live nodes: each frame a new server stamp. Frozen: the same stamp again.
+  const step = (nodes, ms, live) => {
+    for (const end = t + ms; t < end;) {
+      t += FRAME_MS;
+      if (live) {
+        stamp += 1;
+        nodes.forEach((node) => { node.last_seen = stamp; });
+      }
       w.performance.now = () => t;
       w.markSensorFrame();
       w.updateGame(t, CANVAS, nodes);
     }
     return w.getGameState().sensor;
   };
-  assert.strictEqual(step(scannersSeeing(75, 80), 2000).status, "ok");
-  const lostAt = t;
-  const riding = step(sweeping, nobodyFoundMs - 3 * FRAME_MS);
-  assert.strictEqual(riding.status, "ok", "the player is still on the board just short of it");
-  const gone = step(sweeping, lostAt + nobodyFoundMs + FRAME_MS - t);
-  assert.strictEqual(gone.status, "no-signal", "shown as Out of bounds");
-  assert.strictEqual(gone.nobodyFound, true);
-  assert.strictEqual(gone.held, false, "not ridden out on the last cell");
-  assert.strictEqual(w.getGameCursorStatus(CANVAS).board, null);
-  assert.strictEqual(step(scannersSeeing(75, 80), 500).status, "ok", "back as soon as a node finds them");
+  const nodes = scannersSeeing(75, 80);
+  assert.strictEqual(step(nodes, 1000, true).status, "ok");
+  // Quiet for less than offlineMs: the last square is ridden out.
+  const quiet = step(nodes, offlineMs - 100, false);
+  assert.strictEqual(quiet.status, "ok");
+  assert.strictEqual(step(nodes, 200, false).status, "offline");
+  assert.strictEqual(step(nodes, 500, true).status, "ok", "back as soon as they send again");
+  // The server marking both nodes offline says so at once.
+  nodes.forEach((node) => { node.online = false; });
+  assert.strictEqual(step(nodes, FRAME_MS, false).status, "offline");
+});
+
+test("a long run of unusable readings is ridden out on the last square", () => {
+  const w = loadWindow();
+  w.setGameInputMode("sensor");
+  w.resetGame();
+  run(w, scannersSeeing(75, 80));
+  // No echo, and no scan state to say the nodes have lost the player: 20 s.
+  const silent = [1, 2, 3].map((id) => ({ id, online: true, latest: JSON.stringify({ avg: -1 }) }));
+  for (let i = 1; i <= 1250; i += 1) {
+    const t = 240 * FRAME_MS + i * FRAME_MS;
+    w.performance.now = () => t;
+    w.markSensorFrame();
+    w.updateGame(t, CANVAS, silent);
+  }
+  const sensor = w.getGameState().sensor;
+  assert.strictEqual(sensor.status, "ok");
+  assert.strictEqual(sensor.held, true);
+  assert.strictEqual(sensor.gx, 1);
 });
 
 test("a ring off the side of the board stays at the board's edge; no signal has no fixes", () => {

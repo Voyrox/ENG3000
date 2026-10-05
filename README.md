@@ -55,6 +55,8 @@ build_flags =
 
 The game puts each node on the screen edge at the centre of an outer column. In sensor mode, four buttons above the sensor panel pick how the player is placed - **Dynamic** (the default), **LOS** (line of sight), **TRI** (trilateration) or **AVG** (their average); the same switch is on the **Options** screen, under *Placing the Player*, and on the phone's `/control` page. Picking LOS, TRI or AVG turns Dynamic off. **Compare** draws line of sight, trilateration and the average on the board as labelled rings (LOS, TRI, AVG) while the big cursor follows the one placing the player (the thick ring); with Dynamic on, its button says which one it is following (e.g. `DYN TRI`). The sensor panel lists all three positions. See *Placing the player* under the filtering pipeline. With no `angle` from either node there is no line of sight, and every method is trilateration.
 
+**Out of bounds** appears in one case only: both nodes are lost (Aaron, 5 Oct). Each node's last *n* readings are scored as the control panel shows them - *found* +1, *half* 0, *lost* -1 - and a node whose scores add up to 0 or less is lost, so the odd found reading among lost ones does not stop it, and a node mostly finding the player never is. *n* is 8 by default; set it on the phone control panel under *Out of bounds* (minus and plus), which also shows each node's score now. The game keeps it in that browser, and passes it to the server when `SERVER_FILTERING` is on. Each reading counts once, when it arrives; a node waiting for its turn keeps the readings of its last one, and a node is not lost until it has had *n* readings in the round. A position off the board keeps the player on the edge square, a tenth of a square inside the edge (`EDGE_INSET`), and the game carries on; the sensor panel says `off board: edge`. Unusable readings are ridden out on the last square for as long as they last. If neither node sends anything for 5 s (`tuneSensor({ offlineMs })`), or the server says both are offline, the game says **Sensors offline** instead and the round waits. Waiting for a first position shows no message.
+
 The board is drawn with the row **nearest the screen at the top**, so stepping towards the screen moves the cursor up. Only the drawing is flipped (`boardRow()` in `game.js`, one switch, `NEAR_ROW_AT_TOP`): grid row `gy = 0` is still the row nearest the screen everywhere else, and left/right is unchanged. The phone control panel's touchpad maps onto the board as drawn.
 
 ### Python Server (Flask + WebSockets)
@@ -156,8 +158,8 @@ reporting whatever its beam hits while it sweeps. The position methods
   that a method is fully steady, and of two fully steady methods line of
   sight wins, then trilateration, then the average. So a method stuck on
   furniture can lead only until line of sight has held its own square for
-  1 s. A square is a cell, or off the board (out of bounds counts as a
-  square); a method with no position is out of the running. Replaying the
+  1 s. A square is a cell, or off the board (which counts as a square of
+  its own); a method with no position is out of the running. Replaying the
   4 Oct centre run (`logs/centre-20261004-154946`) through `filterRules.py`,
   Dynamic changed column least on every spot (C-120: 23 times, against 29-33
   for the others; walk-centre: 22 against 27-32) and kept x in the spot's
@@ -324,7 +326,7 @@ sample ──► Geometry ──► ProximityGuard (RAW) ──► ChannelFilter
 | `UltrasonicArrayGeometry` | The earlier three-sensor rig, one column each (replays V1 logs) |
 | `CartesianGeometry` | A rig that reports `(x, y)` itself, e.g. the servo scanner |
 | `CellStabiliser` | Majority vote over recent cells |
-| `HoldPolicy` | Abstract: when to ride out bad readings |
+| `HoldPolicy` | Abstract: counts bad readings (the pipeline rides them out until nobody is found) |
 | `StreakHold` / `MajorityWindowHold` | The two hold rules (see below) |
 | `CoordinatePipeline` | Composes all of the above; one instance per player |
 
@@ -409,8 +411,8 @@ the result to the game through one exported function, e.g.
 `window.setServerCoordinate(message.coordinate)`. (As built, the coordinate
 rides on `nodes:update`, and `window.setServerFilteringActive()` switches
 `game.js` between its own filters and the server's result. With the flag on,
-the cursor is also cleared once every assigned node is offline or the socket
-closes, because the server only recomputes on a new reading.) In `game.js`, that function
+the game says Sensors offline once neither node has sent anything for 5 s, or
+both are offline, because the server only recomputes on a new reading.) In `game.js`, that function
 replaces what `updateSensorCursor()` computes today:
 
 - store it as `gameState.sensor`, and drive the cursor from its `gx` / `gy`;
@@ -425,17 +427,13 @@ drift apart.
 
 ### Behaviour to decide before integrating
 
-**Hold policy.** `game.js` on `main` uses a *consecutive* bad-reading streak,
-and so does `StreakHold`, the default — the port preserves behaviour. That
-rule has a known blind spot: a single good reading resets the streak, so an
-intermittent fault that alternates good and bad never triggers the
-out-of-bounds message. `MajorityWindowHold` instead releases once *most* of the
-last N readings are bad. Choose one explicitly:
-
-```python
-pipeline = CoordinatePipeline(UltrasonicArrayGeometry(),
-                              hold=MajorityWindowHold(FilterConfig()))
-```
+**Hold policy.** Since 5 Oct, `game.js` and `CoordinatePipeline` ride
+unusable readings out on the last cell for as long as they last; only nobody
+found (out of bounds) ends a hold. The pipeline still counts bad readings with
+its `HoldPolicy` (`held_for`), but no longer asks it whether to stop.
+`StreakHold` (a *consecutive* streak, the default) and `MajorityWindowHold`
+(releases once *most* of the last N readings are bad) keep their
+`keep_holding()` for `tools/chain_replay.py` and experiments.
 
 **Call rate.** `game.js` steps a node's filters only when that node's reading
 is new (its server stamp, `last_seen`, changed), which is what the server's

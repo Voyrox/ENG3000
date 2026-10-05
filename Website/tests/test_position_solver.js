@@ -384,13 +384,18 @@ test("a lone node still drives the cursor, at its column centre", () => {
   assert.ok(Math.abs(last.xCm - 25) < 0.5, `expected the left column, got ${last.xCm}`);
 });
 
-test("out-of-bounds readings produce no position, not a guessed one", () => {
+test("readings past the far edge keep the cursor on the far row, not out of bounds", () => {
   const w = loadWindow();
   startSensorRound(w);
 
-  // Every node reports a wall far behind the board.
+  // Every node reports a wall far behind the board, and sends no scan state,
+  // so nothing says the nodes have lost the player: only that is out of
+  // bounds (Aaron, 5 Oct). The cursor stays on the far row.
   const frames = drive(w, 40, () => [260, 300, 260]);
 
-  assert.ok(frames.length === 0, `a wall should not produce a cursor, got ${frames.length}`);
-  assert.strictEqual(w.getSensorDebug().status, "out-of-bounds");
+  assert.ok(frames.length > 0, "the cursor stays on the board");
+  const debug = w.getSensorDebug();
+  assert.strictEqual(debug.status, "ok");
+  assert.strictEqual(debug.grid.gy, 2, "the far row");
+  assert.ok(Math.abs(debug.world.yCm - (FAR_CM - (FAR_CM - NEAR_CM) / 30)) < 1e-9, `y was ${debug.world.yCm}`);
 });

@@ -50,6 +50,21 @@
     </section>
 
     <section>
+        <h2>Out of bounds <small>readings per node</small></h2>
+        <div class="row">
+            <button id="lostLess" aria-label="Fewer readings">&minus;</button>
+            <b id="lostReadings" class="stepper">--</b>
+            <button id="lostMore" aria-label="More readings">+</button>
+        </div>
+        <div class="coord">
+            <div><span>Left score</span><b id="lostScoreLeft">--</b></div>
+            <div><span>Right score</span><b id="lostScoreRight">--</b></div>
+        </div>
+        <p class="note">Each node's last n readings score found +1, half 0, lost &minus;1. A node whose
+            readings add up to 0 or less is lost, and the game says Out of bounds while both are.</p>
+    </section>
+
+    <section>
         <h2>Game</h2>
         <div class="grid2">
             <button data-action="start" data-start-mode="remote" class="primary">Start remote round</button>
@@ -229,9 +244,52 @@
 
         renderPositionMethods();
 
+        // Out of bounds: how many readings each node's lost score is taken
+        // over. A tap asks the game for one more or fewer; until the game's
+        // status says it took, the number shown is the one asked for, so quick
+        // taps add up.
+        const LOST_READINGS_MAX = 50;
+        let lostReadingsAsked = null;
+
+        function lostReadingsShown() {
+            if (lostReadingsAsked !== null) return lostReadingsAsked;
+            return game && Number.isInteger(game.lostReadings) ? game.lostReadings : null;
+        }
+
+        function askLostReadings(step) {
+            const current = lostReadingsShown();
+            if (current === null) return;
+            lostReadingsAsked = Math.max(1, Math.min(LOST_READINGS_MAX, current + step));
+            send({ action: "lostReadings", count: lostReadingsAsked });
+            renderLostReadings();
+        }
+
+        $("lostLess").addEventListener("click", () => askLostReadings(-1));
+        $("lostMore").addEventListener("click", () => askLostReadings(1));
+
+        // Each node's score over its last n readings, from the game: positive
+        // is finding the player, 0 or less is lost; "--" until it has n.
+        function renderLostReadings() {
+            if (game && game.lostReadings === lostReadingsAsked) lostReadingsAsked = null;
+            const n = lostReadingsShown();
+            $("lostReadings").textContent = n === null ? "--" : String(n);
+            const scores = (game && game.lostScores) || [];
+            [["lostScoreLeft", scores[0]], ["lostScoreRight", scores[1]]].forEach(([id, entry]) => {
+                const box = $(id);
+                if (!entry || entry.score === null) {
+                    box.textContent = entry ? `-- (${entry.readings} of ${n})` : "--";
+                    box.style.color = "";
+                    return;
+                }
+                box.textContent = `${entry.score > 0 ? "+" : ""}${entry.score} ${entry.score > 0 ? "finding" : "lost"}`;
+                box.style.color = entry.score > 0 ? "#22c55e" : "#ef4444";
+            });
+        }
+
         function renderGame() {
             if (!game) return;
             renderPositionMethods();
+            renderLostReadings();
             $("screen").textContent = game.screen;
             $("mode").textContent = game.mode;
             $("score").textContent = game.score;
@@ -259,7 +317,10 @@
             renderCursor();
         }
 
-        const STATE_LABELS = { "too-close": "too close", "out-of-bounds": "out of bounds", "no-signal": "no signal" };
+        const STATE_LABELS = {
+            "too-close": "too close", "out-of-bounds": "out of bounds", "no-signal": "no signal",
+            offline: "sensors offline",
+        };
         const SOURCE_LABELS = { both: "both", left: "left only", right: "right only" };
         const cm = (v) => v.toFixed(1);
 
@@ -563,6 +624,7 @@
 
     .row { display: flex; gap: 8px; }
     .row button { flex: 1; }
+    .stepper { flex: 0 0 64px; align-self: center; text-align: center; font-size: 22px; }
 
     .grid2 {
         display: grid;

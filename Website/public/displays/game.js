@@ -78,8 +78,8 @@
   const PLAY_WIDTH_CM = 150; // matches PlayArea.width_cm in filterRules.py
   const MAX_COORD_CM = 150; // hard ceiling before any calibration exists
 
-  // Once the play area is calibrated, the far edge decides what counts as out
-  // of bounds rather than this blanket 1.5 m limit.
+  // Once the play area is calibrated, the far edge sets the depth limit
+  // reported by getSensorDebug() rather than this blanket 1.5 m.
   function maxCoordCm() {
     const bounds = window.getCalibrationBounds ? window.getCalibrationBounds() : null;
     if (bounds && bounds.calibrated && Number.isFinite(bounds.maxCm)) {
@@ -149,14 +149,11 @@
     // Votes a rival cell needs to take over. Must stay above half of
     // cellWindow, otherwise two cells can trade the lead and the cursor flips.
     cellVotes: 13,
-    // Consecutive unusable readings ridden out on the last good cell before the
-    // come-closer / out-of-bounds screen appears.
-    holdReadings: 100,
-    // Backstop for when data stops arriving altogether, so a disconnected rig
-    // cannot leave a stale cursor on screen forever. Must comfortably exceed
-    // holdReadings at the current data rate, or it fires first and the reading
-    // budget never gets a chance to matter.
-    holdTimeoutMs: 5000,
+    // Neither node has sent a new reading for this long (ms), or the server
+    // says both are offline: the game says Sensors offline and the round
+    // waits. Unusable readings are otherwise ridden out on the last good
+    // square for as long as they last (updateSensorCursor()).
+    offlineMs: 5000,
     // The smoothing after each sensor's median (see conditionSensor()).
     // kalmanSigmaA: the player's acceleration noise, cm/s^2 - higher follows a
     // lunge faster, lower smooths more. kalmanSigmaR: one reading's noise, cm.
@@ -200,17 +197,47 @@
     // steady, and past that line of sight wins, then trilateration, then the
     // average. Python: FilterConfig dynamic_steady_ms.
     dynamicSteadyMs: 1000,
-    // Neither node has found the player (both of its heads hearing them) for
-    // this long (ms), and both still do not (half-found or lost): nobody is
-    // on the board, and the game says Out of bounds at once, without riding
-    // it out on the last cell (holdReadings, holdTimeoutMs). Half-found does
-    // not count as seeing the player: with nobody there the nodes half-find
-    // the floor and furniture (a third of the readings in the empty room on
-    // 4 Oct). Aaron: 1-2 s; he chose 2 s, which in that run's replay said Out
-    // of bounds for 72 % of the empty room and never at a still spot. Python:
-    // FilterConfig nobody_found_ms.
-    nobodyFoundMs: 2000,
+    // Out of bounds, the only time the game says it (Aaron, 5 Oct): both
+    // nodes are lost. A node is lost when its last lostReadings readings,
+    // scored found +1, half 0, lost -1 (as the control panel shows each
+    // reading), add up to 0 or less, so the odd found reading among lost ones
+    // does not stop it. Until a node has had lostReadings readings in the
+    // round it is not lost, so it is always sustained. Set from the control
+    // panel (setLostReadings()), kept in this browser. See bothNodesLost().
+    // Python: FilterConfig lost_readings.
+    lostReadings: 8,
   };
+
+  // The most readings a node's lost score can be taken over (setLostReadings()).
+  const LOST_READINGS_MAX = 50;
+  const LOST_READINGS_KEY = "eng3000.lostReadings";
+
+  // How many readings a node's lost score is taken over: from the control
+  // panel (canvas.js, "lostReadings"), clamped to 1..LOST_READINGS_MAX and
+  // kept in this browser, so a reload keeps it. Returns the value in use.
+  window.setLostReadings = function setLostReadings(count) {
+    const n = Math.round(Number(count));
+    if (Number.isFinite(n)) {
+      tuning.lostReadings = Math.max(1, Math.min(LOST_READINGS_MAX, n));
+      try {
+        window.localStorage.setItem(LOST_READINGS_KEY, String(tuning.lostReadings));
+      } catch (err) {
+        // No storage (a private window, the tests): it lasts until a reload.
+      }
+    }
+    return tuning.lostReadings;
+  };
+
+  window.getLostReadings = function getLostReadings() {
+    return tuning.lostReadings;
+  };
+
+  try {
+    const saved = window.localStorage && window.localStorage.getItem(LOST_READINGS_KEY);
+    if (saved !== null && saved !== undefined) window.setLostReadings(saved);
+  } catch (err) {
+    // As above: the default stands.
+  }
 
   window.tuneSensor = function tuneSensor(partial) {
     if (partial && typeof partial === "object") Object.assign(tuning, partial);
@@ -330,7 +357,7 @@
   }
 
   const emptySensorState = () => ({
-    status: "no-signal", // "ok" | "too-close" | "no-signal" | "out-of-bounds"
+    status: "no-signal", // "ok" | "too-close" | "no-signal" | "out-of-bounds" | "offline"
     column: null, // which sensor saw the player: 0 left, 1 centre, 2 right
     distanceCm: null, // that sensor's raw reading
     gx: null,
@@ -1309,6 +1336,7 @@
     lastSeenStamp.fill(null);
     heardAt.fill(-Infinity);
     foundAt.fill(-Infinity);
+    stateLog.forEach((log) => { log.length = 0; });
     closeStreak = 0;
     lastColumn = null;
     lastSeenFrameSeq = sensorFrameSeq;
@@ -1316,7 +1344,6 @@
     resetCellFilter();
     sensorHold.grid = null;
     sensorHold.world = null;
-    sensorHold.lastOkAt = -Infinity;
     // Drops the drawn position too, so a new round opens its cursor where the
     // player is standing instead of springing across the board from wherever
     // the last one ended.
@@ -1382,6 +1409,20 @@
 
   function columnAtCm(x) {
     return Math.max(0, Math.min(2, Math.floor(x / (PLAY_WIDTH_CM / 3))));
+  }
+
+  // How far inside the board's edges a position is kept, as a share of a
+  // square: off the board, the player is placed this far in from the edge,
+  // inside the edge square's hole (the holes fill all but the gaps between
+  // them, under a tenth of a square). Python: EDGE_INSET in filterRules.py.
+  const EDGE_INSET = 0.1;
+  const EDGE_INSET_X_CM = (PLAY_WIDTH_CM / 3) * EDGE_INSET;
+
+  // A column's calibrated depth, { near, far } in cm (the defaults before
+  // calibration), as rawToGrid() and the cursor use it.
+  function columnSpan(column) {
+    const bounds = window.getCalibrationBounds ? window.getCalibrationBounds() : null;
+    return bounds ? bounds.perColumn[column] : { near: 20, far: 140 };
   }
 
   function isInPlay(column, distance) {
@@ -1824,39 +1865,79 @@
   const lastSeenStamp = [null, null, null];
   const heardAt = [-Infinity, -Infinity, -Infinity];   // ms, a slot's last new reading
   const foundAt = [-Infinity, -Infinity, -Infinity];   // ms, its last new one with both heads on the player
+  // Each node's scan states this round, one per reading that arrived, the
+  // latest LOST_READINGS_MAX of them (bothNodesLost()).
+  const stateLog = [[], [], []];
 
+  // Which slots carry a new reading (fresh, see above), and which nodes'
+  // messages actually arrived this update (heard): a new stamp, or every new
+  // update for a node with none. fresh also marks a slot with no reading, so
+  // a lost node's "no echo" would count again in every update while the other
+  // node takes its turn; heard counts each reading once. serverFilter.py
+  // passes the same as heard (the reporting node only).
   function freshSlots(list, raw, isNewReading, now) {
-    return raw.map((value, slot) => {
+    const heard = [false, false, false];
+    const fresh = raw.map((value, slot) => {
       if (!isNewReading) return false;
       const node = list[slot];
       const stamp = node && node.last_seen !== undefined ? node.last_seen : null;
+      heard[slot] = Boolean(node) && (stamp === null || stamp !== lastSeenStamp[slot]);
       const isNew = value === null || stamp === null || stamp !== lastSeenStamp[slot];
       lastSeenStamp[slot] = stamp;
       if (isNew && value !== null) heardAt[slot] = now;
       return isNew;
     });
+    return { fresh, heard };
   }
 
-  // Whether neither node has been finding the player: each node's latest
-  // reading is half-found or lost (not both of its heads hear the player),
-  // and neither node has found them in tuning.nobodyFoundMs. The nodes take
-  // turns, so the one waiting for its turn still says what it saw on its last
-  // one. A node that sends no scan state never counts. Notes this update's
-  // new readings that found the player first. TwoSensorGeometry._nobody_found()
-  // in filterRules.py.
-  function neitherNodeFinds(scans, fresh, now) {
-    [LEFT_SENSOR, RIGHT_SENSOR].forEach((slot) => {
-      if (fresh[slot] && scans[slot].state === SCAN_FOUND) foundAt[slot] = now;
+  // A reading's score towards a node being lost (Aaron, 5 Oct): found +1,
+  // half 0, lost -1.
+  function lostScore(state) {
+    return state === SCAN_FOUND ? 1 : state === SCAN_LOST ? -1 : 0;
+  }
+
+  // Each node's score now, [left, right], for the control panel: { score,
+  // readings } - score the sum over its last tuning.lostReadings readings
+  // (0 or less is lost), or null until it has had that many this round.
+  window.getLostScores = function getLostScores() {
+    const n = tuning.lostReadings;
+    return [LEFT_SENSOR, RIGHT_SENSOR].map((slot) => {
+      const log = stateLog[slot];
+      const score = log.length < n ? null : log.slice(-n).reduce((sum, entry) => sum + lostScore(entry), 0);
+      return { score, readings: Math.min(log.length, n) };
     });
-    const searching = (slot) => scans[slot].state !== null && scans[slot].state !== SCAN_FOUND;
-    return searching(LEFT_SENSOR) && searching(RIGHT_SENSOR) &&
-      now - Math.max(foundAt[LEFT_SENSOR], foundAt[RIGHT_SENSOR]) >= tuning.nobodyFoundMs;
+  };
+
+  // Whether both nodes are lost. A node is lost when its last
+  // tuning.lostReadings readings' scores (lostScore()) add up to 0 or less:
+  // on average half or lost, so the odd found reading among lost ones does
+  // not stop it, and a node mostly finding the player is never lost. Each
+  // reading counts once, when it arrives (heard), and a node waiting for its
+  // turn keeps the readings of its last one. A node is not lost until it has
+  // had that many readings this round, and one that sends no scan state never
+  // is. Notes this update's readings first (and foundAt, as before).
+  // TwoSensorGeometry._nobody_found() in filterRules.py.
+  function bothNodesLost(scans, fresh, heard, now) {
+    const lost = (slot) => {
+      const state = scans[slot].state;
+      if (fresh[slot] && state === SCAN_FOUND) foundAt[slot] = now;
+      const log = stateLog[slot];
+      if (heard[slot] && state !== null) log.push(state);
+      if (log.length > LOST_READINGS_MAX) log.shift();
+      const n = tuning.lostReadings;
+      if (log.length < n) return false;
+      return log.slice(-n).reduce((sum, entry) => sum + lostScore(entry), 0) <= 0;
+    };
+    const left = lost(LEFT_SENSOR);
+    const right = lost(RIGHT_SENSOR);
+    return left && right;
   }
 
   // Input:  [left, centre, right] node records, nulls allowed (calibration order).
   //         The centre is ignored: the rig has no centre sensor.
   // Output: {
-  //   status:     "ok" | "too-close" | "no-signal" | "out-of-bounds",
+  //   status:     "ok" | "too-close" | "no-signal" | "out-of-bounds" - out of
+  //               bounds only when nobodyFound,
   //   column:     the column the player is in - 0 left, 1 centre, 2 right,
   //   distanceCm: the player's depth from the screen (y),
   //   xCm, yCm:   the player's position in cm, source: "both" | "left" | "right",
@@ -1873,9 +1954,10 @@
   //               the middle of the player, bodyCentreCm(), turned by its servo
   //               angle) - what corner calibration captures,
   //   scans:      [l, c, r] each node's scanner fields, see readScan(),
-  //   nobodyFound: neither node has found the player in tuning.nobodyFoundMs
-  //               (neitherNodeFinds()) - "no-signal", shown as Out of bounds
-  //               with no hold,
+  //   nobodyFound: both nodes are lost over their last tuning.lostReadings
+  //               readings (bothNodesLost()) - "out-of-bounds", with no hold,
+  //   offBoard:   the position was off the board (or past its calibrated
+  //               depth) and has been brought onto the edge square,
   //   configured: how many sensors currently have a usable value
   // }
   function readSensorCoordinate(orderedNodes) {
@@ -1893,12 +1975,12 @@
     // is still one reading.
     const isNewReading = sensorFrameSeq !== lastSeenFrameSeq;
     lastSeenFrameSeq = sensorFrameSeq;
-    const fresh = freshSlots(list, raw, isNewReading, now);
+    const { fresh, heard } = freshSlots(list, raw, isNewReading, now);
 
     const filtered = raw.map((value, slot) =>
       fresh[slot] ? conditionSensor(sensorFilters[slot], value, now, angles[slot]) : sensorFilters[slot].value);
     if (isNewReading) stepLosTrack(filtered, scans, fresh, now);
-    const nobodyFound = neitherNodeFinds(scans, fresh, now);
+    const nobodyFound = bothNodesLost(scans, fresh, heard, now);
     const fixes = solvePositions(filtered, angles, now);
     if (isNewReading) stepDynamic(fixes, now);
     const following = dynamicLeader(fixes, now);
@@ -1912,7 +1994,7 @@
 
     const base = {
       raw, filtered, depth, scans, configured, isNewReading, fresh, heardMsAgo,
-      fixes, method: positioning.method, placedBy, nobodyFound: false,
+      fixes, method: positioning.method, placedBy, nobodyFound: false, offBoard: false,
       column: null, distanceCm: null, xCm: null, yCm: null, source: null,
     };
 
@@ -1932,7 +2014,7 @@
     const tooClose = closeStreak >= TOO_CLOSE_FRAMES;
 
     const position = fixes[positioning.method];
-    const x = position ? Math.max(0, Math.min(PLAY_WIDTH_CM, position.x)) : null;
+    const x = position ? Math.max(EDGE_INSET_X_CM, Math.min(PLAY_WIDTH_CM - EDGE_INSET_X_CM, position.x)) : null;
 
     // Safety outranks every other state, including loss of signal. The column
     // is reported without advancing the hysteresis below.
@@ -1941,13 +2023,13 @@
       return { ...base, column, distanceCm: rawMin, status: "too-close" };
     }
 
-    // Neither node has found the player for a while (neitherNodeFinds()):
-    // nobody is on the board, whatever any method still makes of old or
-    // stray readings. nobodyFound tells updateSensorCursor() not to ride it
-    // out on the last cell.
+    // Both nodes are lost over their last readings (bothNodesLost()): nobody
+    // is on the board, whatever any method still makes of old or stray
+    // readings. The only Out of bounds there is; updateSensorCursor() does
+    // not ride it out on the last square.
     if (nobodyFound) {
       lastColumn = null;
-      return { ...base, status: "no-signal", nobodyFound: true };
+      return { ...base, status: "out-of-bounds", nobodyFound: true };
     }
 
     if (position === null) {
@@ -1955,7 +2037,6 @@
       return { ...base, status: "no-signal" };
     }
 
-    const y = position.y;
     let column = columnAtCm(x);
 
     // Column hysteresis: next to a column boundary the previous column holds,
@@ -1965,17 +2046,19 @@
       if (Math.abs(x - boundary) < COLUMN_MARGIN_CM) column = lastColumn;
     }
 
-    // Off either side of the board is out of bounds as much as past the far
-    // edge. x above is clamped for the cursor's column only; the check uses the
-    // position as measured.
-    const fix = { ...base, column, distanceCm: y, xCm: x, yCm: y, source: position.source };
-    const offTheSide = position.x < 0 || position.x > PLAY_WIDTH_CM;
-    if (offTheSide || y > maxCoordCm()) {
-      return { ...fix, status: "out-of-bounds" };
-    }
+    // Off the board - past a side, past the far edge, in front of the near
+    // one - the player is kept on the edge square, and the game carries on:
+    // x above and y here are brought EDGE_INSET of a square inside the
+    // board's edges, so the cursor sits on that square's hole (the hover test
+    // needs it there). The column's calibrated span sets the depth.
+    const span = columnSpan(column);
+    const insetY = ((span.far - span.near) / 3) * EDGE_INSET;
+    const y = Math.max(span.near + insetY, Math.min(span.far - insetY, position.y));
+    const offBoard = position.x < 0 || position.x > PLAY_WIDTH_CM ||
+      position.y < span.near || position.y > span.far;
 
     lastColumn = column;
-    return { ...fix, status: "ok" };
+    return { ...base, column, distanceCm: y, xCm: x, yCm: y, source: position.source, offBoard, status: "ok" };
   }
 
   window.readSensorCoordinate = readSensorCoordinate;
@@ -2095,8 +2178,31 @@
     return point;
   }
 
-  // Last known-good cell, used to coast through brief signal loss.
-  const sensorHold = { grid: null, world: null, lastOkAt: -Infinity };
+  // Last known-good cell, ridden out on through unusable readings.
+  const sensorHold = { grid: null, world: null };
+
+  // --- Sensors offline -----------------------------------------------------------
+  // Whether the rig has gone quiet: for each node, the server's stamp on its
+  // latest message (last_seen) and when that stamp last changed. A node with
+  // no stamp counts as heard on every frame while it is online.
+  const messageStamp = [null, null, null];
+  const messageAt = [-Infinity, -Infinity, -Infinity];
+
+  // Neither node has sent anything for tuning.offlineMs, or the server says
+  // both are offline: the rig is down, which is not the player leaving. Both
+  // nodes' messages are noted on every call (map, not every(), which would
+  // stop at the first node still sending).
+  function rigIsOffline(list, now) {
+    const quiet = [LEFT_SENSOR, RIGHT_SENSOR].map((slot) => {
+      const node = list[slot];
+      if (!node || !node.online || !node.latest) return true;
+      const stamp = node.last_seen !== undefined ? node.last_seen : null;
+      if (stamp === null || stamp !== messageStamp[slot]) messageAt[slot] = now;
+      messageStamp[slot] = stamp;
+      return now - messageAt[slot] > tuning.offlineMs;
+    });
+    return quiet.every(Boolean);
+  }
 
   // --- Cell stabilisation ----------------------------------------------------
 
@@ -2156,6 +2262,15 @@
     const dt = cursorLastStepAt === null ? 0 : now - cursorLastStepAt;
     cursorLastStepAt = now;
 
+    // The rig has gone quiet: say so, rather than ride out its last readings.
+    if (rigIsOffline(Array.isArray(orderedNodes) ? orderedNodes : [], now)) {
+      sensorHold.grid = null;
+      sensorHold.world = null;
+      gameState.sensor = { ...fix, status: "offline", gx: null, gy: null, held: false, heldFor: badReadingStreak };
+      gameState.cursor = { x: null, y: null, inBounds: false };
+      return;
+    }
+
     let grid = null;
     if (fix.status === "ok") {
       const mapped = window.rawToGrid(fix.column, fix.distanceCm, sensorHold.grid);
@@ -2178,7 +2293,6 @@
 
       sensorHold.grid = { ...stable, yCm: world.y };
       sensorHold.world = world;
-      sensorHold.lastOkAt = now;
       gameState.sensor = {
         ...fix, gx: stable.gx, gy: stable.gy,
         rawGx: grid.gx, rawGy: grid.gy,
@@ -2204,14 +2318,12 @@
     // far faster than the sensors report.
     if (fix.isNewReading) badReadingStreak += 1;
 
-    // Ride out a short burst of bad readings on the last known-good cell. A
-    // handful of rejects in a row is normal for unfiltered ultrasonics and must
-    // not throw the player out of the game. Not when neither node has found
-    // the player for tuning.nobodyFoundMs: that wait was the grace.
-    const withinBudget = badReadingStreak <= tuning.holdReadings;
-    const withinTimeout = now - sensorHold.lastOkAt <= tuning.holdTimeoutMs;
-
-    if (sensorHold.grid && withinBudget && withinTimeout && !fix.nobodyFound) {
+    // Ride out unusable readings on the last known-good square, for as long as
+    // they last: rejects are normal for ultrasonics and must not throw the
+    // player out of the game. Only both nodes being lost (Out of bounds,
+    // bothNodesLost(); that wait was the grace) ends it, or the rig going
+    // offline (above).
+    if (sensorHold.grid && !fix.nobodyFound) {
       const held = sensorHold.grid;
       // While held, the fix belongs to the BAD reading, so the last good
       // position is the one shown - exactly as the last good cell is.
@@ -2228,11 +2340,13 @@
       return;
     }
 
+    // No square to ride out on: Out of bounds if nobody is found, otherwise
+    // the round just waits for the first position, with no message.
     sensorHold.grid = null;
     sensorHold.world = null;
     gameState.sensor = {
       ...fix,
-      status: fix.status === "ok" ? "out-of-bounds" : fix.status,
+      status: fix.nobodyFound ? "out-of-bounds" : "no-signal",
       gx: null, gy: null, held: false, heldFor: badReadingStreak,
     };
     gameState.cursor = { x: null, y: null, inBounds: false };
@@ -2276,12 +2390,16 @@
   // same shape updateSensorCursor() produces, so the HUD, alert and logging
   // work unchanged.
   function applyServerCoordinate(canvas, orderedNodes) {
-    // The server only recomputes when a reading arrives, so once every
-    // assigned sensor is offline its last coordinate would sit on screen
-    // forever. Treat that as no signal, which also pauses the round.
+    // The server only recomputes when a reading arrives, so once the rig has
+    // gone quiet its last coordinate would sit on screen forever. Say
+    // Sensors offline instead, which also pauses the round.
     const list = Array.isArray(orderedNodes) ? orderedNodes : [];
-    const anyOnline = list.some((node) => node && node.online);
-    const c = anyOnline ? serverCoordinate : null;
+    if (rigIsOffline(list, performance.now())) {
+      gameState.sensor = { ...emptySensorState(), status: "offline" };
+      gameState.cursor = { x: null, y: null, inBounds: false };
+      return;
+    }
+    const c = serverCoordinate;
 
     if (!c) {
       gameState.sensor = emptySensorState();
@@ -2344,7 +2462,6 @@
       cursor: gameState.cursor.x === null ? null : { ...gameState.cursor },
       badReadings: serverCoordinateActive ? sensor.heldFor || 0 : badReadingStreak,
       rejected: sensorFilters.map((filter) => filter.rejectCount),
-      holdBudget: tuning.holdReadings,
       tuning: { ...tuning },
       rawCell: sensor.rawGx === undefined || sensor.rawGx === null
         ? null
@@ -2646,9 +2763,12 @@
     ctx.stroke();
   }
 
-  // Banner shown instead of the cursor when the sensors cannot place the
-  // player. The full-screen red alert is reserved for the too-close case and is
-  // handled by canvas.js switching screens, so it never appears here.
+  // Banner shown instead of the cursor: Out of bounds only when both nodes
+  // are lost over their last tuning.lostReadings readings (bothNodesLost();
+  // Aaron, 5 Oct), and Sensors offline when the rig has gone quiet. Waiting for a
+  // first position shows nothing. The full-screen red alert is reserved for
+  // the too-close case and is handled by canvas.js switching screens, so it
+  // never appears here.
   function renderSensorStatusOverlay(ctx, canvas) {
     const width = canvas.clientWidth || canvas.width;
     const height = canvas.clientHeight || canvas.height;
@@ -2659,13 +2779,12 @@
     if (roomStatus === "learning") {
       message = "Learning the room";
       detail = "Keep the play area clear until the Room button says learned";
-    } else if (status === "no-signal") {
-      // Nothing seen at all: nobody is on the board.
+    } else if (status === "out-of-bounds") {
       message = "Out of bounds";
       detail = "Nobody detected - step into the play area";
-    } else if (status === "out-of-bounds") {
-      message = "Come back in bounds";
-      detail = "Reading outside the play area - move back onto the board";
+    } else if (status === "offline") {
+      message = "Sensors offline";
+      detail = "No readings from either node - check their power and Wi-Fi";
     }
     if (!message) return;
 
@@ -2810,7 +2929,8 @@
       ctx.fillStyle = coarse ? "#f59e0b" : "#cdd6f4";
       const from = SOURCE_LABELS[sensor.source] ? `  (${SOURCE_LABELS[sensor.source]})` : "";
       ctx.fillText(
-        `x ${formatCm(sensor.xCm)}  y ${formatCm(sensor.yCm)} cm${from}${coarse ? "  column centre" : ""}`,
+        `x ${formatCm(sensor.xCm)}  y ${formatCm(sensor.yCm)} cm${from}${coarse ? "  column centre" : ""}` +
+          (sensor.offBoard ? "  off board: edge" : ""),
         x + 16,
         posY
       );
@@ -2850,7 +2970,7 @@
         `grid (${sensor.gx}, ${sensor.gy})  @ ${formatCm(sensor.distanceCm)}cm` +
         (disagrees ? `  [raw ${sensor.rawGx},${sensor.rawGy} outvoted]` : "");
       ctx.fillText(
-        sensor.held ? `${label}  HELD ${sensor.heldFor}/${tuning.holdReadings}` : label,
+        sensor.held ? `${label}  HELD ${sensor.heldFor}` : label,
         x + 16,
         fixY
       );

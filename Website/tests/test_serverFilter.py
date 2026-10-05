@@ -53,9 +53,10 @@ class RecordingPipeline(CoordinatePipeline):
         super().__init__(UltrasonicArrayGeometry())
         self.calls = []
 
-    def update(self, sample, now_ms, fresh=None):
+    def update(self, sample, now_ms, fresh=None, heard=None):
         self.calls.append((list(sample), now_ms, fresh))
-        return super().update(sample, now_ms, fresh=fresh)
+        self.heard = heard
+        return super().update(sample, now_ms, fresh=fresh, heard=heard)
 
 
 class RecordingPredictor(PathPredictor):
@@ -123,6 +124,8 @@ class StageOncePerReading(unittest.TestCase):
         self.assertEqual(sample, [60.0, 80.0, None])
         # Left is stale; right has no reading at all, which is safe to pass.
         self.assertEqual(fresh, [False, True, True])
+        # Only the reporting node was heard, so its scan state counts once.
+        self.assertEqual(self.pipeline.heard, [False, True, False])
 
     def test_stale_reading_is_not_refed(self):
         self.stage.on_reading(LEFT, 60.0, STEP_MS)
@@ -194,6 +197,17 @@ class StageTwoSensorRig(unittest.TestCase):
         result = stage.on_reading(LEFT, 40.0, 2 * STEP_MS, angle_deg=90, scan_state=2)
         self.assertAlmostEqual(result.x_cm, 125.0 - 0.0, places=6)
         self.assertAlmostEqual(result.y_cm, 80.0 + BODY_RADIUS_CM, places=6)
+
+    def test_the_lost_readings_can_be_set(self):
+        stage = ServerFilterStage()
+        stage.set_lost_readings(12)
+        self.assertEqual(stage.pipeline.config.lost_readings, 12)
+        stage.set_lost_readings(0)
+        self.assertEqual(stage.pipeline.config.lost_readings, 1)
+        stage.set_lost_readings(500)
+        self.assertEqual(stage.pipeline.config.lost_readings, 50)
+        with self.assertRaises(ValueError):
+            stage.set_lost_readings("many")
 
     def test_the_position_method_can_be_switched(self):
         stage = ServerFilterStage()
@@ -436,6 +450,12 @@ class AppWiring(unittest.TestCase):
         with mock.patch("builtins.print"):       # a bad method is reported, not raised
             app.apply_filter_event({"type": "position:method", "method": "guess"})
         self.assertEqual(app.server_filter.pipeline.geometry.method, "avg")
+
+    def test_the_lost_readings_reach_the_chain(self):
+        app.server_filter = ServerFilterStage()
+        app.apply_filter_event({"type": "sensor:lostReadings", "count": 5})
+        self.assertEqual(app.server_filter.pipeline.config.lost_readings, 5)
+        self.assertIn("lostReadings", app.CONTROL_ACTIONS)
 
     def test_the_scan_state_reaches_the_chain(self):
         app.server_filter = ServerFilterStage()

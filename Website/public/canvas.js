@@ -231,14 +231,12 @@ function logSensorStatus() {
   const where = debug.grid ? `grid(${debug.grid.gx},${debug.grid.gy})` : "no coordinate";
   const distance = debug.distanceCm === null ? "--" : `${debug.distanceCm.toFixed(1)}cm`;
 
-  // Out-of-bounds is the state people most often need explained, so show the
-  // window the reading actually failed against.
+  // Out of bounds and Sensors offline each have one cause: say which.
   let why = "";
-  if (debug.status === "out-of-bounds" && debug.bounds) {
-    const { nearCm, farCm } = debug.bounds;
-    why =
-      `  (play area ${nearCm.toFixed(0)}-${farCm.toFixed(0)}cm` +
-      `, limit ${debug.limits.maxCm.toFixed(0)}cm)`;
+  if (debug.status === "out-of-bounds") {
+    why = `  (both nodes lost over their last ${debug.tuning.lostReadings} readings)`;
+  } else if (debug.status === "offline") {
+    why = `  (no reading from either node for ${(debug.tuning.offlineMs / 1000).toFixed(1)} s)`;
   }
 
   console.info(
@@ -397,6 +395,7 @@ let serverFiltering = false;
 let sentAssignmentKey = null;
 let sentCalibrationKey = null;
 let sentPositionMethod = null;
+let sentLostReadings = null;
 
 function sendToServer(message) {
   if (!socket || socket.readyState !== WebSocket.OPEN) return false;
@@ -436,6 +435,12 @@ function syncServerFilterSetup() {
   const method = window.getPositionMethod();
   if (method !== sentPositionMethod && sendToServer({ type: "position:method", method })) {
     sentPositionMethod = method;
+  }
+
+  // And the readings each node's lost score is taken over (Out of bounds).
+  const lostReadings = window.getLostReadings();
+  if (lostReadings !== sentLostReadings && sendToServer({ type: "sensor:lostReadings", count: lostReadings })) {
+    sentLostReadings = lostReadings;
   }
 
   const perColumn = window.getCapturedCalibration();
@@ -520,6 +525,12 @@ function handleRemoteCommand(command) {
       window.setPositionMethod(command.method);
       syncServerFilterSetup();
       break;
+    case "lostReadings":
+      // How many readings each node's lost score is taken over (Out of
+      // bounds when both nodes are lost). Clamped by the game.
+      window.setLostReadings(command.count);
+      syncServerFilterSetup();
+      break;
     default:
       return;
   }
@@ -550,6 +561,8 @@ function sendGameStatus() {
     testMode: window.getGameSettings().testMode,
     positionMethod: window.getPositionMethod(),
     positionMethods: window.getPositionMethods(),
+    lostReadings: window.getLostReadings(),
+    lostScores: window.getLostScores(),
   }));
 }
 
@@ -608,8 +621,10 @@ function connectSocket() {
     // No server, no coordinate: the round pauses on "no signal" rather than
     // playing on a frozen one.
     if (serverFiltering) window.setServerCoordinate(null);
-    // A restarted server has forgotten the position method; send it again.
+    // A restarted server has forgotten the position method and the lost
+    // readings; send them again.
     sentPositionMethod = null;
+    sentLostReadings = null;
     if (reconnectTimer === null) {
       reconnectTimer = window.setTimeout(() => {
         reconnectTimer = null;

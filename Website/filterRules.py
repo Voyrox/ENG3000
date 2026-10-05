@@ -148,10 +148,12 @@ class FilterConfig:
     # (DynamicPicker).
     dynamic_steady_ms: float = 1000.0
 
-    # Neither node has found the player (both heads) for this long, and both
-    # still do not (half-found or lost): nobody is on the board, no-signal at
-    # once, with no hold (tuning.nobodyFoundMs; TwoSensorGeometry._nobody_found()).
-    nobody_found_ms: float = 2000.0
+    # Out of bounds, the only one the pipeline reports (Aaron, 5 Oct): both
+    # nodes are lost, with no hold. A node is lost when its last lost_readings
+    # readings, scored found +1, half 0, lost -1, add up to 0 or less, and not
+    # before it has had that many (tuning.lostReadings, set from the control
+    # panel; TwoSensorGeometry._nobody_found()).
+    lost_readings: int = 8
 
     # Geometry (COLUMN_MARGIN_CM)
     column_margin_cm: float = 8.0
@@ -163,7 +165,9 @@ class FilterConfig:
     cell_window: int = 25
     cell_votes: int = 13
 
-    # Hold and recovery (tuning.holdReadings, tuning.holdTimeoutMs)
+    # StreakHold and MajorityWindowHold, and tools/chain_replay.py. The
+    # pipeline itself rides out unusable readings for as long as they last
+    # (CoordinatePipeline.update()), as game.js does since 5 Oct.
     hold_readings: int = 100
     hold_timeout_ms: float = 5000.0
 
@@ -180,6 +184,8 @@ class FilterConfig:
             raise ValueError("fft_window cannot be negative (0 turns the FFT stage off)")
         if self.fft_cutoff_hz < 0:
             raise ValueError("the FFT stage needs a cutoff of 0 or more")
+        if not 1 <= self.lost_readings <= LOST_READINGS_MAX:
+            raise ValueError(f"lost_readings must be 1 to {LOST_READINGS_MAX}")
 
 
 @dataclass(frozen=True)
@@ -318,7 +324,7 @@ class Fix:
     x_cm: Optional[float] = None
     y_cm: Optional[float] = None
     column: Optional[int] = None
-    nobody_found: bool = False  # no-signal because neither node finds the player: no hold
+    nobody_found: bool = False  # out of bounds: neither node finds the player; no hold
     distance_cm: Optional[float] = None
 
 
@@ -593,10 +599,12 @@ class Geometry(ABC):
         return [None] * self.channel_count
 
     def track(self, filtered: Sequence[Optional[float]], fresh: Sequence[bool],
-              now_ms: float, area: PlayArea, config: FilterConfig) -> None:
+              now_ms: float, area: PlayArea, config: FilterConfig,
+              heard: Optional[Sequence[bool]] = None) -> None:
         """Advance any tracker the geometry keeps, once per update and before
-        the proximity check. fresh marks the channels carrying a new reading.
-        Most geometries keep none."""
+        the proximity check. fresh marks the channels carrying a new reading;
+        heard, the nodes whose message actually arrived (fresh also marks a
+        channel with no reading). Most geometries keep none."""
 
     def reset(self) -> None:
         """Clear any state carried between updates. Override if stateful."""
@@ -670,11 +678,19 @@ class UltrasonicArrayGeometry(Geometry):
                    column=column, distance_cm=best)
 
 
+# The most readings a node's lost score can be taken over (FilterConfig
+# lost_readings; LOST_READINGS_MAX in game.js).
+LOST_READINGS_MAX = 50
+
 POSITION_METHODS = ("dyn", "los", "tri", "avg")
 # The methods Dynamic picks between, in the order that breaks a tie
 # (DYNAMIC_METHODS in game.js).
 DYNAMIC_METHODS = ("los", "tri", "avg")
 OFF_BOARD = -1         # DynamicPicker: a position off the board is a square too
+# How far inside the board's edges a position is kept, as a share of a square
+# (EDGE_INSET in game.js): off the board, the player is placed this far in from
+# the edge, inside the edge square's hole.
+EDGE_INSET = 0.1
 
 # The sensors' datasheet range (HC-SR04; the RCWL-1601 is a pin-compatible
 # copy): a distance outside it is not a reading. SENSOR_*_CM in game.js.
@@ -682,6 +698,16 @@ SENSOR_MIN_CM = 2.0
 SENSOR_MAX_CM = 400.0
 SCAN_FOUND = 0         # scanState: both heads hear the player
 SCAN_LOST = 2          # scanState: sweeping, the player is not in its line of sight
+
+
+def lost_score(state) -> int:
+    """lostScore() in game.js: a reading's score towards its node being lost
+    (Aaron, 5 Oct): found +1, half 0, lost -1."""
+    if state == SCAN_FOUND:
+        return 1
+    if state == SCAN_LOST:
+        return -1
+    return 0
 
 
 def _mat_mul(a, b):
@@ -1003,6 +1029,9 @@ class TwoSensorGeometry(Geometry):
         self._angles: list = [None] * GRID_SIZE
         self._states: list = [None] * GRID_SIZE
         self._found_ms = [-math.inf] * GRID_SIZE
+        # Each node's scan states this round, one per reading heard, the
+        # latest LOST_READINGS_MAX of them.
+        self._state_log: list = [[] for _ in range(GRID_SIZE)]
         self._now_ms = -math.inf
         self._config: Optional[FilterConfig] = None
 
@@ -1027,6 +1056,7 @@ class TwoSensorGeometry(Geometry):
         self._angles = [None] * GRID_SIZE
         self._states = [None] * GRID_SIZE
         self._found_ms = [-math.inf] * GRID_SIZE
+        self._state_log = [[] for _ in range(GRID_SIZE)]
         self._now_ms = -math.inf
 
     def channels(self, sample) -> list:
@@ -1050,25 +1080,40 @@ class TwoSensorGeometry(Geometry):
     def channel_angles(self) -> list:
         return list(self._angles)
 
-    def track(self, filtered, fresh, now_ms, area, config) -> None:
+    def track(self, filtered, fresh, now_ms, area, config, heard=None) -> None:
         self._now_ms = now_ms
         self._config = config
         self._los.step(filtered, self._angles, self._states, fresh, now_ms, area, config)
+        heard = fresh if heard is None else heard
         for slot in (self.LEFT, self.RIGHT):
-            if fresh[slot] and self._states[slot] == SCAN_FOUND:
+            state = self._states[slot]
+            if fresh[slot] and state == SCAN_FOUND:
                 self._found_ms[slot] = now_ms
+            log = self._state_log[slot]
+            if heard[slot] and state is not None:
+                log.append(state)
+            if len(log) > LOST_READINGS_MAX:
+                log.pop(0)
         self._dynamic.step(self._picked_from(filtered, area), now_ms, area)
 
+    def _lost(self, slot, config) -> bool:
+        """This node's last lost_readings readings' scores (lost_score())
+        add up to 0 or less; never before it has had that many."""
+        log = self._state_log[slot]
+        n = config.lost_readings
+        if len(log) < n:
+            return False
+        total = 0
+        for state in log[-n:]:
+            total += lost_score(state)
+        return total <= 0
+
     def _nobody_found(self, config) -> bool:
-        """neitherNodeFinds() in game.js: each node's latest reading is
-        half-found or lost (not both of its heads hear the player) and neither
-        node has found the player in nobody_found_ms. A node that sends no scan
-        state never counts."""
-        searching = [self._states[slot] is not None and self._states[slot] != SCAN_FOUND
-                     for slot in (self.LEFT, self.RIGHT)]
-        return (all(searching)
-                and self._now_ms - max(self._found_ms[self.LEFT], self._found_ms[self.RIGHT])
-                >= config.nobody_found_ms)
+        """bothNodesLost() in game.js: both nodes are lost (_lost()). A node
+        that sends no scan state never is."""
+        left = self._lost(self.LEFT, config)
+        right = self._lost(self.RIGHT, config)
+        return left and right
 
     def _picked_from(self, filtered, area) -> dict:
         """The positions Dynamic picks between: {"los", "tri", "avg"} ->
@@ -1153,14 +1198,14 @@ class TwoSensorGeometry(Geometry):
         # board, whatever any method still makes of old or stray readings.
         if self._nobody_found(config):
             self._last_column = None
-            return Fix(STATUS_NO_SIGNAL, nobody_found=True)
+            return Fix(STATUS_OUT_OF_BOUNDS, nobody_found=True)
         where = self.position(filtered, area)
         if where is None:
             self._last_column = None
             return Fix(STATUS_NO_SIGNAL)
 
-        x = _clamp(where[0], 0.0, area.width_cm)
-        y = where[1]
+        inset_x = (area.width_cm / GRID_SIZE) * EDGE_INSET
+        x = _clamp(where[0], inset_x, area.width_cm - inset_x)
         column = area.column_at(x)
 
         # Column hysteresis: next to a column boundary the previous column
@@ -1171,12 +1216,13 @@ class TwoSensorGeometry(Geometry):
             if abs(x - boundary) < config.column_margin_cm:
                 column = last
 
-        # Off either side of the board is out of bounds as much as past the
-        # far edge. x is clamped for the column only; the check uses the
-        # position as measured.
-        off_the_side = not 0.0 <= where[0] <= area.width_cm
-        if off_the_side or y > area.max_cm:
-            return Fix(STATUS_OUT_OF_BOUNDS, x_cm=x, y_cm=y, column=column, distance_cm=y)
+        # Off the board - past a side, past the far edge, in front of the
+        # near one - the player is kept on the edge square: x above and y here
+        # are brought EDGE_INSET of a square inside the board's edges. The
+        # column's calibrated span sets the depth.
+        near, far = area.per_column[column]
+        inset_y = ((far - near) / GRID_SIZE) * EDGE_INSET
+        y = _clamp(where[1], near + inset_y, far - inset_y)
 
         self._last_column = column
         return Fix(STATUS_OK, x_cm=x, y_cm=y, column=column, distance_cm=y)
@@ -1267,7 +1313,11 @@ class CellStabiliser:
 # =============================================================================
 
 class HoldPolicy(ABC):
-    """Decides whether to keep showing the last good cell through bad readings."""
+    """Counts bad readings, and decides whether to keep showing the last good
+    cell through them. CoordinatePipeline only counts with it: since 5 Oct it
+    rides bad readings out for as long as they last, as game.js does, and only
+    nobody found (out of bounds) ends a hold. keep_holding() is kept for
+    tools/chain_replay.py and experiments."""
 
     @abstractmethod
     def record(self, usable: bool) -> None:
@@ -1365,7 +1415,6 @@ class CoordinatePipeline:
         self._stabiliser = CellStabiliser(self.config)
         self._held_cell: Optional[tuple] = None
         self._held_xy: Optional[tuple] = None
-        self._last_ok_ms = -math.inf
 
     def set_area(self, area: PlayArea) -> None:
         """Apply a new calibration. Row hysteresis state is kept."""
@@ -1380,7 +1429,6 @@ class CoordinatePipeline:
         self.geometry.reset()
         self._held_cell = None
         self._held_xy = None
-        self._last_ok_ms = -math.inf
 
     def reset_channel(self, channel: int) -> None:
         """Discard one sensor's old bearing without resetting the other nodes."""
@@ -1391,12 +1439,16 @@ class CoordinatePipeline:
         return [channel.reject_count for channel in self._channels]
 
     def update(self, sample, now_ms: float,
-               fresh: Optional[Sequence[bool]] = None) -> FilteredCoordinate:
+               fresh: Optional[Sequence[bool]] = None,
+               heard: Optional[Sequence[bool]] = None) -> FilteredCoordinate:
         """fresh marks which channels carry a NEW reading. A channel marked
         False is not fed again: its filter keeps its current value, so a
         repeated reading never fills the median window. None means all fresh,
         which is what the parity tests and a single-source rig use. The
-        proximity guard still sees every channel's raw value."""
+        proximity guard still sees every channel's raw value. heard marks the
+        nodes whose message actually arrived this update, so each scan state
+        counts once towards out of bounds (fresh also marks a channel with no
+        reading); None means the same as fresh."""
         raw = self.geometry.channels(sample)
         if fresh is None:
             fresh = [True] * len(raw)
@@ -1406,7 +1458,7 @@ class CoordinatePipeline:
         angles = self.geometry.channel_angles()
         filtered = [ch.update(v, now_ms, a) if is_fresh else ch.value
                     for ch, v, a, is_fresh in zip(self._channels, raw, angles, fresh)]
-        self.geometry.track(filtered, fresh, now_ms, self.area, self.config)
+        self.geometry.track(filtered, fresh, now_ms, self.area, self.config, heard=heard)
 
         # Safety first, on raw values, before anything is smoothed.
         nearest = self.geometry.nearest_raw_cm(raw)
@@ -1435,23 +1487,25 @@ class CoordinatePipeline:
             self.hold.record(True)
             self._held_cell = (gx, gy)
             self._held_xy = (fix.x_cm, fix.y_cm)
-            self._last_ok_ms = now_ms
             return FilteredCoordinate(STATUS_OK, x_cm=fix.x_cm, y_cm=fix.y_cm,
                                       gx=gx, gy=gy, raw_gx=raw_gx, raw_gy=raw_gy,
                                       **base)
 
         self.hold.record(False)
-        within_timeout = now_ms - self._last_ok_ms <= self.config.hold_timeout_ms
-        if (self._held_cell is not None and self.hold.keep_holding() and within_timeout
-                and not fix.nobody_found):
+        # Unusable readings are ridden out on the last good cell for as long
+        # as they last. Only nobody found (out of bounds) ends it: that wait
+        # was the grace.
+        if self._held_cell is not None and not fix.nobody_found:
             gx, gy = self._held_cell
             x, y = self._held_xy
             return FilteredCoordinate(STATUS_OK, x_cm=x, y_cm=y, gx=gx, gy=gy,
                                       held=True, held_for=self.hold.bad_count, **base)
 
+        # No cell to ride out on: out of bounds if nobody is found, otherwise
+        # no signal yet (the game waits for a first position, with no message).
         self._held_cell = None
         self._held_xy = None
-        status = STATUS_OUT_OF_BOUNDS if fix.status == STATUS_OK else fix.status
+        status = STATUS_OUT_OF_BOUNDS if fix.nobody_found else STATUS_NO_SIGNAL
         return FilteredCoordinate(status, held_for=self.hold.bad_count, **base)
 
     def _resolve_cell(self, fix: Fix) -> Optional[tuple]:
