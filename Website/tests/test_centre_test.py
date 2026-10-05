@@ -189,6 +189,41 @@ class GeometryTest(unittest.TestCase):
         self.assertAlmostEqual(dict((n, l) for n, l, _ in ct.tape_marks(120))["C-40"],
                                math.hypot(60, 40))
 
+    def test_the_cells_spots_sit_on_lines_and_step_one_cell(self):
+        steps = {s.name: s for s in ct.plan_cell_steps(100)}
+        self.assertEqual(sorted(steps), ["line-x100", "line-x50", "line-y110", "line-y60",
+                                         "step-CR", "step-LC", "step-far", "step-near"])
+        # On the lines the game draws between cells (default bounds 10-160).
+        self.assertEqual((steps["line-x50"].x_cm, steps["line-x50"].y_cm), (50, 85))
+        self.assertEqual((steps["line-x100"].x_cm, steps["line-x100"].y_cm), (100, 85))
+        self.assertEqual((steps["line-y60"].x_cm, steps["line-y60"].y_cm), (75, 60))
+        self.assertEqual((steps["line-y110"].x_cm, steps["line-y110"].y_cm), (75, 110))
+        # Each step goes from the middle of one cell to the middle of the next.
+        for step in steps.values():
+            if step.kind != "step":
+                self.assertIsNone(step.to_x_cm)
+                continue
+            self.assertEqual(math.hypot(step.to_x_cm - step.x_cm, step.to_y_cm - step.y_cm), 50)
+        self.assertEqual(steps["step-LC"].column, 0)
+        self.assertEqual(ct.column_at(steps["step-LC"].to_x_cm), 1)
+        # The column lines follow the real spacing, as the other spots do.
+        self.assertEqual(ct.plan_cell_steps(120)[0].x_cm, 45)
+
+    def test_spot_sets(self):
+        centre = [s.name for s in ct.plan_spots("centre")]
+        cells = [s.name for s in ct.plan_spots("cells")]
+        self.assertEqual(centre, [s.name for s in ct.plan_steps()])
+        self.assertEqual(cells, [s.name for s in ct.plan_cell_steps()])
+        self.assertEqual([s.name for s in ct.plan_spots("both")], centre + cells)
+
+    def test_tape_marks_for_the_cells_mark_each_place_once(self):
+        marks = {name: (left, right) for name, left, right in ct.tape_marks(100, spots="cells")}
+        self.assertEqual(sorted(marks), ["line-x100", "line-x50", "line-y110", "line-y60",
+                                         "step-CR to", "step-LC", "step-LC to", "step-far to",
+                                         "step-near"])
+        self.assertAlmostEqual(marks["step-LC to"][0], math.hypot(50, 85))
+        self.assertAlmostEqual(marks["step-far to"][0], math.hypot(50, 135))
+
     def test_spots_follow_the_real_spacing(self):
         steps = {s.name: s for s in ct.plan_steps(spacing_cm=120)}
         self.assertEqual(steps["L-80"].x_cm, 15)

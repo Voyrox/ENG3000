@@ -40,6 +40,23 @@ out from the line through both nodes' servo shafts:
   walk-across   from in front of the left node to the right node and back, 80 out
   walk-centre   halfway between the nodes, from 40 out to 120 and back
 
+With --spots cells (or both), the spots for how steady the cursor's cell is
+and how fast it follows a move (Aaron, 5 Oct). Website/tools/cursor_replay.js
+scores them from the run folder (--centre-run):
+
+  line-x50, line-x100
+                still on the line between the left and centre columns /
+                the centre and right columns, in the middle row (85 out)
+  line-y60, line-y110
+                still in the centre column, on the line between the near and
+                middle rows (60 out) / the middle and back rows (110 out)
+  step-LC, step-CR
+                in the middle of the left / centre column's middle row; at
+                the second beep, step into the centre / right column and stay
+  step-near, step-far
+                in the centre column's near / middle row; at the second beep,
+                step back into the middle / back row and stay
+
 A run writes logs/centre-<time>/: readings.csv (one row per node reading),
 game.csv (the game's position, 10 a second), turns.csv (scan turn changes),
 run.json (the spots, their times and the settings), report.md and a plot per
@@ -95,6 +112,14 @@ DEFAULT_DEPTHS_CM = (40.0, 80.0, 120.0)
 DEFAULT_STILL_S = 20.0
 DEFAULT_WALK_S = 30.0
 DEFAULT_SETTLE_S = 8.0
+DEFAULT_STEP_BEFORE_S = 6.0  # a step spot: standing in the first cell before the move beep
+DEFAULT_STEP_AFTER_S = 8.0   # and in the new cell after it
+# The game's rows on its default calibration bounds, 10 to 160 cm out
+# (callibrate_corners.js DEFAULT_NEAR_CM, DEFAULT_FAR_CM): three rows 50 cm
+# deep. The middle of each, and the lines between them.
+ROW_CENTRES_CM = (35.0, 85.0, 135.0)
+ROW_LINES_CM = (60.0, 110.0)
+SPOT_SETS = ("centre", "cells", "both")
 STATUS_STALE_S = 2.0        # no game:status for this long: the game page is gone
 GAME_RATE_HZ = 10.0         # canvas.js sends game:status this often
 RATE_WINDOW_S = 2.0
@@ -131,10 +156,12 @@ TURN_COLUMNS = ("t_s", "step", "phase", "node_id", "has_turn")
 @dataclass(frozen=True)
 class Step:
     name: str
-    kind: str                   # "empty", "still" or "walk"
+    kind: str                   # "empty", "still", "walk" or "step"
     spot: str                   # where to stand, as shown and said
     x_cm: Optional[float]       # where the player is in the game's frame, when known
     y_cm: Optional[float]
+    to_x_cm: Optional[float] = None     # a step: where they step to at the move beep
+    to_y_cm: Optional[float] = None
 
     @property
     def column(self):
@@ -166,6 +193,47 @@ def plan_steps(spacing_cm=GAME_SPACING_CM, depths=DEFAULT_DEPTHS_CM):
     steps.append(Step("walk-centre", "walk",
                       f"Halfway between the nodes, {depths[0]:g} cm out. Walk slowly straight "
                       f"out to {depths[-1]:g} cm and back, twice.", middle, None))
+    return steps
+
+
+def plan_cell_steps(spacing_cm=GAME_SPACING_CM):
+    """The spots for the cell's steadiness and the moves (--spots cells): on
+    the lines between cells, and steps from one cell into the next. Laid out
+    from the real nodes, as plan_steps() is: the column lines are halfway
+    between each node and the middle."""
+    middle = PLAY_WIDTH_CM / 2
+    left_x, right_x = middle - spacing_cm / 2, middle + spacing_cm / 2
+    left_line, right_line = middle - spacing_cm / 4, middle + spacing_cm / 4
+    near, mid, far = ROW_CENTRES_CM
+    front_line, back_line = ROW_LINES_CM
+    return [
+        Step("line-x50", "still", f"On the line between the left and centre columns, {mid:g} cm out.",
+             left_line, mid),
+        Step("line-x100", "still", f"On the line between the centre and right columns, {mid:g} cm out.",
+             right_line, mid),
+        Step("line-y60", "still", f"Halfway between the nodes, {front_line:g} cm out: on the line "
+             "between the near and middle rows.", middle, front_line),
+        Step("line-y110", "still", f"Halfway between the nodes, {back_line:g} cm out: on the line "
+             "between the middle and back rows.", middle, back_line),
+        Step("step-LC", "step", f"In front of the left node, {mid:g} cm out. At the second beep, "
+             "step right into the centre column and stay.", left_x, mid, middle, mid),
+        Step("step-CR", "step", f"Halfway between the nodes, {mid:g} cm out. At the second beep, "
+             "step right to in front of the right node and stay.", middle, mid, right_x, mid),
+        Step("step-near", "step", f"Halfway between the nodes, {near:g} cm out. At the second beep, "
+             f"step back to {mid:g} cm out and stay.", middle, near, middle, mid),
+        Step("step-far", "step", f"Halfway between the nodes, {mid:g} cm out. At the second beep, "
+             f"step back to {far:g} cm out and stay.", middle, mid, middle, far),
+    ]
+
+
+def plan_spots(spots="centre", spacing_cm=GAME_SPACING_CM, depths=DEFAULT_DEPTHS_CM):
+    """The spots a run walks through: the centre column's (plan_steps()), the
+    cells' (plan_cell_steps()), or both."""
+    steps = []
+    if spots in ("centre", "both"):
+        steps += plan_steps(spacing_cm, depths)
+    if spots in ("cells", "both"):
+        steps += plan_cell_steps(spacing_cm)
     return steps
 
 
@@ -459,6 +527,7 @@ async def beep(pattern):
 
 
 START_BEEP = ((880, 250),)
+MOVE_BEEP = ((1175, 150), (1175, 150))
 DONE_BEEP = ((660, 150), (440, 300))
 
 
@@ -497,7 +566,7 @@ async def _wait_until_ready(log, receiver):
 async def run_test(args):
     from websockets.asyncio.client import connect
 
-    steps = plan_steps(args.spacing_cm, args.depths)
+    steps = plan_spots(args.spots, args.spacing_cm, args.depths)
     if args.steps:
         names = {step.name for step in steps}
         unknown = [name for name in args.steps if name not in names]
@@ -512,6 +581,7 @@ async def run_test(args):
         "started": datetime.now().isoformat(timespec="seconds"),
         "spacing_cm": args.spacing_cm, "game_spacing_cm": GAME_SPACING_CM,
         "settle_s": args.settle, "still_s": args.seconds, "walk_s": args.walk_seconds,
+        "step_before_s": args.step_before, "step_after_s": args.step_after,
         "left": args.left, "right": args.right,
         "steps": [], "method": None, "nodes": {},
     }
@@ -540,7 +610,9 @@ async def run_test(args):
             _write_run(folder, info)
 
             for index, step in enumerate(steps, 1):
-                seconds = args.walk_seconds if step.kind == "walk" else args.seconds
+                seconds = (args.walk_seconds if step.kind == "walk"
+                           else args.step_before + args.step_after if step.kind == "step"
+                           else args.seconds)
                 print(f"\n[{index}/{len(steps)}] {step.name}: {step.spot}  ({seconds:g} s)")
                 if not args.auto:
                     try:
@@ -556,7 +628,8 @@ async def run_test(args):
                     raise ConnectionError("the control feed closed")
                 log.set_step(step.name, "settle")
                 cue = (" Start moving at the beep." if step.kind == "walk"
-                       else " Stand still, facing the screen." if step.kind == "still" else "")
+                       else " Stand still, facing the screen." if step.kind == "still"
+                       else " Stand still until the second beep." if step.kind == "step" else "")
                 await say(f"Step {index} of {len(steps)}. {step.spot}{cue}", args.voice)
                 await asyncio.sleep(args.settle)
                 for problem in log.problems():
@@ -565,13 +638,22 @@ async def run_test(args):
                 log.set_step(step.name, "record")
                 start = log.now()
                 print(f"    recording {seconds:g} s ...", flush=True)
-                await asyncio.sleep(seconds)
+                moved = None
+                if step.kind == "step":
+                    await asyncio.sleep(args.step_before)
+                    await beep(MOVE_BEEP)
+                    moved = log.now()
+                    print("    move now", flush=True)
+                    await asyncio.sleep(args.step_after)
+                else:
+                    await asyncio.sleep(seconds)
                 end = log.now()
                 samples = log.step_game
                 log.set_step("", "between")
                 await beep(DONE_BEEP)
                 info["steps"].append({**asdict(step), "start_s": round(start, 3),
-                                      "end_s": round(end, 3)})
+                                      "end_s": round(end, 3),
+                                      "move_s": None if moved is None else round(moved, 3)})
                 _write_run(folder, info)
                 if samples < GAME_RATE_HZ * MIN_RATE_SHARE * (end - start):
                     print(f"  warning: only {samples} game samples in {end - start:.0f} s: the "
@@ -665,7 +747,8 @@ def _rows(path):
 def load_run(folder):
     folder = Path(folder)
     info = json.loads((folder / "run.json").read_text(encoding="utf-8"))
-    steps = [(Step(s["name"], s["kind"], s["spot"], s["x_cm"], s["y_cm"]), s["start_s"], s["end_s"])
+    steps = [(Step(s["name"], s["kind"], s["spot"], s["x_cm"], s["y_cm"],
+                   s.get("to_x_cm"), s.get("to_y_cm")), s["start_s"], s["end_s"])
              for s in info.get("steps", [])]
     readings = [Reading(
         t=_num(r["t_s"]) or 0.0, step=r["step"], phase=r["phase"], node=_int(r["node_id"]),
@@ -1385,22 +1468,33 @@ def plot_steps(run, result):
     return written
 
 
-def tape_marks(spacing_cm=GAME_SPACING_CM, depths=DEFAULT_DEPTHS_CM):
+def tape_marks(spacing_cm=GAME_SPACING_CM, depths=DEFAULT_DEPTHS_CM, spots="centre"):
     """(spot, from the LEFT shaft, from the RIGHT shaft) in cm, along the floor
     from the point under each servo shaft. A mark at both distances at once is
-    on the spot: no right angles to set out."""
-    return [(step.name,
-             expected_distance("LEFT", spacing_cm, step.x_cm, step.y_cm),
-             expected_distance("RIGHT", spacing_cm, step.x_cm, step.y_cm))
-            for step in plan_steps(spacing_cm, depths)
-            if step.x_cm is not None and step.y_cm is not None]
+    on the spot: no right angles to set out. A step spot has a second mark,
+    "<name> to", where it steps to; a place already marked is not marked again."""
+    places = []
+    for step in plan_spots(spots, spacing_cm, depths):
+        if step.x_cm is not None and step.y_cm is not None:
+            places.append((step.name, step.x_cm, step.y_cm))
+        if step.to_x_cm is not None and step.to_y_cm is not None:
+            places.append((f"{step.name} to", step.to_x_cm, step.to_y_cm))
+    marks, seen = [], set()
+    for name, x, y in places:
+        if (x, y) in seen:
+            continue
+        seen.add((x, y))
+        marks.append((name, expected_distance("LEFT", spacing_cm, x, y),
+                      expected_distance("RIGHT", spacing_cm, x, y)))
+    return marks
 
 
-def print_marks(spacing_cm, depths, out=print):
+def print_marks(spacing_cm, depths, out=print, spots="centre"):
     out(f"Tape marks for nodes {spacing_cm:g} cm apart (shaft to shaft). Measure along the "
         "floor from the point under each servo shaft; the spot is where both distances meet.\n")
     out(_table(["spot", "from LEFT shaft (cm)", "from RIGHT shaft (cm)"],
-               [[name, f"{left:.1f}", f"{right:.1f}"] for name, left, right in tape_marks(spacing_cm, depths)]))
+               [[name, f"{left:.1f}", f"{right:.1f}"]
+                for name, left, right in tape_marks(spacing_cm, depths, spots)]))
     return 0
 
 
@@ -1430,7 +1524,14 @@ def main(argv=None):
                             help="measured distance between the two servo shafts (default 100)")
     run_parser.add_argument("--depths", type=float, nargs="+", default=list(DEFAULT_DEPTHS_CM),
                             help="how far out the centre spots are, cm (default 40 80 120)")
+    run_parser.add_argument("--spots", choices=SPOT_SETS, default="centre",
+                            help="the centre column's spots (default), the cells' (lines and "
+                                 "steps, for cursor_replay.js), or both")
     run_parser.add_argument("--steps", nargs="+", help="only these steps, e.g. C-80 L-80")
+    run_parser.add_argument("--step-before", type=float, default=DEFAULT_STEP_BEFORE_S,
+                            help="a step spot: seconds before the move beep (default 6)")
+    run_parser.add_argument("--step-after", type=float, default=DEFAULT_STEP_AFTER_S,
+                            help="a step spot: seconds after it (default 8)")
     run_parser.add_argument("--seconds", type=float, default=DEFAULT_STILL_S,
                             help="recording per still spot (default 20)")
     run_parser.add_argument("--walk-seconds", type=float, default=DEFAULT_WALK_S,
@@ -1452,6 +1553,8 @@ def main(argv=None):
                               help="measured distance between the two servo shafts (default 100)")
     marks_parser.add_argument("--depths", type=float, nargs="+", default=list(DEFAULT_DEPTHS_CM),
                               help="how far out the centre spots are, cm (default 40 80 120)")
+    marks_parser.add_argument("--spots", choices=SPOT_SETS, default="centre",
+                              help="which spots to mark (default centre)")
 
     report_parser = sub.add_parser("report", help="report on a run folder again")
     report_parser.add_argument("folder", help="a logs/centre-* folder")
@@ -1461,7 +1564,7 @@ def main(argv=None):
 
     args = parser.parse_args(argv)
     if args.command == "marks":
-        return print_marks(args.spacing_cm, args.depths)
+        return print_marks(args.spacing_cm, args.depths, spots=args.spots)
     if args.command == "run":
         try:
             return asyncio.run(run_test(args))
