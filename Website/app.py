@@ -99,7 +99,8 @@ recorder = SessionRecorder.from_env(os.environ)
 # When one node has seen the player in one place for 5 s, the other is aimed at
 # them with LOOK <deg> (handover.py). Each node's confidence is always worked
 # out and sent with nodes:update; HANDOVER=0 only stops the LOOKs, for runs to
-# compare with and without.
+# compare with and without. The control panel's Handover switch does the same
+# while running (set_handover).
 handover = Handover(steer=os.environ.get("HANDOVER") != "0")
 
 state_lock = threading.Lock()
@@ -859,14 +860,28 @@ async def browser_handler(websocket):
         await asyncio.to_thread(request_nodes_aim, websocket, False)
 
 
+def set_handover(enabled):
+    """The control panel's Handover switch. Off keeps every node's confidence
+    but sends no LOOK, as HANDOVER=0 does from the start."""
+    handover.steer = enabled is True
+    print(f"Handover: {'on' if handover.steer else 'off'} (control panel)")
+
+
+def handover_message():
+    """What the control panel's Handover switch shows."""
+    return {"type": "handover:status", "on": handover.steer}
+
+
 async def control_handler(websocket):
     """Phone control panel: relays commands to every game browser. The empty
     room ("room": learn or forget) goes straight to the nodes instead, so it
-    works with no game page open."""
+    works with no game page open, and the Handover switch ("handover") to the
+    server."""
     CONTROL_CONNECTIONS.add(websocket)
     print(f"Control panel connected from {websocket.remote_address}")
     try:
         await websocket.send(json.dumps({"type": "nodes:update", "nodes": snapshot_nodes()}))
+        await websocket.send(json.dumps(handover_message()))
         async for message in websocket:
             try:
                 event = json.loads(message)
@@ -875,6 +890,10 @@ async def control_handler(websocket):
             if event.get("action") == "room":
                 print(f"Control panel: {event}")
                 await asyncio.to_thread(send_nodes_room, event.get("room"))
+                continue
+            if event.get("action") == "handover":
+                set_handover(event.get("enabled"))
+                broadcast(CONTROL_CONNECTIONS.copy(), json.dumps(handover_message()))
                 continue
             if event.get("action") not in CONTROL_ACTIONS:
                 continue

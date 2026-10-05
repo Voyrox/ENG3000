@@ -328,6 +328,27 @@ class AppHandoverTests(BrokerTestCase):
             self.clock[0] += READ_EVERY_S
         self.assertFalse(any(line.startswith("LOOK") for line in right_conn.sent))
 
+    def test_the_control_panel_switch_turns_handover_off_and_on(self):
+        app.handover = app.Handover()
+        right_conn = RecordingConn()
+        left_id, left = self.add_node(("10.0.0.1", 1000), conn=RecordingConn())
+        right_id, _ = self.add_node(("10.0.0.2", 1000), conn=right_conn)
+        app.node_roles.update({left_id: "LEFT", right_id: "RIGHT"})
+        left["has_turn"] = True
+        distance, angle = aimed_at(LEFT, PLAYER)
+
+        app.set_handover(False)
+        self.assertEqual(app.handover_message(), {"type": "handover:status", "on": False})
+        for _ in range(50):
+            app.update_node(left_id, json.dumps({"avg": distance, "angle": angle}))
+            self.clock[0] += READ_EVERY_S
+        self.assertFalse(any(line.startswith("LOOK") for line in right_conn.sent))
+
+        app.set_handover(True)
+        self.assertEqual(app.handover_message(), {"type": "handover:status", "on": True})
+        app.update_node(left_id, json.dumps({"avg": distance, "angle": angle}))
+        self.assertTrue(any(line.startswith("LOOK") for line in right_conn.sent))
+
 
 if __name__ == "__main__":
     unittest.main()

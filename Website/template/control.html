@@ -110,13 +110,17 @@
 
     <section>
         <h2>Sensors</h2>
+        <div class="row">
+            <button id="handoverBtn">Handover: on</button>
+        </div>
         <table>
             <thead><tr><th>Node</th><th>State</th><th>Filtered cm</th><th>Angle</th><th>Scan</th><th>Room</th><th>RPS</th><th>Confidence</th></tr></thead>
             <tbody id="nodes"><tr><td colspan="8">No nodes</td></tr></tbody>
         </table>
         <p class="note">Confidence: the share of a node's readings in the last 5 s that put the
             player in one spot, ± how tightly. Green is confident; "following n" is a node
-            being aimed at node n's fix.</p>
+            being aimed at node n's fix. Handover off: confidence is still worked out, but no
+            node is aimed (no LOOK).</p>
     </section>
 
     <script>
@@ -245,6 +249,17 @@
                 if (confirm(ROOM_CONFIRM[btn.dataset.room])) send({ action: "room", room: btn.dataset.room });
             });
         });
+
+        // Handover goes straight to the server (no game page needed), which
+        // answers with handover:status.
+        let handoverOn = true;
+        $("handoverBtn").addEventListener("click", () => send({ action: "handover", enabled: !handoverOn }));
+        function renderHandover(on) {
+            if (typeof on !== "boolean") return;
+            handoverOn = on;
+            $("handoverBtn").textContent = `Handover: ${on ? "on" : "off"}`;
+            $("handoverBtn").classList.toggle("selected", !on);
+        }
 
         // Dynamic's rule switches: each press flips one (on until the game
         // says otherwise).
@@ -550,6 +565,8 @@
                     renderGame();
                 } else if (payload.type === "nodes:update") {
                     renderNodes(payload.nodes);
+                } else if (payload.type === "handover:status") {
+                    renderHandover(payload.on);
                 }
             });
             socket.addEventListener("close", () => {
