@@ -293,6 +293,13 @@ class StageTwoSensorRig(unittest.TestCase):
         stage.set_cell_decision(True)
         self.assertTrue(stage.pipeline.config.cell_decision)
 
+    def test_the_cell_confidence_switch_reaches_the_config(self):
+        stage = ServerFilterStage()
+        stage.set_cell_confidence(False)
+        self.assertFalse(stage.pipeline.config.cell_confidence)
+        stage.set_cell_confidence(True)
+        self.assertTrue(stage.pipeline.config.cell_confidence)
+
     def test_the_tracking_switch_reaches_the_config(self):
         stage = ServerFilterStage()
         stage.set_track_moving(False)

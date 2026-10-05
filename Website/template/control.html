@@ -56,6 +56,7 @@
             <button id="cellLockBtn" data-action="cellLock">Cell lock: on</button>
             <button id="cellDecisionBtn" data-action="cellDecision">Cell decision: on</button>
             <button id="trackMovingBtn" data-action="trackMoving">Tracking: off</button>
+            <button id="cellConfidenceBtn" data-action="cellConfidence">Cell confidence: on</button>
         </div>
         <p class="note">Kalman off: each node's distance goes median → FFT, and line of sight puts the
             player at the newest reading, with no gate. The servos do not use it.</p>
@@ -76,6 +77,10 @@
             sees them 15 cm from where it did two readings before, or they go 40 cm/s), the cell
             moves after 0.2 s instead of 0.5 s; still again after 0.7 s, or at once when a node has
             held them within 10 cm for 5 readings.</p>
+        <p class="note">Cell confidence (shaded yellow on the pad): a cell rises to full over 3 s while
+            the player stands still in it and a node finds them there, and fades otherwise (half-life
+            30 s, 5 s while another cell rises). On, a confident cell needs up to half the dwell, and
+            after Out of bounds the cursor comes back to a confident cell next to the player.</p>
     </section>
 
     <section>
@@ -412,6 +417,7 @@
                 if (action === "cellDecision") return send({ action, enabled: Boolean(game) && game.cellDecision === false });
                 // Off until the game says otherwise, so the first press turns it on.
                 if (action === "trackMoving") return send({ action, enabled: !(game && game.trackMoving) });
+                if (action === "cellConfidence") return send({ action, enabled: Boolean(game) && game.cellConfidence === false });
                 if (action === "farHalf") return send({ action, enabled: Boolean(game) && game.farHalf === false });
                 if (action === "compare") return send({ action, enabled: Boolean(game) && game.compare === false });
                 if (action === "pause" && game && game.status === "paused") return send({ action: "resume" });
@@ -558,6 +564,8 @@
             $("cellDecisionBtn").classList.toggle("selected", game.cellDecision === false);
             $("trackMovingBtn").textContent = `Tracking: ${game.trackMoving ? "on" : "off"}`;
             $("trackMovingBtn").classList.toggle("selected", Boolean(game.trackMoving));
+            $("cellConfidenceBtn").textContent = `Cell confidence: ${game.cellConfidence === false ? "off" : "on"}`;
+            $("cellConfidenceBtn").classList.toggle("selected", game.cellConfidence === false);
             $("farHalfBtn").textContent = `Far half: ${game.farHalf === false ? "off" : "on"}`;
             $("farHalfBtn").classList.toggle("selected", game.farHalf === false);
             document.querySelectorAll("[data-rule]").forEach((btn) => {
@@ -574,8 +582,13 @@
             const cursorHole = game.cursor !== undefined
                 ? (game.cursor ? game.cursor.hole : -1)
                 : game.remoteHole;
+            const sensor = game.cursor && game.cursor.sensor;
+            const confidence = sensor && Array.isArray(sensor.holeConfidence) ? sensor.holeConfidence : null;
             pad.querySelectorAll(".hole").forEach((cell, i) => {
                 const up = i === game.activeHole;
+                // Cell confidence: a yellow wash, stronger the surer the game is.
+                const c = confidence ? Number(confidence[i]) || 0 : 0;
+                cell.style.boxShadow = c > 0.01 ? `inset 0 0 0 999px rgba(250, 204, 21, ${(0.45 * c).toFixed(3)})` : "";
                 cell.classList.toggle("mole", up && game.moleType === "mole");
                 cell.classList.toggle("super", up && game.moleType === "super");
                 cell.classList.toggle("bomb", up && game.moleType === "bomb");

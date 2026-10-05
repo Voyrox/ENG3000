@@ -17,6 +17,9 @@
 //   window.setCellLock(on) / window.getCellLock()   - the drawn cursor and its hits keep to the voted cell
 //   window.setCellDecision(on) / window.getCellDecision() - the cell decision, or the older vote
 //   window.setTrackMoving(on) / window.getTrackMoving()   - tracking: the cell follows a moving player
+//   window.setCellConfidence(on) / window.getCellConfidenceSwitch() - the cell decision uses cell confidence
+//   window.getCellConfidence()                  - each cell's confidence, 0-1, index gx * 3 + gy
+//   window.getSensorMotion()                    - { moving, x, y, vx, vy, at }: the player, their velocity and its time
 //   window.handleGameClick(canvas, x, y)        - register a hit attempt
 //   window.getGamePauseButtonAtPoint(canvas,x,y)- hit-test the pause icon
 //   window.getPauseMenuButtonAtPoint(canvas,x,y)- hit-test Resume / Restart / Main Menu
@@ -227,6 +230,27 @@
     stillPoints: 5,
     stillCm: 10,
     cellMovingDwellMs: 200,
+    // Cell confidence (Aaron, 6 Oct; stepCellConfidence()): how sure the game
+    // is that the player has been standing in each cell. On each counted
+    // reading with the player still (stepMotion()) and a reading node FOUND
+    // with its own point in the decided cell, that cell rises to 1 over
+    // cellConfidenceRiseMs while every other cell fades with a
+    // cellConfidenceOtherHalfLifeS half-life; on other counted readings every
+    // cell fades with a cellConfidenceHalfLifeS half-life. Nothing changes
+    // while the cell is held or nobody is found, so it outlasts a loss. It
+    // starts again with each round. With the switch on, the cell decision
+    // uses it: a cell's dwell is shortened by half its confidence, and the
+    // first cell after Out of bounds or no signal is a cell with confidence
+    // cellConfidenceFirstCell or more within cellMarginCm of the position, if
+    // there is one. Off, it is still kept and shown, and the decision
+    // ignores it. (The server's search finds its own cell from the last 3 s
+    // of readings, Aaron's definition; it does not use these.) Switched on the control panel. Python:
+    // FilterConfig cell_confidence, cell_confidence_*; CellConfidence.
+    cellConfidence: true,
+    cellConfidenceRiseMs: 3000,
+    cellConfidenceHalfLifeS: 30,
+    cellConfidenceOtherHalfLifeS: 5,
+    cellConfidenceFirstCell: 0.5,
     // Neither node has sent a new reading for this long (ms), or the server
     // says both are offline: the game says Sensors offline and the round
     // waits. Unusable readings are otherwise ridden out on the last good
@@ -1124,6 +1148,9 @@
         method: positioning.method,
         placedBy: sensor.placedBy || null,
         moving: Boolean(sensor.moving),
+        // Each hole's cell confidence, in hole order (holeForCell()), for the
+        // control panel's pad.
+        holeConfidence: holeConfidence(),
         // Compare's rings, on the control panel's pad: only while Compare is
         // on and the browser places the player itself (the server's
         // coordinate carries no fixes).
@@ -1645,6 +1672,7 @@
     badReadingStreak = 0;
     resetCellFilter();
     resetMotion();
+    resetCellConfidence();
     sensorHold.grid = null;
     sensorHold.world = null;
     // Drops the drawn position too, so a new round opens its cursor where the
@@ -2568,6 +2596,56 @@
     return tuning.kalman;
   };
 
+  // The cell confidence switch, on by default; see tuning.cellConfidence.
+  window.getCellConfidenceSwitch = function getCellConfidenceSwitch() {
+    return tuning.cellConfidence;
+  };
+
+  window.setCellConfidence = function setCellConfidence(on) {
+    tuning.cellConfidence = Boolean(on);
+    console.info(`[cell confidence] ${tuning.cellConfidence ? "on" : "off"}`);
+    return tuning.cellConfidence;
+  };
+
+  // Each cell's confidence, 0-1, index gx * 3 + gy (gy 0 nearest the screen).
+  window.getCellConfidence = function getCellConfidence() {
+    return cellConfidence.slice();
+  };
+
+  // Each hole's cell confidence, in hole order (0 top-left, reading order):
+  // the browser's own, or the server's with SERVER_FILTERING on.
+  function holeConfidence() {
+    const server = serverCoordinateActive && gameState.sensor && Array.isArray(gameState.sensor.cellConfidence);
+    const scores = server ? gameState.sensor.cellConfidence : cellConfidence;
+    const out = new Array(9).fill(0);
+    for (let gx = 0; gx < 3; gx++) {
+      for (let gy = 0; gy < 3; gy++) {
+        out[holeForCell(gx, gy)] = Math.round((Number(scores[gx * 3 + gy]) || 0) * 1000) / 1000;
+      }
+    }
+    return out;
+  }
+
+  // The player as the server's search wants them (0c's track:update):
+  // moving or still (stepMotion(), or the server's with SERVER_FILTERING on),
+  // the position (cm), the line-of-sight track's velocity (cm/s; 0 with no
+  // live track, or with the server placing the player), and at, when the
+  // track last took a reading in this page's performance.now() ms (now with
+  // no live track).
+  window.getSensorMotion = function getSensorMotion() {
+    const now = performance.now();
+    const live = !serverCoordinateActive && losFix(now) !== null;
+    const sensor = gameState.sensor || {};
+    return {
+      moving: serverCoordinateActive ? Boolean(sensor.moving) : motion.moving,
+      x: numberOrNull(sensor.xCm),
+      y: numberOrNull(sensor.yCm),
+      vx: live ? losTrack.x[2] : 0,
+      vy: live ? losTrack.x[3] : 0,
+      at: live ? losTrack.updatedAt : now,
+    };
+  };
+
   // The tracking switch, OFF by default (Aaron, 6 Oct); see
   // tuning.trackMoving. Takes effect from the next reading; the moving/still
   // detector runs either way.
@@ -3153,6 +3231,15 @@
     anchors: [null, null, null],   // each node's { x, y } to compare with
   };
 
+  // After Out of bounds or no signal: the cell decision starts again - no
+  // cell, anchors, challenger or evidence from before the loss - but keeps
+  // when it first started, so the start-up probation does not apply again.
+  function restartCellDecision() {
+    const firstAt = cellDecision.firstAt;
+    resetCellDecision();
+    cellDecision.firstAt = firstAt;
+  }
+
   function resetCellDecision() {
     cellDecision.cell = null;
     cellDecision.challenger = null;
@@ -3273,6 +3360,55 @@
     return motion.moving;
   }
 
+  // --- Cell confidence (tuning.cellConfidence; Aaron, 6 Oct) -------------------
+  // See tuning.cellConfidence. Python: CellConfidence in filterRules.py.
+  const cellConfidence = new Array(9).fill(0);   // index gx * 3 + gy
+  let cellConfidenceAt = null;                   // ms: the last counted reading it was stepped on
+
+  function resetCellConfidence() {
+    cellConfidence.fill(0);
+    cellConfidenceAt = null;
+  }
+
+  // Once per counted reading with the position on the board, after the cell
+  // is decided: cell is the decided cell, nodes this reading's nodes and
+  // their own points (readingNodes()), scans the nodes' scan states.
+  function stepCellConfidence(cell, nodes, scans, now) {
+    const stepMs = cellConfidenceAt === null ? 0 : Math.min(CELL_DWELL_STEP_CAP_MS, now - cellConfidenceAt);
+    cellConfidenceAt = now;
+    const code = cell.gx * 3 + cell.gy;
+    const seen = !motion.moving && nodes.some(([slot, point]) =>
+      scans[slot].state === SCAN_FOUND && sameCell(cellOfPosition(point.x, point.y), cell));
+    const halfLifeS = seen ? tuning.cellConfidenceOtherHalfLifeS : tuning.cellConfidenceHalfLifeS;
+    const fade = Math.pow(2, -stepMs / 1000 / halfLifeS);
+    for (let i = 0; i < cellConfidence.length; i++) {
+      cellConfidence[i] = seen && i === code
+        ? Math.min(1, cellConfidence[i] + stepMs / tuning.cellConfidenceRiseMs)
+        : cellConfidence[i] * fade;
+    }
+  }
+
+  function confidenceOf(cell) {
+    return cellConfidence[cell.gx * 3 + cell.gy];
+  }
+
+  // The first cell after the decision starts again: the most confident cell
+  // with confidence tuning.cellConfidenceFirstCell or more within
+  // cellMarginCm of (x, y), or else here, the cell (x, y) is in.
+  function rememberedCell(here, x, y) {
+    let best = here;
+    let bestScore = tuning.cellConfidenceFirstCell;
+    for (let code = 0; code < cellConfidence.length; code++) {
+      const cell = { gx: Math.floor(code / 3), gy: code % 3 };
+      if (cellConfidence[code] >= bestScore && cellConfidence[code] > confidenceOf(best)
+        && nearCell(cell, x, y, tuning.cellMarginCm)) {
+        best = cell;
+        bestScore = cellConfidence[code];
+      }
+    }
+    return best;
+  }
+
   // The decided cell for a fix with status "ok" at (fix.xCm, fix.yCm). Only an
   // update carrying a node's new reading counts (isCountedReading()). While
   // tracking a moving player (tuning.trackMoving and motion.moving) the
@@ -3286,10 +3422,12 @@
     const nodes = readingNodes(fix);
     if (cellDecision.cell === null) {
       // The first position is taken at once, so the cursor appears without
-      // waiting, and each node that read is anchored there.
-      cellDecision.cell = here;
+      // waiting, and each node that read is anchored there. After a restart
+      // (restartCellDecision()) a confident cell next to it may be taken
+      // instead, and the start-up probation does not apply again.
+      cellDecision.cell = tuning.cellConfidence ? rememberedCell(here, fix.xCm, fix.yCm) : here;
       cellDecision.lastAt = now;
-      cellDecision.firstAt = now;
+      if (cellDecision.firstAt === null) cellDecision.firstAt = now;
       nodes.forEach(([slot, point]) => { cellDecision.anchors[slot] = point; });
       return cellDecision.cell;
     }
@@ -3346,7 +3484,9 @@
     if (challenger) {
       const nextTo = Math.abs(challenger.gx - current.gx) <= 1 && Math.abs(challenger.gy - current.gy) <= 1;
       const dwell = tracking ? tuning.cellMovingDwellMs : tuning.cellDwellMs;
-      if (cellDecision.evidenceMs >= dwell * (nextTo ? 1 : 2)) {
+      // A cell the player has stood in takes less dwell (tuning.cellConfidence).
+      const familiar = tuning.cellConfidence ? 1 - 0.5 * confidenceOf(challenger) : 1;
+      if (cellDecision.evidenceMs >= dwell * (nextTo ? 1 : 2) * familiar) {
         cellDecision.cell = challenger;
         cellDecision.challenger = null;
         cellDecision.evidenceMs = 0;
@@ -3411,6 +3551,7 @@
       const cell = tuning.cellDecision
         ? decideCell(fix, now)
         : stabiliseCell(grid.gx, grid.gy, fix.isNewReading);
+      if (isCountedReading(fix)) stepCellConfidence(cell, readingNodes(fix), fix.scans, now);
       const stable = { ...grid, gx: cell.gx, gy: cell.gy };
 
       // Two things come out of one set of readings: the discrete cell, which is
@@ -3427,6 +3568,7 @@
         rawGx: grid.gx, rawGy: grid.gy,
         calibrated: grid.calibrated, held: false, heldFor: 0,
         xCm: world.x, yCm: world.y, resolved: world.resolved, moving: motion.moving,
+        cellConfidence: cellConfidence.slice(),
       };
       const point = moveCursor(canvas, world, cell.gx, dt, cell);
       if (point) hoverFromSensors(canvas, point, cell);
@@ -3461,6 +3603,7 @@
         ...fix, status: "ok", gx: held.gx, gy: held.gy,
         calibrated: held.calibrated, held: true, heldFor: badReadingStreak,
         xCm: world.x, yCm: world.y, resolved: world.resolved, moving: motion.moving,
+        cellConfidence: cellConfidence.slice(),
       };
       // The spring keeps running while held, so the cursor eases to a stop
       // instead of freezing mid-board the moment a frame is dropped.
@@ -3470,9 +3613,11 @@
     }
 
     // No square to ride out on: Out of bounds if nobody is found, otherwise
-    // the round just waits for the first position, with no message.
+    // the round just waits for the first position, with no message. The cell
+    // decision starts again when the player is found.
     sensorHold.grid = null;
     sensorHold.world = null;
+    restartCellDecision();
     gameState.sensor = {
       ...fix,
       status: fix.nobodyFound ? "out-of-bounds" : "no-signal",
@@ -3557,6 +3702,10 @@
       calibrated: Boolean(c.calibrated),
       held: Boolean(c.held),
       heldFor: Number.isInteger(c.heldFor) ? c.heldFor : 0,
+      // The server's own moving/still detector and cell confidence
+      // (filterRules.py MotionDetector, CellConfidence).
+      moving: Boolean(c.moving),
+      cellConfidence: Array.isArray(c.cellConfidence) ? c.cellConfidence.slice(0, 9) : null,
     };
 
     if (!hasCell) {

@@ -545,6 +545,47 @@ test("the cell lock is on until the control panel turns it off", () => {
   assert.strictEqual(w.setCellLock(true), true);
 });
 
+test("cell confidence is on until the control panel turns it off", () => {
+  const w = loadWindow();
+  assert.strictEqual(w.getCellConfidenceSwitch(), true);
+  assert.strictEqual(w.setCellConfidence(false), false);
+  assert.strictEqual(w.tuneSensor({}).cellConfidence, false, "the cell decision reads it from tuning");
+  assert.strictEqual(w.setCellConfidence(true), true);
+});
+
+test("a player standing in the centre fills its cell confidence, shown on the pad's hole 4", () => {
+  const w = loadWindow();
+  w.setGameInputMode("sensor");
+  w.resetGame();
+  // New readings about 10 a second for 5 s.
+  for (let i = 1; i <= 300; i += 1) {
+    const t = i * FRAME_MS;
+    w.performance.now = () => t;
+    if (i % 6 === 0) w.markSensorFrame();
+    w.updateGame(t, CANVAS, scannersSeeing(75, 85));
+  }
+  const scores = w.getCellConfidence();
+  assert.ok(scores[4] > 0.9, `centre ${scores[4]}`);
+  assert.ok(scores.every((score, i) => i === 4 || score === 0), JSON.stringify(scores));
+  const status = w.getGameCursorStatus(CANVAS);
+  assert.strictEqual(status.sensor.holeConfidence[4], Math.round(scores[4] * 1000) / 1000);
+  // A new round starts it again.
+  w.resetGame();
+  assert.strictEqual(JSON.stringify(w.getCellConfidence()), JSON.stringify(new Array(9).fill(0)));
+});
+
+test("the player's motion for the server: moving, position and velocity", () => {
+  const w = loadWindow();
+  w.setGameInputMode("sensor");
+  w.resetGame();
+  run(w, scannersSeeing(75, 85));
+  const motion = w.getSensorMotion();
+  assert.deepStrictEqual(Object.keys(motion).sort(), ["at", "moving", "vx", "vy", "x", "y"]);
+  assert.strictEqual(motion.moving, false);
+  assert.ok(Math.abs(motion.x - 75) < 3 && Math.abs(motion.y - 85) < 3, JSON.stringify(motion));
+  assert.ok(Number.isFinite(motion.vx) && Number.isFinite(motion.vy));
+});
+
 test("tracking is off until the control panel turns it on", () => {
   const w = loadWindow();
   assert.strictEqual(w.getTrackMoving(), false);

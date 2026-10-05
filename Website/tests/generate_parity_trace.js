@@ -337,7 +337,8 @@ function buildStream() {
 // --- Run the real JS -----------------------------------------------------------
 
 function runJs(stream, calibration, method, kalman = true, dynamicRules = null, angleLimit = true,
-  deadZone = true, farHalf = true, triAimTolerance = true, cellDecision = true, trackMoving = false) {
+  deadZone = true, farHalf = true, triAimTolerance = true, cellDecision = true, trackMoving = false,
+  cellConfidence = true) {
   let clock = 0;
   const context = {
     console,
@@ -379,6 +380,7 @@ function runJs(stream, calibration, method, kalman = true, dynamicRules = null, 
   w.setTriAimTolerance(triAimTolerance);
   w.setCellDecision(cellDecision);
   w.setTrackMoving(trackMoving);
+  w.setCellConfidence(cellConfidence);
   if (dynamicRules) w.setDynamicRules(dynamicRules);
   w.setGameInputMode("sensor");
   w.resetGame();
@@ -429,6 +431,7 @@ function runJs(stream, calibration, method, kalman = true, dynamicRules = null, 
       s.status === "ok" ? round6(s.xCm) : null,
       s.status === "ok" ? round6(s.yCm) : null,
       s.moving ? 1 : 0,
+      confidenceTop(s.cellConfidence),
     ]);
     placedBy.push(s.placedBy ?? null);
   });
@@ -436,7 +439,17 @@ function runJs(stream, calibration, method, kalman = true, dynamicRules = null, 
 }
 
 const FIELDS = ["status", "gx", "gy", "rawGx", "rawGy", "column", "held", "heldFor", "filtered",
-  "fresh", "x", "y", "moving"];
+  "fresh", "x", "y", "moving", "confTop"];
+
+// The most confident cell and its score, [gx * 3 + gy, score to 6 places]
+// (the first of a tie), or null when no cell has any: enough to check the
+// cell confidence without nine numbers a step.
+function confidenceTop(scores) {
+  if (!Array.isArray(scores)) return null;
+  let best = 0;
+  scores.forEach((score, i) => { if (score > scores[best]) best = i; });
+  return scores[best] > 0 ? [best, round6(scores[best])] : null;
+}
 
 const stream = buildStream();
 const RULES_OFF = { farPriority: false, confidenceNode: false, columnLock: false, loneNode: false, cornerNode: false };
@@ -504,6 +517,12 @@ const trace = {
     trackMovingOn: {
       method: "dyn", trackMoving: true,
       ...runJs(stream, null, "dyn", true, null, true, true, true, true, true, true),
+    },
+    // Dynamic with cell confidence off: the cell decision ignores it (it is
+    // still kept).
+    cellConfidenceOff: {
+      method: "dyn", cellConfidence: false,
+      ...runJs(stream, null, "dyn", true, null, true, true, true, true, true, false, false),
     },
   },
 };

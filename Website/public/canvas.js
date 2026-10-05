@@ -410,6 +410,7 @@ let sentTriAimTolerance = null;
 let sentDeadZone = null;
 let sentCellDecision = null;
 let sentTrackMoving = null;
+let sentCellConfidence = null;
 let sentDynamicRules = null;
 let sentConfidenceLevel = null;
 let sentFarHalf = null;
@@ -499,6 +500,13 @@ function syncServerFilterSetup() {
     sentTrackMoving = trackMoving;
   }
 
+  // The cell confidence switch, so the server's chain decides cells the same way.
+  const cellConfidence = window.getCellConfidenceSwitch();
+  if (cellConfidence !== sentCellConfidence &&
+      sendToServer({ type: "filter:cellConfidence", on: cellConfidence })) {
+    sentCellConfidence = cellConfidence;
+  }
+
   // Dynamic's rule switches, so the server's chain places the player the same way.
   const rules = window.getDynamicRules();
   const rulesKey = JSON.stringify(rules);
@@ -534,6 +542,8 @@ function startGameWithMode(mode) {
   stopAlertNoise();
   window.setGameInputMode(mode);
   window.resetGame();
+  // A new round: the server's search and filter start again (app.py).
+  sendToServer({ type: "round:start" });
   alertReturnScreen = "game";
   screen = "game";
   startGameLoop();
@@ -677,6 +687,12 @@ function handleRemoteCommand(command) {
       window.setTrackMoving(command.enabled);
       syncServerFilterSetup();
       break;
+    case "cellConfidence":
+      // Cell confidence: the cell decision uses how sure the game is that
+      // the player has stood in each cell.
+      window.setCellConfidence(command.enabled);
+      syncServerFilterSetup();
+      break;
     case "cellLock":
       // The cell lock: the drawn cursor, and the hole it scores in, keep to
       // the voted cell. Drawing only, so the server's chain is not told.
@@ -745,6 +761,7 @@ function sendGameStatus() {
     cellLock: window.getCellLock(),
     cellDecision: window.getCellDecision(),
     trackMoving: window.getTrackMoving(),
+    cellConfidence: window.getCellConfidenceSwitch(),
     alertHeld: window.isAlertHeld(),
     dynamicRules: window.getDynamicRules(),
     confidenceLevel: window.getConfidenceLevel(),
@@ -819,6 +836,7 @@ function connectSocket() {
     sentDeadZone = null;
     sentCellDecision = null;
     sentTrackMoving = null;
+    sentCellConfidence = null;
     sentDynamicRules = null;
     sentConfidenceLevel = null;
     sentFarHalf = null;

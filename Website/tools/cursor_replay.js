@@ -20,6 +20,10 @@
 //   centre   - standing still in the middle of each of the nine cells
 //   boundary - standing still on a line between two cells; either is right
 //   step     - standing in a cell, then walking into the next one and staying
+//   return   - standing in a cell long enough to be sure of it (FAMILIAR_MS),
+//              stepping into the next one for AWAY_MS, then walking back: the
+//              latency of the walk back, into a cell the game has seen the
+//              player in (cell confidence)
 //
 // The measures, for each of the three cells:
 //   flips/min - changes of cell while standing still. The gap between two
@@ -66,6 +70,8 @@ const STILL_MS = 20000;
 const STEP_BEFORE_MS = 2000;       // standing in the first cell, after the lock-on
 const STEP_AFTER_MS = 4000;        // standing in the new cell
 const BUDGET_MS = 1000;            // the move budget (Aaron, 5 Oct)
+const FAMILIAR_MS = 4000;          // a return test: standing in the first cell, before the step away
+const AWAY_MS = 3000;              // and in the next one, before walking back
 const TURN_MS = 1000;              // app.py TURN_INTERVAL_SECONDS
 const NODE_X = [25, null, 125];
 const SERVO_LIMITS = { 0: [40, 160], 2: [30, 140] };   // Config.h
@@ -336,6 +342,25 @@ function stepPath(a, b, walkCmS) {
   };
 }
 
+// Stands at a for STEP_BEFORE_MS + FAMILIAR_MS after the lock-on, walks to
+// b, stands there AWAY_MS, walks back to a and stands STEP_AFTER_MS. backAt is
+// when the walk back starts.
+function returnPath(a, b, walkCmS) {
+  const walkMs = (1000 * Math.hypot(b[0] - a[0], b[1] - a[1])) / walkCmS;
+  const leaveAt = LOCK_ON_MS + STEP_BEFORE_MS + FAMILIAR_MS;
+  const backAt = leaveAt + walkMs + AWAY_MS;
+  const along = (from, to, k) => [from[0] + (to[0] - from[0]) * k, from[1] + (to[1] - from[1]) * k];
+  return {
+    durationMs: backAt + walkMs + STEP_AFTER_MS,
+    backAt,
+    at: (t) => {
+      if (t <= leaveAt) return a;
+      if (t <= backAt) return along(a, b, Math.min(1, (t - leaveAt) / walkMs));
+      return along(b, a, Math.min(1, (t - backAt) / walkMs));
+    },
+  };
+}
+
 // The test spots, from the game's own grid.
 function testSpots(site) {
   const { rows } = startGame(site, null, null);
@@ -364,6 +389,7 @@ function emptyTotals() {
       centre: { flips: 0, strays: 0, wrong: 0, none: 0, frames: 0 },
       boundary: { flips: 0, strays: 0, wrong: 0, none: 0, frames: 0 },
       step: { strays: 0, frames: 0, latencies: [], missed: 0, steps: 0 },
+      return: { strays: 0, frames: 0, latencies: [], missed: 0, steps: 0 },
     };
   });
   return totals;
@@ -377,12 +403,12 @@ function addStill(totals, kind, scores) {
 
 // A move from cell from to cell to: strays outside the two, and how long
 // after moveAt (ms) each cell moved onto to and stayed.
-function addStep(totals, frames, from, to, moveAt) {
+function addStep(totals, frames, from, to, moveAt, kind = "step") {
   const allowed = new Set([from, to]);
   const times = frames.map((f) => f.t);
   SIGNALS.forEach((signal) => {
     const cells = frames.map((f) => f[signal]);
-    const step = totals[signal].step;
+    const step = totals[signal][kind];
     step.steps += 1;
     step.frames += cells.length;
     step.strays += countStrays(cells, allowed);
@@ -421,6 +447,17 @@ function runSimulated({ site, method, tune, rigName, seeds, walkCmS, only }) {
       const to = play.cellAt(...b);
       const cross = frames.find((f) => f.truth === to);
       addStep(totals, frames, play.cellAt(...a), to, cross ? cross.t : walk.durationMs);
+    });
+    if (only && !only.includes("return")) continue;
+    spots.steps.forEach(([a, b], i) => {
+      const walk = returnPath(a, b, walkCmS);
+      const { frames, play } = simulate({
+        site, method, tune, rig, seed: base + 200 + i, durationMs: walk.durationMs, path: walk.at,
+      });
+      const home = play.cellAt(...a);
+      const back = frames.filter((f) => f.t >= walk.backAt);
+      const cross = back.find((f) => f.truth === home);
+      addStep(totals, back, play.cellAt(...b), home, cross ? cross.t : walk.durationMs, "return");
     });
   }
   return totals;
@@ -537,6 +574,7 @@ function summarise(totals) {
   const out = {};
   SIGNALS.forEach((signal) => {
     const { centre, boundary, step } = totals[signal];
+    const back = totals[signal].return;
     const still = ["flips", "strays", "wrong", "none", "frames"].reduce((sum, key) => {
       sum[key] = centre[key] + boundary[key];
       return sum;
@@ -554,6 +592,10 @@ function summarise(totals) {
       withinBudgetPct: step.steps ? (100 * step.latencies.filter((l) => l <= BUDGET_MS).length) / step.steps : NaN,
       missed: step.missed,
       steps: step.steps,
+      returnP50Ms: quantile(back.latencies, 0.5),
+      returnWithinBudgetPct: back.steps ? (100 * back.latencies.filter((l) => l <= BUDGET_MS).length) / back.steps : NaN,
+      returnMissed: back.missed,
+      returnSteps: back.steps,
     };
   });
   return out;
@@ -565,13 +607,13 @@ function fmt(value, digits = 1) {
 
 function printTable(title, rows) {
   console.log(`\n${title}`);
-  console.log("| Setting | Cell | Flips/min centre | Flips/min line | Wrong % | None % | Stray/min | Latency p50 | p90 | Within 1 s | Missed |");
-  console.log("|---|---|---|---|---|---|---|---|---|---|---|");
+  console.log("| Setting | Cell | Flips/min centre | Flips/min line | Wrong % | None % | Stray/min | Latency p50 | p90 | Within 1 s | Missed | Return p50 | Return within 1 s |");
+  console.log("|---|---|---|---|---|---|---|---|---|---|---|---|---|");
   rows.forEach(({ label, summary }) => {
     SIGNALS.forEach((signal) => {
       const s = summary[signal];
       const steps = s.steps ? `${s.missed}/${s.steps}` : "-";
-      console.log(`| ${label} | ${signal} | ${fmt(s.centreFlipsPerMin)} | ${fmt(s.boundaryFlipsPerMin)} | ${fmt(s.wrongPct)} | ${fmt(s.nonePct)} | ${fmt(s.straysPerMin)} | ${fmt(s.latencyP50Ms / 1000, 2)} s | ${fmt(s.latencyP90Ms / 1000, 2)} s | ${fmt(s.withinBudgetPct, 0)} % | ${steps} |`);
+      console.log(`| ${label} | ${signal} | ${fmt(s.centreFlipsPerMin)} | ${fmt(s.boundaryFlipsPerMin)} | ${fmt(s.wrongPct)} | ${fmt(s.nonePct)} | ${fmt(s.straysPerMin)} | ${fmt(s.latencyP50Ms / 1000, 2)} s | ${fmt(s.latencyP90Ms / 1000, 2)} s | ${fmt(s.withinBudgetPct, 0)} % | ${steps} | ${fmt(s.returnP50Ms / 1000, 2)} s | ${fmt(s.returnWithinBudgetPct, 0)} % |`);
     });
   });
 }
@@ -623,5 +665,5 @@ if (require.main === module) main(process.argv.slice(2));
 
 module.exports = {
   countFlips, countStrays, moveLatency, quantile, scoreStill, summarise,
-  simulate, startGame, stillPath, stepPath, runSimulated, runRecording, RIGS, LOCK_ON_MS,
+  simulate, startGame, stillPath, stepPath, returnPath, runSimulated, runRecording, RIGS, LOCK_ON_MS,
 };

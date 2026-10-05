@@ -63,3 +63,11 @@ test("a still player mid-cell on the ideal rig: every cell right, none flipping"
     assert.ok(scores[signal].none < scores[signal].frames / 10, signal);
   });
 });
+
+test("a return walk stands in the first cell, steps away, and comes back", () => {
+  const walk = replay.returnPath([75, 85], [125, 85], 50);
+  assert.deepStrictEqual(walk.at(0), [75, 85]);
+  assert.deepStrictEqual(walk.at(walk.backAt), [125, 85]);
+  assert.deepStrictEqual(walk.at(walk.durationMs), [75, 85]);
+  assert.ok(walk.backAt > replay.LOCK_ON_MS + 4000, "long enough in the first cell to be sure of it");
+});

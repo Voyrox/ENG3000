@@ -161,6 +161,10 @@ class ServerFilterStage:
         """The game's tracking switch (FilterConfig.track_moving)."""
         self.pipeline.set_track_moving(on)
 
+    def set_cell_confidence(self, on: bool) -> None:
+        """The game's cell confidence switch (FilterConfig.cell_confidence)."""
+        self.pipeline.set_cell_confidence(on)
+
     def set_cell_decision(self, on: bool) -> None:
         """The game's cell decision switch (FilterConfig.cell_decision)."""
         self.pipeline.set_cell_decision(on)

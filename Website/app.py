@@ -103,6 +103,8 @@ CONTROL_ENABLED = os.environ.get("CON") == "1"
 # found towards Out of bounds).
 # "deadZone" turns the dead zone on or off (too close by a reading's depth
 # along its servo line, or by the reading itself).
+# "cellConfidence" turns cell confidence on or off (the cell decision uses
+# how sure the game is that the player has stood in each cell).
 # "trackMoving" turns tracking on or off (while the player moves, the cell
 # decision follows them).
 # "cellDecision" turns the cell decision on or off (the margin, the dwell and
@@ -113,7 +115,7 @@ CONTROL_ENABLED = os.environ.get("CON") == "1"
 # re-sent every 250 ms while held.
 CONTROL_ACTIONS = {"point", "release", "start", "mode", "pause", "resume", "restart", "menu", "testMode",
                    "position", "compare", "lostReadings", "kalman", "angleLimit", "triAimTolerance",
-                   "dynamicRules", "confidenceLevel", "farHalf", "deadZone", "cellLock", "cellDecision", "trackMoving",
+                   "dynamicRules", "confidenceLevel", "farHalf", "deadZone", "cellLock", "cellDecision", "trackMoving", "cellConfidence",
                    "tooCloseHold"}
 # Sent many times a second while a finger is down, so not printed.
 QUIET_CONTROL_ACTIONS = {"point", "release", "tooCloseHold"}
@@ -947,6 +949,9 @@ def apply_filter_event(event):
             elif event.get("type") == "filter:trackMoving":
                 # The control panel's tracking switch, passed on by the game.
                 server_filter.set_track_moving(bool(event["on"]))
+            elif event.get("type") == "filter:cellConfidence":
+                # The control panel's cell confidence switch, passed on by the game.
+                server_filter.set_cell_confidence(bool(event["on"]))
             elif event.get("type") == "sensor:dynamicRules":
                 # Dynamic's rule switches, from the control panel by way of the game.
                 server_filter.set_dynamic_rules(event["rules"])

@@ -33,6 +33,7 @@ from filterRules import (  # noqa: E402
     STATUS_OUT_OF_BOUNDS,
     STATUS_TOO_CLOSE,
     CartesianGeometry,
+    CellConfidence,
     CellDecider,
     CellStabiliser,
     MotionDetector,
@@ -88,6 +89,7 @@ class ParityWithGameJs(unittest.TestCase):
                               tri_aim_tolerance=run.get("triAimTolerance", True),
                               cell_decision=run.get("cellDecision", True),
                               track_moving=run.get("trackMoving", False),
+                              cell_confidence=run.get("cellConfidence", True),
                               **{DYNAMIC_RULE_SWITCHES[name]: on for name, on in switches.items()})
         pipeline = CoordinatePipeline(TwoSensorGeometry(method=run["method"]), area=area,
                                       config=config)
@@ -115,6 +117,16 @@ class ParityWithGameJs(unittest.TestCase):
             self.assertEqual(got.held, bool(expected["held"]), where)
             self.assertEqual(got.held_for, expected["heldFor"], where)
             self.assertEqual(got.moving, bool(expected["moving"]), f"{where}, moving")
+            if got.status == STATUS_OK:
+                top = expected["confTop"]
+                scores = got.cell_confidence
+                best = max(range(9), key=lambda i: (scores[i], -i))
+                if top is None:
+                    self.assertEqual(max(scores), 0, f"{where}, cell confidence")
+                else:
+                    self.assertEqual(best, top[0], f"{where}, most confident cell")
+                    self.assertAlmostEqual(scores[best], top[1], delta=2e-6,
+                                           msg=f"{where}, cell confidence")
             # The raw cell is only reported on a fresh, un-held ok.
             if got.status == STATUS_OK and not got.held:
                 self.assertEqual((got.raw_gx, got.raw_gy),
@@ -187,6 +199,13 @@ class ParityWithGameJs(unittest.TestCase):
 
     def test_line_of_sight_with_the_cell_decision_off(self):
         self.assertGreater(self._replay("cellDecisionOffLos"), 0)
+
+    def test_dynamic_with_cell_confidence_off(self):
+        self.assertGreater(self._replay("cellConfidenceOff"), 0)
+
+    def test_the_stream_builds_some_cell_confidence(self):
+        tops = [row[self.trace["fields"].index("confTop")] for row in self.trace["runs"]["dynamic"]["steps"]]
+        self.assertTrue(any(top and top[1] > 0.5 for top in tops))
 
     def test_dynamic_with_tracking_on(self):
         self.assertGreater(self._replay("trackMovingOn"), 0)
@@ -541,6 +560,55 @@ class MotionDetectorRules(unittest.TestCase):
         self.assertEqual(held, [True] * 6 + [False])
 
 
+class CellConfidenceRules(unittest.TestCase):
+    """stepCellConfidence() in game.js. Readings 100 ms apart; the centre
+    cell (1, 1) is x 50-100, y 60-110 on the default bounds."""
+
+    IN_CENTRE = [(0, (75.0, 85.0))]
+
+    def setUp(self):
+        self.area = PlayArea.default()
+        self.config = FilterConfig()
+        self.conf = CellConfidence()
+        self.now = 0.0
+
+    def step(self, cell=(1, 1), found=IN_CENTRE, moving=False, ms=100.0):
+        self.now += ms
+        self.conf.step(cell, list(found), moving, self.now, self.area, self.config)
+        return self.conf.scores
+
+    def test_a_still_player_found_in_the_cell_fills_it_in_3_s(self):
+        self.step()                                      # the first step only starts the clock
+        scores = [self.step()[4] for _ in range(30)]
+        self.assertAlmostEqual(scores[14], 0.5)
+        self.assertAlmostEqual(scores[-1], 1.0)
+
+    def test_moving_half_or_another_cell_adds_nothing(self):
+        self.step()
+        self.assertEqual(self.step(moving=True)[4], 0.0)
+        self.assertEqual(self.step(found=[])[4], 0.0)              # half-found: no found point
+        self.assertEqual(self.step(found=[(0, (25.0, 85.0))])[4], 0.0)   # found in another cell
+
+    def test_other_cells_fade_fast_while_one_fills(self):
+        self.conf.scores[1] = 1.0                        # (0, 1): where the player stood before
+        self.step()
+        for _ in range(50):
+            self.step()
+        self.assertAlmostEqual(self.conf.scores[1], 0.5, places=6)   # 5 s half-life
+        self.assertEqual(self.conf.scores[4], 1.0)
+
+    def test_everything_fades_slowly_otherwise(self):
+        self.conf.scores[4] = 1.0
+        self.step(moving=True)
+        for _ in range(300):
+            self.step(moving=True)
+        self.assertAlmostEqual(self.conf.scores[4], 0.5, places=6)   # 30 s half-life
+
+    def test_a_long_gap_counts_as_250_ms(self):
+        self.step()
+        self.assertAlmostEqual(self.step(ms=5000.0)[4], 250.0 / 3000.0)
+
+
 class CellDeciderRules(unittest.TestCase):
     """The cell decision (decideCell() in game.js). The default bounds give
     columns 50 cm wide and rows 50 cm deep from 10 cm out: the centre cell
@@ -667,6 +735,48 @@ class CellDeciderRules(unittest.TestCase):
                                      self.config, tracking=True) for i in range(5)]
         self.assertEqual(set(cells), {(1, 1)})
 
+    def test_a_confident_cell_takes_less_dwell(self):
+        self.settle()
+        scores = [0.0] * 9
+        scores[7] = 1.0                                  # (2, 1): half the dwell, 250 ms
+        cells = [self.decider.decide(108.0, 85.0, True, [], self.now + 100.0 * (i + 1), self.area,
+                                     self.config, confidence=scores) for i in range(3)]
+        self.assertEqual(cells, [(1, 1), (1, 1), (2, 1)])
+
+    def test_after_a_restart_a_confident_cell_next_to_the_player_is_taken(self):
+        self.settle()
+        self.decider.restart()
+        scores = [0.0] * 9
+        scores[4] = 0.8                                  # the centre, where they stood
+        # Back 4 cm into the right column: within the margin of the centre.
+        cell = self.decider.decide(104.0, 85.0, True, [], self.now + 100.0, self.area, self.config,
+                                   confidence=scores)
+        self.assertEqual(cell, (1, 1))
+        self.decider.restart()
+        # Well into the right column: there.
+        cell = self.decider.decide(120.0, 85.0, True, [], self.now + 200.0, self.area, self.config,
+                                   confidence=scores)
+        self.assertEqual(cell, (2, 1))
+
+    def test_after_a_restart_the_new_cell_is_taken_at_once(self):
+        self.settle(points=[(0, (70.0, 80.0))])
+        self.decider.restart()
+        # Found again in the right column: there at once, with no dwell.
+        self.assertEqual(self.decider.decide(120.0, 85.0, True, [(0, (118.0, 84.0))], self.now + 100.0,
+                                             self.area, self.config), (2, 1))
+
+    def test_after_a_restart_the_nodes_hold_at_once_with_no_second_probation(self):
+        self.settle()
+        self.decider.restart()
+        node = [(0, (118.0, 84.0))]
+        self.assertEqual(self.decider.decide(120.0, 85.0, True, node, self.now + 100.0, self.area,
+                                             self.config), (2, 1))
+        # A handover swing back to the centre while the node still sees the
+        # player where it did: held, as it would be had the round just gone on.
+        cells = [self.decider.decide(75.0, 85.0, True, node, self.now + 100.0 * (i + 2),
+                                     self.area, self.config) for i in range(8)]
+        self.assertEqual(set(cells), {(2, 1)})
+
     def test_the_pipeline_switch_picks_the_vote_or_the_decision(self):
         pipeline = CoordinatePipeline(TwoSensorGeometry())
         self.assertTrue(pipeline.config.cell_decision)
@@ -674,6 +784,10 @@ class CellDeciderRules(unittest.TestCase):
         self.assertFalse(pipeline.config.cell_decision)
         pipeline.set_cell_decision(True)
         self.assertTrue(pipeline.config.cell_decision)
+        self.assertTrue(pipeline.config.cell_confidence)
+        pipeline.set_cell_confidence(False)
+        self.assertFalse(pipeline.config.cell_confidence)
+        pipeline.set_cell_confidence(True)
         self.assertFalse(pipeline.config.track_moving, "tracking is off by default")
         pipeline.set_track_moving(True)
         self.assertTrue(pipeline.config.track_moving)
