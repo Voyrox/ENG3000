@@ -110,13 +110,16 @@ class FilterConfig:
     # (LineOfSightTracker). CoordinatePipeline.set_kalman() flips it live.
     kalman: bool = True
 
-    # The angle limit (tuning.angleLimit, tuning.angleLimitToleranceCm; Aaron,
-    # 5 Oct). A node's filtered distance further than its servo line runs on
-    # the grid (angle_limit_cm()) plus the tolerance is not a player on it:
-    # line of sight and Dynamic's node rules drop the reading; trilateration
-    # ignores the limit. CoordinatePipeline.set_angle_limit() flips it live.
+    # The angle limit (tuning.angleLimit; Aaron, 5 Oct). A node's filtered
+    # distance further than its servo line runs on the grid (angle_limit_cm())
+    # plus far_leeway of it is not a player on it: line of sight and Dynamic's
+    # node rules drop the reading; trilateration ignores the limit.
+    # CoordinatePipeline.set_angle_limit() flips it live.
     angle_limit: bool = True
-    angle_limit_tolerance_cm: float = 5.0
+    # The leeway at great distances (tuning.farLeeway; Aaron, 5 Oct: +20
+    # percent), as a share: the angle limit, and the far edge a node's own
+    # point may reach (TwoSensorGeometry._own_point()), are this much further.
+    far_leeway: float = 0.2
 
     # The dead zone (tuning.deadZone; Aaron, 5 Oct): the strip across the
     # front of the grid, the alert threshold (10 cm) deep. True: a raw reading
@@ -191,16 +194,25 @@ class FilterConfig:
     # Dynamic's rules on or off, from the control panel (tuning.columnLock,
     # tuning.loneNode, tuning.cornerNode; serverFilter.set_dynamic_rules()).
     side_lock_depth_cm: float = 20.0
+    confidence_node: bool = True
     column_lock: bool = True
     lone_node: bool = True
     corner_node: bool = True
+    # Dynamic's first rule (tuning.confidenceNode, tuning.confidenceLevelPct;
+    # Aaron, 5 Oct): a node whose confidence from the server (handover.py) is
+    # at least this many percent places the player on its own
+    # (TwoSensorGeometry._level_node(); serverFilter.set_confidence_level()).
+    confidence_level_pct: int = 80
 
     # Out of bounds, the only one the pipeline reports (Aaron, 5 Oct): both
     # nodes are lost, with no hold. A node is lost when its last lost_readings
     # readings, scored found +1, half 0, lost -1, add up to 0 or less, and not
     # before it has had that many (tuning.lostReadings, set from the control
-    # panel; TwoSensorGeometry._nobody_found()).
-    lost_readings: int = 8
+    # panel; TwoSensorGeometry._nobody_found()). 21 since 5 Oct (Aaron); it
+    # was 8. With far_half on (tuning.farHalf), a half reading whose own point
+    # is in the back row scores +1, as found (TwoSensorGeometry._in_back_row()).
+    lost_readings: int = 21
+    far_half: bool = True
 
     # Geometry (COLUMN_MARGIN_CM)
     column_margin_cm: float = 8.0
@@ -770,20 +782,21 @@ SENSOR_MAX_CM = 400.0
 SCAN_FOUND = 0         # scanState: both heads hear the player
 # Dynamic's rule switches: the control panel's names (setDynamicRules() in
 # game.js) -> FilterConfig fields.
-DYNAMIC_RULE_SWITCHES = {"columnLock": "column_lock", "loneNode": "lone_node",
-                         "cornerNode": "corner_node"}
+DYNAMIC_RULE_SWITCHES = {"confidenceNode": "confidence_node", "columnLock": "column_lock",
+                         "loneNode": "lone_node", "cornerNode": "corner_node"}
 SCAN_HALF = 1          # scanState: one head hears the player
 SCAN_LOST = 2         # scanState: sweeping, the player is not in its line of sight
 
 
-def lost_score(state) -> int:
+def lost_score(state, back_row: bool = False, far_half: bool = False) -> int:
     """lostScore() in game.js: a reading's score towards its node being lost
-    (Aaron, 5 Oct): found +1, half 0, lost -1."""
+    (Aaron, 5 Oct): found +1, half 0, lost -1; with far_half on, a half
+    reading whose own point was in the back row (back_row) +1, as found."""
     if state == SCAN_FOUND:
         return 1
     if state == SCAN_LOST:
         return -1
-    return 0
+    return 1 if far_half and back_row else 0
 
 
 def _mat_mul(a, b):
@@ -1102,8 +1115,9 @@ class TwoSensorGeometry(Geometry):
     no line of sight, and line of sight and the average are trilateration.
 
     Sample: [left, centre, right]. Each entry is a distance in cm, a
-    (distance_cm, angle_deg) pair, or a (distance_cm, angle_deg, scan_state)
-    triple; None where there is no reading. The centre is ignored: there is no
+    (distance_cm, angle_deg) pair, a (distance_cm, angle_deg, scan_state)
+    triple, or that and the node's confidence from the server (0-1, or None
+    when not ready; handover.py); None where there is no reading. The centre is ignored: there is no
     centre node. Three slots are kept so the browser's [left, centre, right]
     assignment carries over.
     """
@@ -1118,9 +1132,11 @@ class TwoSensorGeometry(Geometry):
         self._last_column: Optional[int] = None
         self._angles: list = [None] * GRID_SIZE
         self._states: list = [None] * GRID_SIZE
+        self._confidence: list = [None] * GRID_SIZE
         self._found_ms = [-math.inf] * GRID_SIZE
-        # Each node's scan states this round, one per reading heard, the
-        # latest LOST_READINGS_MAX of them.
+        # Each node's readings this round, one per reading heard, the latest
+        # LOST_READINGS_MAX of them: (scan state, whether its own point was in
+        # the back row).
         self._state_log: list = [[] for _ in range(GRID_SIZE)]
         self._seen_aim: list = [None] * GRID_SIZE   # (ms, angle) of the last found/half-found reading
         self._found_streak = [0] * GRID_SIZE         # new readings in a row that found the player
@@ -1148,6 +1164,7 @@ class TwoSensorGeometry(Geometry):
         self._last_column = None
         self._angles = [None] * GRID_SIZE
         self._states = [None] * GRID_SIZE
+        self._confidence = [None] * GRID_SIZE
         self._found_ms = [-math.inf] * GRID_SIZE
         self._state_log = [[] for _ in range(GRID_SIZE)]
         self._seen_aim = [None] * GRID_SIZE
@@ -1162,11 +1179,13 @@ class TwoSensorGeometry(Geometry):
         out = [None] * GRID_SIZE
         self._angles = [None] * GRID_SIZE
         self._states = [None] * GRID_SIZE
+        self._confidence = [None] * GRID_SIZE
         for slot in (self.LEFT, self.RIGHT):
-            distance, angle, state = _split_reading(values[slot])
+            distance, angle, state, confidence = _split_reading(values[slot])
             out[slot] = _valid_cm(distance)
             self._angles[slot] = _finite(angle)
             self._states[slot] = _finite(state)
+            self._confidence[slot] = _finite(confidence)
         return out
 
     def nearest_raw_cm(self, raw_channels) -> Optional[float]:
@@ -1196,7 +1215,7 @@ class TwoSensorGeometry(Geometry):
                 self._found_ms[slot] = now_ms
             log = self._state_log[slot]
             if heard[slot] and state is not None:
-                log.append(state)
+                log.append((state, self._in_back_row(slot, filtered, area, config)))
             if len(log) > LOST_READINGS_MAX:
                 log.pop(0)
         # stepDynamicRules() in game.js. A reading past the angle limit counts
@@ -1219,6 +1238,23 @@ class TwoSensorGeometry(Geometry):
             self._centre_held = None
         self._dynamic.step(self._picked_from(filtered, area), now_ms, area)
 
+    def _in_back_row(self, slot, filtered, area, config) -> bool:
+        """inBackRow() in game.js: whether a node's reading puts the player in
+        the back row - its own point, along its servo line, across the board,
+        no nearer than its column's back row (two thirds of the way from the
+        near edge to the far one), no further than the far edge plus
+        far_leeway - with the reading within the angle limit."""
+        distance, angle = filtered[slot], self._angles[slot]
+        if distance is None or not within_angle_limit(area.column_centre_cm(slot), distance,
+                                                      angle, area, config):
+            return False
+        x, y = scanner_point(area.column_centre_cm(slot), body_centre_cm(distance, config), angle)
+        if not 0.0 <= x <= area.width_cm:
+            return False
+        near, far = area.per_column[area.column_at(x)]
+        back_row = near + ((GRID_SIZE - 1) * (far - near)) / GRID_SIZE
+        return back_row <= y <= far * (1 + config.far_leeway)
+
     def _lost(self, slot, config) -> bool:
         """This node's last lost_readings readings' scores (lost_score())
         add up to 0 or less; never before it has had that many."""
@@ -1227,8 +1263,8 @@ class TwoSensorGeometry(Geometry):
         if len(log) < n:
             return False
         total = 0
-        for state in log[-n:]:
-            total += lost_score(state)
+        for state, back_row in log[-n:]:
+            total += lost_score(state, back_row, config.far_half)
         return total <= 0
 
     def _nobody_found(self, config) -> bool:
@@ -1319,16 +1355,14 @@ class TwoSensorGeometry(Geometry):
             return centre(held[1], held[2])
         return None
 
-    def _confident_point(self, slot, filtered, area) -> Optional[tuple]:
-        """confidentPoint() in game.js: a confident node's own reading,
-        (x_cm, y_cm) - its distance along its servo line - or None when the
-        node is not confident, the reading is past the angle limit, or that
-        point is outside the play area (across the board, and between its
-        column's near and far edges)."""
+    def _own_point(self, slot, filtered, area) -> Optional[tuple]:
+        """ownPoint() in game.js: a node's own reading, (x_cm, y_cm) - its
+        distance along its servo line - or None when it has no reading or
+        angle, the reading is past the angle limit, or that point is outside
+        the play area (across the board, and between its column's near edge
+        and its far edge plus far_leeway)."""
         config = self._config or FilterConfig()
-        if (self._found_streak[slot] < config.confident_readings
-                or self._now_ms - self._found_ms[slot] > config.confident_ms
-                or filtered[slot] is None or self._angles[slot] is None):
+        if filtered[slot] is None or self._angles[slot] is None:
             return None
         if not within_angle_limit(area.column_centre_cm(slot), filtered[slot],
                                   self._angles[slot], area, config):
@@ -1338,7 +1372,34 @@ class TwoSensorGeometry(Geometry):
         if not 0.0 <= x <= area.width_cm:
             return None
         near, far = area.per_column[area.column_at(x)]
-        return (x, y) if near <= y <= far else None
+        return (x, y) if near <= y <= far * (1 + config.far_leeway) else None
+
+    def _confident_point(self, slot, filtered, area) -> Optional[tuple]:
+        """confidentPoint() in game.js: a confident node's own reading
+        (_own_point()), or None when the node is not confident."""
+        config = self._config or FilterConfig()
+        if (self._found_streak[slot] < config.confident_readings
+                or self._now_ms - self._found_ms[slot] > config.confident_ms):
+            return None
+        return self._own_point(slot, filtered, area)
+
+    def _level_node(self, filtered, area) -> Optional[tuple]:
+        """levelNode() in game.js: (slot, point) for the node whose confidence
+        is at the confidence level and whose own reading (_own_point()) is in
+        play, or None. Both: the higher confidence; equal: neither."""
+        config = self._config or FilterConfig()
+        at = []
+        for slot in (self.LEFT, self.RIGHT):
+            score = self._confidence[slot]
+            if score is None or not score * 100 >= config.confidence_level_pct:
+                continue
+            point = self._own_point(slot, filtered, area)
+            if point is not None:
+                at.append((slot, score, point))
+        if not at or (len(at) == 2 and at[0][1] == at[1][1]):
+            return None
+        slot, _, point = at[0] if len(at) == 1 or at[0][1] > at[1][1] else at[1]
+        return slot, point
 
     def _in_far_corner(self, slot, point, area) -> bool:
         """inFarCorner() in game.js: whether a node's own reading puts the
@@ -1354,6 +1415,10 @@ class TwoSensorGeometry(Geometry):
         whose position is `steadiest`. Checked in order (Aaron, 5 Oct), each
         with its switch in FilterConfig:
 
+        0. confidence_node - a node whose confidence from the server is at
+           least confidence_level_pct places the player by its own reading
+           (_level_node(); "conf-left" / "conf-right"), and the other node is
+           left out.
         1. corner_node - the near node in its far corner: a confident node
            (_confident_point()) whose own reading puts the player in A1 (the
            left node) or A3 (the right) places them alone ("corner-left" /
@@ -1370,12 +1435,17 @@ class TwoSensorGeometry(Geometry):
            left out. When both are confident, the steadiest method places the
            player."""
         config = self._config or FilterConfig()
-        points = [(slot, self._confident_point(slot, filtered, area))
-                  for slot in (self.LEFT, self.RIGHT)]
-        points = [(slot, point) for slot, point in points if point is not None]
 
         def side(slot):
             return "left" if slot == self.LEFT else "right"
+
+        if config.confidence_node:
+            sure = self._level_node(filtered, area)
+            if sure is not None:
+                return f"conf-{side(sure[0])}", sure[1]
+        points = [(slot, self._confident_point(slot, filtered, area))
+                  for slot in (self.LEFT, self.RIGHT)]
+        points = [(slot, point) for slot, point in points if point is not None]
 
         if config.corner_node:
             for slot, point in points:
@@ -1729,6 +1799,13 @@ class CoordinatePipeline:
         for channel in self._channels:
             channel._cfg = self.config
 
+    def set_far_half(self, on: bool) -> None:
+        """The far half switch (setFarHalf() in game.js): at once, on the
+        readings already kept as well; nothing else in the config changes."""
+        self.config = replace(self.config, far_half=bool(on))
+        for channel in self._channels:
+            channel._cfg = self.config
+
     def reset(self) -> None:
         for channel in self._channels:
             channel.reset()
@@ -1878,11 +1955,11 @@ def within_angle_limit(node_x_cm: float, distance_cm: float, angle_deg: Optional
                        area: "PlayArea", config: FilterConfig) -> bool:
     """withinAngleLimit() in game.js: whether a node's filtered distance at
     its servo angle can be a player on the grid - no further than
-    angle_limit_cm() plus angle_limit_tolerance_cm. Always, with
-    config.angle_limit off."""
+    angle_limit_cm() plus far_leeway of it. Always, with config.angle_limit
+    off."""
     return (not config.angle_limit
             or distance_cm <= angle_limit_cm(node_x_cm, angle_deg, area.width_cm)
-            + config.angle_limit_tolerance_cm)
+            * (1 + config.far_leeway))
 
 
 def body_centre_cm(distance_cm: float, config: FilterConfig) -> float:
@@ -1916,14 +1993,18 @@ def in_beam(node_x_cm: float, angle_deg: Optional[float], x_cm: float, y_cm: flo
 
 
 def _split_reading(entry) -> tuple:
-    """A sample entry as (distance, angle, scan_state): a plain distance has
-    neither, a (distance, angle) pair no scan state."""
+    """A sample entry as (distance, angle, scan_state, confidence): a plain
+    distance has none of the others, a (distance, angle) pair no scan state,
+    and a triple no confidence (the node's from the server, 0-1, or None when
+    it is not ready; Dynamic's first rule)."""
     if isinstance(entry, (list, tuple)):
+        if len(entry) == 4:
+            return entry[0], entry[1], entry[2], entry[3]
         if len(entry) == 3:
-            return entry[0], entry[1], entry[2]
+            return entry[0], entry[1], entry[2], None
         if len(entry) == 2:
-            return entry[0], entry[1], None
-    return entry, None, None
+            return entry[0], entry[1], None, None
+    return entry, None, None, None
 
 
 def _finite(value) -> Optional[float]:

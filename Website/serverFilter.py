@@ -74,6 +74,7 @@ class ServerFilterStage:
         self._latest_cm: dict = {}                        # node id -> raw cm or None
         self._latest_angle: dict = {}                     # node id -> servo angle or None
         self._latest_state: dict = {}                     # node id -> scan state or None
+        self._confidence: dict = {}                       # node id -> confidence 0-1 or None
         self.latest: Optional[FilteredCoordinate] = None
         self.predicted_cm: list = [None] * GRID_SIZE      # L, C, R; cm or None
 
@@ -89,6 +90,7 @@ class ServerFilterStage:
         self._latest_cm.clear()
         self._latest_angle.clear()
         self._latest_state.clear()
+        self._confidence.clear()
         self.pipeline.reset()
         self.predictor.reset()
         self.latest = None
@@ -110,11 +112,25 @@ class ServerFilterStage:
             raise ValueError("this geometry has no position methods")
         self.pipeline.geometry.method = method
 
+    def set_confidence_level(self, pct) -> None:
+        """The confidence level, in percent, at which a node places the player
+        on its own (the game's control panel setting, Dynamic's first rule;
+        FilterConfig.confidence_level_pct), rounded and clamped to 1..100 as
+        the game does. ValueError if it is not a number."""
+        level = max(1, min(100, int(round(float(pct)))))
+        self.pipeline.config = dataclasses.replace(self.pipeline.config,
+                                                   confidence_level_pct=level)
+
+    def set_far_half(self, on: bool) -> None:
+        """The game's far half switch (FilterConfig.far_half)."""
+        self.pipeline.set_far_half(on)
+
     def set_dynamic_rules(self, rules) -> None:
         """Dynamic's rule switches from the game's control panel
-        (setDynamicRules(): columnLock, loneNode, cornerNode -> FilterConfig
-        column_lock, lone_node, corner_node). Only the switches named change.
-        ValueError for an unknown switch or a value that is not true/false."""
+        (setDynamicRules(): confidenceNode, columnLock, loneNode, cornerNode
+        -> FilterConfig confidence_node, column_lock, lone_node, corner_node).
+        Only the switches named change. ValueError for an unknown switch or a
+        value that is not true/false."""
         changes = {}
         for name, on in dict(rules).items():
             if name not in DYNAMIC_RULE_SWITCHES or not isinstance(on, bool):
@@ -146,6 +162,7 @@ class ServerFilterStage:
         self._latest_cm.pop(node_id, None)
         self._latest_angle.pop(node_id, None)
         self._latest_state.pop(node_id, None)
+        self._confidence.pop(node_id, None)
         for channel, slot in enumerate(self.sensor_slots):
             if slot == node_id:
                 self.pipeline.reset_channel(channel)
@@ -154,10 +171,14 @@ class ServerFilterStage:
 
     def on_reading(self, node_id, distance_cm: Optional[float],
                    now_ms: float, angle_deg: Optional[float] = None,
-                   scan_state: Optional[int] = None) -> Optional[FilteredCoordinate]:
+                   scan_state: Optional[int] = None,
+                   confidence: Optional[dict] = None) -> Optional[FilteredCoordinate]:
         """Run the chain once for one new reading. angle_deg is the servo
         angle a scanner node read it at and scan_state what its scan made of
         it (0 found, 1 half-found, 2 lost); None for a node without one.
+        confidence: every node's confidence now, {node id: 0-1 or None when
+        not ready} (handover.py, as nodes:update carries it to the game), for
+        Dynamic's first rule; None leaves the last known.
         Returns None, and runs nothing, if the node is not assigned to a slot."""
         if node_id not in self.sensor_slots:
             return None
@@ -168,12 +189,15 @@ class ServerFilterStage:
         self._latest_cm[node_id] = distance_cm
         self._latest_angle[node_id] = angle_deg
         self._latest_state[node_id] = scan_state
+        if confidence is not None:
+            self._confidence = dict(confidence)
 
         distances = [self._latest_cm.get(slot) for slot in self.sensor_slots]
         angles = [self._latest_angle.get(slot) for slot in self.sensor_slots]
         states = [self._latest_state.get(slot) for slot in self.sensor_slots]
-        sample = [d if a is None and st is None else (d, a, st)
-                  for d, a, st in zip(distances, angles, states)]
+        scores = [self._confidence.get(slot) for slot in self.sensor_slots]
+        sample = [d if a is None and st is None and c is None else (d, a, st, c)
+                  for d, a, st, c in zip(distances, angles, states, scores)]
         # A slot with no node, or a node that went offline, is a genuine
         # "no reading" (None), which is safe to pass every time: it never
         # enters a median window. Only the reporting node's channel is fresh.

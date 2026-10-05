@@ -78,6 +78,12 @@ class Confidence:
     point: Optional[Tuple[float, float]]    # that median, (x_cm, y_cm)
     confident: bool
     readings: int
+    # Whether the score has enough behind it to go on, whatever it is: the
+    # node has reported for WINDOW_S, with MIN_READINGS in the window, and its
+    # room is not being learnt or unlearnt. confident is ready and score at
+    # least CONFIDENT_SHARE; the game's confidence level (Dynamic's first
+    # rule) uses ready with its own share.
+    ready: bool = False
 
 
 @dataclass(frozen=True)
@@ -195,10 +201,10 @@ class Handover:
         spread = math.sqrt(sum(d * d for d in steady) / len(steady)) if steady else None
         reporting_for = now_s - node.first_reading_at
         room_ok = node.room != ROOM_NOT_LEARNT and node.room != ROOM_LEARNING
-        confident = (room_ok and reporting_for >= WINDOW_S
-                     and len(window) >= MIN_READINGS and score >= CONFIDENT_SHARE)
+        ready = room_ok and reporting_for >= WINDOW_S and len(window) >= MIN_READINGS
+        confident = ready and score >= CONFIDENT_SHARE
         return Confidence(score=score, spread_cm=spread, point=centre,
-                          confident=confident, readings=len(window))
+                          confident=confident, readings=len(window), ready=ready)
 
     def status(self, node_id: int, role: Optional[str], now_s: float) -> Optional[dict]:
         """A node's confidence for nodes:update, or None before it has a role."""
@@ -211,6 +217,7 @@ class Handover:
             "spread_cm": None if c.spread_cm is None else round(c.spread_cm, 1),
             "point_cm": None if c.point is None else [round(c.point[0], 1), round(c.point[1], 1)],
             "confident": c.confident,
+            "ready": c.ready,
             "following": node.following if node is not None else None,
         }
 

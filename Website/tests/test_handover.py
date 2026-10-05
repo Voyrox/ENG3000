@@ -157,8 +157,10 @@ class ConfidenceTests(unittest.TestCase):
         rig = Rig()
         rig.run(6.0, left=sees(LEFT, PLAYER), right=lost())
         status = rig.handover.status(LEFT, "LEFT", rig.t)
-        self.assertEqual(set(status), {"score", "spread_cm", "point_cm", "confident", "following"})
+        self.assertEqual(set(status), {"score", "spread_cm", "point_cm", "confident", "ready",
+                                       "following"})
         self.assertTrue(status["confident"])
+        self.assertTrue(status["ready"])
         self.assertIsNone(status["following"])
         self.assertEqual(rig.handover.status(RIGHT, "RIGHT", rig.t)["following"], LEFT)
         json.dumps(status)

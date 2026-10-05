@@ -91,15 +91,19 @@ CONTROL_ENABLED = os.environ.get("CON") == "1"
 # "kalman" turns the game's Kalman filters on or off.
 # "angleLimit" turns the angle limit on or off (a node's reading further than
 # its servo line runs on the grid is dropped by every method but trilateration).
-# "dynamicRules" turns Dynamic's rules on or off (the far corners, the column
-# lock, a lone node).
+# "dynamicRules" turns Dynamic's rules on or off (a node at the confidence
+# level, the far corners, the column lock, a lone node).
+# "confidenceLevel" sets the confidence, in percent, at which a node places the
+# player on its own (Dynamic's first rule).
+# "farHalf" turns Far half on or off (a half reading in the back row counts as
+# found towards Out of bounds).
 # "deadZone" turns the dead zone on or off (too close by a reading's depth
 # along its servo line, or by the reading itself).
 # "tooCloseHold" is the hold button: the too-close screen while it is down,
 # re-sent every 250 ms while held.
 CONTROL_ACTIONS = {"point", "release", "start", "mode", "pause", "resume", "restart", "menu", "testMode",
                    "position", "compare", "lostReadings", "kalman", "angleLimit", "dynamicRules",
-                   "deadZone", "tooCloseHold"}
+                   "confidenceLevel", "farHalf", "deadZone", "tooCloseHold"}
 # Sent many times a second while a finger is down, so not printed.
 QUIET_CONTROL_ACTIONS = {"point", "release", "tooCloseHold"}
 # Every raw node reading to logs/raw-*.csv, for the bench noise test
@@ -170,6 +174,17 @@ def serialize_node(node):
         # and after it goes offline.
         "confidence": handover.status(node["id"], node_roles.get(node["id"]), time.monotonic()),
     }
+
+
+def node_confidence(now_s):
+    """Each node's confidence, 0-1, for Dynamic's first rule on the server, as
+    the game reads it from nodes:update: {node id: score}, or None for a node
+    whose confidence is not ready (handover.py status())."""
+    out = {}
+    for node_id in nodes:
+        status = handover.status(node_id, node_roles.get(node_id), now_s)
+        out[node_id] = status["score"] if status and status["ready"] else None
+    return out
 
 
 def snapshot_nodes():
@@ -419,7 +434,8 @@ def update_node(node_id, message):
             if raw_cm is not None:
                 server_filter.on_reading(node_id, raw_cm, now * MS_PER_SECOND,
                                          angle_deg=parse_angle_deg(payload),
-                                         scan_state=parse_scan_state(payload))
+                                         scan_state=parse_scan_state(payload),
+                                         confidence=node_confidence(now))
     schedule_broadcast_nodes()
 
     # Sent once state_lock is released, because send_command takes it too.
@@ -828,6 +844,12 @@ def apply_filter_event(event):
             elif event.get("type") == "sensor:dynamicRules":
                 # Dynamic's rule switches, from the control panel by way of the game.
                 server_filter.set_dynamic_rules(event["rules"])
+            elif event.get("type") == "sensor:confidenceLevel":
+                # The confidence level, from the control panel by way of the game.
+                server_filter.set_confidence_level(event["pct"])
+            elif event.get("type") == "sensor:farHalf":
+                # The control panel's Far half switch, passed on by the game.
+                server_filter.set_far_half(bool(event["on"]))
     except (KeyError, TypeError, ValueError) as exc:
         print(f"Ignored bad {event.get('type')} message: {exc}")
 

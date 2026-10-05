@@ -56,7 +56,7 @@
         <p class="note">Kalman off: each node's distance goes median → FFT, and line of sight puts the
             player at the newest reading, with no gate. The servos do not use it.</p>
         <p class="note">Angle limit on: a node's reading further than its servo line runs on the
-            150 × 160 cm grid (+5 cm) is dropped by line of sight and Dynamic's rules;
+            150 × 160 cm grid (+20 %) is dropped by line of sight and Dynamic's rules;
             trilateration still uses it.</p>
     </section>
 
@@ -76,11 +76,22 @@
     <section>
         <h2>Dynamic's rules <small>checked in this order</small></h2>
         <div class="row">
+            <button data-rule="confidenceNode">Confidence: on</button>
             <button data-rule="cornerNode">Far corners: on</button>
+        </div>
+        <div class="row">
             <button data-rule="columnLock">Column lock: on</button>
             <button data-rule="loneNode">Lone node: on</button>
         </div>
-        <p class="note">Far corners: in A1 (back left) or A3 (back right), the near node places the player
+        <div class="row">
+            <button id="levelLess" aria-label="Lower confidence level">&minus;</button>
+            <b id="confidenceLevel" class="stepper">--</b>
+            <button id="levelMore" aria-label="Higher confidence level">+</button>
+        </div>
+        <p class="note">Confidence: a node whose Confidence (the Sensors table below) is at or above
+            the level places the player on its own, along its servo line, and the other node is left
+            out (CONF L, CONF R); both at it, the higher one. &minus;/+ moves the level 5 %.
+            Far corners: in A1 (back left) or A3 (back right), the near node places the player
             on its own when it is sure of them (Dynamic says A1 / A3). Column lock: where the two servo
             lines cross says the column - the centre (held 1 s), or at least 20 cm into a side column
             (MID, COL L, COL R). Lone node: when only one node is sure of the player, it places them on
@@ -98,8 +109,13 @@
             <div><span>Left score</span><b id="lostScoreLeft">--</b></div>
             <div><span>Right score</span><b id="lostScoreRight">--</b></div>
         </div>
+        <div class="row">
+            <button id="farHalfBtn" data-action="farHalf">Far half: on</button>
+        </div>
         <p class="note">Each node's last n readings score found +1, half 0, lost &minus;1. A node whose
-            readings add up to 0 or less is lost, and the game says Out of bounds while both are.</p>
+            readings add up to 0 or less is lost, and the game says Out of bounds while both are.
+            Far half on: a half reading (one of the node's two sensors has the player) that puts
+            them in the back row scores +1, as found does.</p>
     </section>
 
     <section>
@@ -135,7 +151,8 @@
             <tbody id="nodes"><tr><td colspan="8">No nodes</td></tr></tbody>
         </table>
         <p class="note">Confidence: the share of a node's readings in the last 5 s that put the
-            player in one spot, ± how tightly. Green is confident; "following n" is a node
+            player in one spot, ± how tightly. Green is confident (80 %, for handover); underlined is
+            at Dynamic's confidence level; "following n" is a node
             being aimed at node n's fix. Handover off: confidence is still worked out, but no
             node is aimed (no LOOK).</p>
     </section>
@@ -303,7 +320,9 @@
 
         // Dynamic's rule switches: each press flips one (on until the game
         // says otherwise).
-        const RULE_LABELS = { cornerNode: "Far corners", columnLock: "Column lock", loneNode: "Lone node" };
+        const RULE_LABELS = {
+            confidenceNode: "Confidence", cornerNode: "Far corners", columnLock: "Column lock", loneNode: "Lone node",
+        };
         const ruleOn = (name) => !(game && game.dynamicRules && game.dynamicRules[name] === false);
         document.querySelectorAll("[data-rule]").forEach((btn) => {
             btn.addEventListener("click", () => {
@@ -321,6 +340,7 @@
                 if (action === "kalman") return send({ action, enabled: Boolean(game) && game.kalman === false });
                 if (action === "angleLimit") return send({ action, enabled: Boolean(game) && game.angleLimit === false });
                 if (action === "deadZone") return send({ action, enabled: Boolean(game) && game.deadZone === false });
+                if (action === "farHalf") return send({ action, enabled: Boolean(game) && game.farHalf === false });
                 if (action === "compare") return send({ action, enabled: Boolean(game) && game.compare === false });
                 if (action === "pause" && game && game.status === "paused") return send({ action: "resume" });
                 send({ action });
@@ -410,10 +430,38 @@
             });
         }
 
+        // The confidence level, in percent: as the lost readings above, a tap
+        // asks the game for 5 % more or less, and the number asked for shows
+        // until the game's status says it took.
+        let confidenceLevelAsked = null;
+
+        function confidenceLevelShown() {
+            if (confidenceLevelAsked !== null) return confidenceLevelAsked;
+            return game && Number.isInteger(game.confidenceLevel) ? game.confidenceLevel : null;
+        }
+
+        function askConfidenceLevel(step) {
+            const current = confidenceLevelShown();
+            if (current === null) return;
+            confidenceLevelAsked = Math.max(5, Math.min(100, current + step));
+            send({ action: "confidenceLevel", pct: confidenceLevelAsked });
+            renderConfidenceLevel();
+        }
+
+        $("levelLess").addEventListener("click", () => askConfidenceLevel(-5));
+        $("levelMore").addEventListener("click", () => askConfidenceLevel(5));
+
+        function renderConfidenceLevel() {
+            if (game && game.confidenceLevel === confidenceLevelAsked) confidenceLevelAsked = null;
+            const level = confidenceLevelShown();
+            $("confidenceLevel").textContent = level === null ? "--" : `${level}%`;
+        }
+
         function renderGame() {
             if (!game) return;
             renderPositionMethods();
             renderLostReadings();
+            renderConfidenceLevel();
             $("screen").textContent = game.screen;
             $("mode").textContent = game.remote ? `${game.mode} + pad` : game.mode;
             $("score").textContent = game.score;
@@ -430,6 +478,8 @@
             $("angleLimitBtn").classList.toggle("selected", game.angleLimit === false);
             $("deadZoneBtn").textContent = `Dead zone: ${game.deadZone === false ? "off" : "on"}`;
             $("deadZoneBtn").classList.toggle("selected", game.deadZone === false);
+            $("farHalfBtn").textContent = `Far half: ${game.farHalf === false ? "off" : "on"}`;
+            $("farHalfBtn").classList.toggle("selected", game.farHalf === false);
             document.querySelectorAll("[data-rule]").forEach((btn) => {
                 const on = ruleOn(btn.dataset.rule);
                 btn.textContent = `${RULE_LABELS[btn.dataset.rule]}: ${on ? "on" : "off"}`;
@@ -590,12 +640,16 @@
         }
 
         // A node's confidence (handover.py): the score, and ± the spread of
-        // its points; "--" before calibration has given it a role.
+        // its points; "--" before calibration has given it a role. Underlined
+        // while it is ready and at the confidence level (Dynamic's first rule).
         function confidenceCell(conf) {
             if (!conf) return "<td>--</td>";
             const pct = `${Math.round(conf.score * 100)}%`;
             const spread = conf.spread_cm == null ? "" : ` ±${Math.round(conf.spread_cm)}`;
-            return `<td class="${conf.confident ? "sure" : ""}">${pct}${spread}</td>`;
+            const level = game && Number.isInteger(game.confidenceLevel) ? game.confidenceLevel : null;
+            const atLevel = conf.ready === true && level !== null && conf.score * 100 >= level;
+            const classes = [conf.confident ? "sure" : "", atLevel ? "level" : ""].join(" ").trim();
+            return `<td class="${classes}">${pct}${spread}</td>`;
         }
 
         function connect() {
@@ -812,6 +866,7 @@
     th { text-align: left; color: #9298aa; font-weight: normal; font-size: 12px; }
     th, td { padding: 6px 4px; border-bottom: 1px solid #2a2a3a; }
     td.sure { color: #86efac; font-weight: 600; }
+    td.level { text-decoration: underline; }
 </style>
 
 </html>

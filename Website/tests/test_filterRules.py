@@ -81,6 +81,7 @@ class ParityWithGameJs(unittest.TestCase):
         config = FilterConfig(kalman=run.get("kalman", True),
                               angle_limit=run.get("angleLimit", True),
                               dead_zone=run.get("deadZone", True),
+                              far_half=run.get("farHalf", True),
                               **{DYNAMIC_RULE_SWITCHES[name]: on for name, on in switches.items()})
         pipeline = CoordinatePipeline(TwoSensorGeometry(method=run["method"]), area=area,
                                       config=config)
@@ -165,6 +166,21 @@ class ParityWithGameJs(unittest.TestCase):
     def test_dynamic_with_the_dead_zone_off(self):
         self.assertGreater(self._replay("deadZoneOffDynamic"), 0)
 
+    def test_dynamic_with_far_half_off(self):
+        self.assertGreater(self._replay("farHalfOff"), 0)
+
+    def test_far_half_keeps_a_back_row_player_in_play_on_the_recorded_stream(self):
+        # Segment 28: half readings in the back row are Out of bounds only
+        # with far half off; segment 29's, in the front row, either way.
+        runs = self.trace["runs"]
+        status = self.trace["fields"].index("status")
+        only_off = sum(1 for on, off in zip(runs["dynamic"]["steps"], runs["farHalfOff"]["steps"])
+                       if off[status] == "out-of-bounds" and on[status] != "out-of-bounds")
+        only_on = sum(1 for on, off in zip(runs["dynamic"]["steps"], runs["farHalfOff"]["steps"])
+                      if on[status] == "out-of-bounds" and off[status] != "out-of-bounds")
+        self.assertGreater(only_off, 50)
+        self.assertEqual(only_on, 0)
+
     def test_the_kalman_switch_changes_the_recorded_stream(self):
         # Otherwise the two runs above would not show the switch doing anything.
         runs = self.trace["runs"]
@@ -189,8 +205,9 @@ class ParityWithGameJs(unittest.TestCase):
         # methods are required (DynamicPickerBehaviour covers the average).
         for run in ("dynamic", "dynamicCalibrated"):
             followed = set(self.trace["runs"][run]["placedBy"]) - {None}
-            self.assertLessEqual({"corner-left", "corner-right", "centre", "lock-left",
-                                  "lock-right", "left", "right"}, followed, run)
+            self.assertLessEqual({"conf-left", "conf-right", "corner-left", "corner-right",
+                                  "centre", "lock-left", "lock-right", "left", "right"},
+                                 followed, run)
             self.assertGreaterEqual(len(followed & {"los", "tri", "avg"}), 2, run)
 
     def test_the_methods_really_differ_on_the_recorded_stream(self):
@@ -1293,23 +1310,71 @@ class BothNodesLost(unittest.TestCase):
 
     def test_the_scores(self):
         self.assertEqual([lost_score(s) for s in (self.FOUND, self.HALF, self.LOST)], [1, 0, -1])
+        # Far half: a half reading in the back row is +1, with the switch on.
+        self.assertEqual([lost_score(s, True, True) for s in (self.FOUND, self.HALF, self.LOST)],
+                         [1, 1, -1])
+        self.assertEqual(lost_score(self.HALF, True, False), 0)
+        self.assertEqual(lost_score(self.HALF, False, True), 0)
+
+    def test_the_default_is_21_readings(self):
+        # Aaron, 5 Oct: "the sweet spot".
+        self.assertEqual(FilterConfig().lost_readings, 21)
 
     def test_lost_once_the_last_readings_add_up_to_0_or_less(self):
         for method in ("dyn", "los", "tri", "avg"):
             pipe = CoordinatePipeline(TwoSensorGeometry(method=method))
             n = pipe.config.lost_readings
             self.assertEqual(self.feed(pipe, [self.FOUND] * n)[-1].status, STATUS_OK, method)
-            # k lost after n found: the last n add up to n - 2k, 0 at k = n/2.
+            # k lost after n found: the last n add up to n - 2k, 0 or less
+            # from k = ceil(n / 2).
+            k = (n + 1) // 2
             results = self.feed(pipe, [self.LOST] * n, start=n)
-            self.assertNotEqual(results[n // 2 - 2].status, STATUS_OUT_OF_BOUNDS, method)
-            self.assertEqual(results[n // 2 - 1].status, STATUS_OUT_OF_BOUNDS, method)
-            self.assertFalse(results[n // 2 - 1].held, method)
+            self.assertNotEqual(results[k - 2].status, STATUS_OUT_OF_BOUNDS, method)
+            self.assertEqual(results[k - 1].status, STATUS_OUT_OF_BOUNDS, method)
+            self.assertFalse(results[k - 1].held, method)
 
     def test_the_odd_found_or_half_does_not_stop_it(self):
         pipe = CoordinatePipeline(TwoSensorGeometry())
+        n = pipe.config.lost_readings
         pattern = [self.LOST, self.LOST, self.FOUND, self.LOST, self.HALF, self.LOST, self.LOST, self.LOST]
         results = self.feed(pipe, pattern * 5)
-        self.assertTrue(all(r.status == STATUS_OUT_OF_BOUNDS for r in results[len(pattern):]))
+        self.assertTrue(all(r.status == STATUS_OUT_OF_BOUNDS for r in results[n - 1:]))
+
+    def test_half_in_the_back_row_counts_as_found(self):
+        # Far half (Aaron, 5 Oct): both nodes hear a player 130 cm out with one
+        # sensor each. On, nobody is lost; off, both are.
+        n = FilterConfig().lost_readings
+        for far_half, want in ((True, STATUS_OK), (False, STATUS_OUT_OF_BOUNDS)):
+            pipe = CoordinatePipeline(TwoSensorGeometry(), config=FilterConfig(far_half=far_half))
+            results = [pipe.update(scanner_sample(75.0, 130.0, state=self.HALF), k * self.STEP_MS)
+                       for k in range(2 * n)]
+            self.assertEqual(results[-1].status, want, far_half)
+
+    def test_half_nearer_than_the_back_row_still_scores_0(self):
+        # 50 cm out, the front row: in an empty room the floor and furniture
+        # give half readings there.
+        pipe = CoordinatePipeline(TwoSensorGeometry())
+        n = pipe.config.lost_readings
+        results = [pipe.update(scanner_sample(75.0, 50.0, state=self.HALF), k * self.STEP_MS)
+                   for k in range(2 * n)]
+        self.assertEqual(results[-1].status, STATUS_OUT_OF_BOUNDS)
+
+    def test_the_back_row_follows_the_calibrated_rows(self):
+        # Rows 10-60 / 60-110 / 110-160: 105 cm out is the middle row.
+        area = PlayArea.calibrated([(10.0, 160.0)] * 3)
+        geometry = TwoSensorGeometry()
+        config = FilterConfig()
+        for depth, want in ((105.0, False), (115.0, True), (190.0, True), (195.0, False)):
+            filtered = geometry.channels(scanner_sample(75.0, depth, state=self.HALF))
+            self.assertEqual(geometry._in_back_row(0, filtered, area, config), want, depth)
+
+    def test_the_far_half_switch_changes_only_far_half(self):
+        pipeline = CoordinatePipeline(TwoSensorGeometry())
+        pipeline.set_far_half(False)
+        self.assertFalse(pipeline.config.far_half)
+        self.assertEqual(pipeline.config.lost_readings, 21)
+        pipeline.set_far_half(True)
+        self.assertTrue(pipeline.config.far_half)
 
     def test_all_half_is_lost(self):
         # On average half: 0, which is lost or half.
@@ -1472,22 +1537,26 @@ class AngleLimit(unittest.TestCase):
             self.assertAlmostEqual(angle_limit_cm(125.0, angle), angle_limit_cm(25.0, 180 - angle),
                                    places=9)
 
-    def test_a_reading_up_to_five_cm_past_it_still_counts(self):
+    def test_a_reading_up_to_twenty_percent_past_it_still_counts(self):
+        # Aaron, 5 Oct: +20 percent at great distances (it was +5 cm).
         area, config = PlayArea.default(), FilterConfig()
         limit = angle_limit_cm(25.0, 70)
-        self.assertTrue(within_angle_limit(25.0, limit + 4.99, 70, area, config))
-        self.assertFalse(within_angle_limit(25.0, limit + 5.01, 70, area, config))
+        self.assertTrue(within_angle_limit(25.0, limit * 1.2 - 0.01, 70, area, config))
+        self.assertFalse(within_angle_limit(25.0, limit * 1.2 + 0.01, 70, area, config))
+        self.assertTrue(within_angle_limit(25.0, 191.9, 90, area, config))    # 160 straight out
+        self.assertFalse(within_angle_limit(25.0, 192.1, 90, area, config))
         self.assertTrue(within_angle_limit(25.0, 400.0, 70, area, FilterConfig(angle_limit=False)))
 
     def test_a_servo_line_past_the_limit_does_not_lock_the_centre(self):
         # The 4 Oct centre-test angles (141 and 49) cross in the centre column.
-        # A left reading of 170 cm at 141 degrees is past its line's 160.8 cm
-        # (+5), so the left aim does not count and nothing locks the centre.
+        # A left reading of 200 cm at 141 degrees is past its line's 160.8 cm
+        # (+20 %, 193 cm), so the left aim does not count and nothing locks
+        # the centre.
         def placed(config):
             geometry = TwoSensorGeometry()
             area = PlayArea.default()
             for k in range(3):
-                readings = geometry.channels([(170.0, 141, 0), None, (80.0, 49, 0)])
+                readings = geometry.channels([(200.0, 141, 0), None, (80.0, 49, 0)])
                 geometry.track(readings, [True] * 3, 100.0 * k, area, config)
             return geometry.placed_by(readings, area)
 
@@ -1580,6 +1649,75 @@ class DeadZone(unittest.TestCase):
         close = [sum(1 for step in runs[name]["steps"] if step[at] == STATUS_TOO_CLOSE)
                  for name in ("default", "deadZoneOff")]
         self.assertGreater(close[0], close[1] + 50, "too close more often with the dead zone on")
+
+
+class ConfidenceLevel(unittest.TestCase):
+    """Dynamic's first rule (Aaron, 5 Oct): a node whose confidence from the
+    server (handover.py) is at the confidence level places the player on its
+    own reading, and the other node is left out."""
+
+    def placed(self, left, right, config=None, frames=3):
+        """placed_by and position after a few updates of these sample
+        entries, each (x, y, confidence) for a node finding something at
+        (x, y), or None for no reading."""
+        config = config or FilterConfig()
+        geometry = TwoSensorGeometry()
+        area = PlayArea.default()
+
+        def entry(slot, spec):
+            if spec is None:
+                return None
+            x, y, confidence = spec
+            return tuple(scanner_sample(x, y)[slot]) + (confidence,)
+
+        readings = None
+        for k in range(frames):
+            readings = geometry.channels([entry(0, left), None, entry(2, right)])
+            geometry.track(readings, [True] * 3, 100.0 * k, area, config)
+        return geometry.placed_by(readings, area), geometry.position(readings, area)
+
+    def test_a_node_at_the_level_places_the_player_alone(self):
+        by, where = self.placed((25.0, 70.0, 0.9), (90.0, 50.0, 0.3))
+        self.assertEqual(by, "conf-left")
+        self.assertAlmostEqual(where[0], 25.0, places=6)
+        self.assertAlmostEqual(where[1], 70.0, places=6)
+        by, where = self.placed((60.0, 50.0, 0.3), (125.0, 70.0, 0.95))
+        self.assertEqual(by, "conf-right")
+        self.assertAlmostEqual(where[0], 125.0, places=6)
+
+    def test_the_level_is_inclusive_and_settable(self):
+        self.assertEqual(self.placed((25.0, 70.0, 0.8), (90.0, 50.0, 0.3))[0], "conf-left")
+        config = FilterConfig(confidence_level_pct=95)
+        self.assertNotEqual(self.placed((25.0, 70.0, 0.9), (90.0, 50.0, 0.3), config)[0], "conf-left")
+
+    def test_both_at_the_level_the_higher_one_places_the_player(self):
+        self.assertEqual(self.placed((25.0, 70.0, 0.85), (125.0, 70.0, 0.9))[0], "conf-right")
+        by = self.placed((75.0, 90.0, 0.85), (75.0, 90.0, 0.85))[0]
+        self.assertNotIn(by, ("conf-left", "conf-right"))
+
+    def test_no_confidence_yet_or_the_switch_off_leaves_it_to_the_other_rules(self):
+        self.assertNotIn(self.placed((25.0, 70.0, None), (90.0, 50.0, None))[0],
+                         ("conf-left", "conf-right"))
+        off = FilterConfig(confidence_node=False)
+        self.assertNotIn(self.placed((25.0, 70.0, 0.9), (90.0, 50.0, 0.3), off)[0],
+                         ("conf-left", "conf-right"))
+
+    def test_a_reading_off_the_board_does_not_count(self):
+        # The left node is sure, but of something past the left edge.
+        self.assertNotEqual(self.placed((-30.0, 70.0, 0.95), (90.0, 50.0, 0.3))[0], "conf-left")
+
+    def test_a_confident_node_may_reach_20_percent_past_the_far_edge(self):
+        # A lone left node finds the player 180 cm out in the left column, past
+        # the default far edge (160) but inside 160 + 20 % (192): it places
+        # them in A1 on its own. Without the leeway it does not; nor at 195.
+        lone = dict(right=None, frames=4)
+        self.assertEqual(self.placed((25.0, 180.0, None), **lone)[0], "corner-left")
+        self.assertNotEqual(self.placed((25.0, 180.0, None), config=FilterConfig(far_leeway=0.0),
+                                        **lone)[0], "corner-left")
+        self.assertNotEqual(self.placed((25.0, 195.0, None), **lone)[0], "corner-left")
+
+    def test_the_rule_switch_has_its_control_panel_name(self):
+        self.assertEqual(DYNAMIC_RULE_SWITCHES["confidenceNode"], "confidence_node")
 
 
 if __name__ == "__main__":

@@ -209,6 +209,42 @@ class StageTwoSensorRig(unittest.TestCase):
         with self.assertRaises(ValueError):
             stage.set_lost_readings("many")
 
+    def test_the_confidence_level_can_be_set(self):
+        stage = ServerFilterStage()
+        self.assertEqual(stage.pipeline.config.confidence_level_pct, 80)
+        stage.set_confidence_level(65)
+        self.assertEqual(stage.pipeline.config.confidence_level_pct, 65)
+        stage.set_confidence_level(0)
+        self.assertEqual(stage.pipeline.config.confidence_level_pct, 1)
+        stage.set_confidence_level(250)
+        self.assertEqual(stage.pipeline.config.confidence_level_pct, 100)
+        with self.assertRaises(ValueError):
+            stage.set_confidence_level("sure")
+
+    def test_the_far_half_switch_reaches_the_config(self):
+        stage = ServerFilterStage()
+        stage.set_far_half(False)
+        self.assertFalse(stage.pipeline.config.far_half)
+        stage.set_far_half(True)
+        self.assertTrue(stage.pipeline.config.far_half)
+
+    def test_each_nodes_confidence_reaches_the_rule(self):
+        # The left node is 90 % sure of a player in front of it; the right
+        # one, 30 % sure, finds something in the centre.
+        stage = ServerFilterStage()
+        stage.assign_slots([LEFT, None, RIGHT])
+        confidence = {LEFT: 0.9, RIGHT: 0.3}
+        for i in range(4):
+            stage.on_reading(LEFT, 55.0, (2 * i) * STEP_MS, angle_deg=90, scan_state=0,
+                             confidence=confidence)
+            stage.on_reading(RIGHT, 40.0, (2 * i + 1) * STEP_MS, angle_deg=150, scan_state=0,
+                             confidence=confidence)
+        geometry = stage.pipeline.geometry
+        self.assertEqual(geometry.placed_by(stage.latest.filtered, stage.pipeline.area), "conf-left")
+        # A reading without the confidence keeps the last known.
+        stage.on_reading(LEFT, 55.0, 9 * STEP_MS, angle_deg=90, scan_state=0)
+        self.assertEqual(geometry.placed_by(stage.latest.filtered, stage.pipeline.area), "conf-left")
+
     def test_the_position_method_can_be_switched(self):
         stage = ServerFilterStage()
         stage.set_position_method("tri")
@@ -503,6 +539,18 @@ class AppWiring(unittest.TestCase):
         self.assertFalse(app.server_filter.pipeline.config.kalman)
         app.apply_filter_event({"type": "filter:kalman", "on": True})
         self.assertTrue(app.server_filter.pipeline.config.kalman)
+
+    def test_the_confidence_level_and_far_half_reach_the_chain(self):
+        app.server_filter = ServerFilterStage()
+        app.apply_filter_event({"type": "sensor:confidenceLevel", "pct": 70})
+        self.assertEqual(app.server_filter.pipeline.config.confidence_level_pct, 70)
+        app.apply_filter_event({"type": "sensor:farHalf", "on": False})
+        self.assertFalse(app.server_filter.pipeline.config.far_half)
+        with mock.patch("builtins.print"):       # a bad level is reported, not raised
+            app.apply_filter_event({"type": "sensor:confidenceLevel", "pct": "sure"})
+        self.assertEqual(app.server_filter.pipeline.config.confidence_level_pct, 70)
+        self.assertIn("confidenceLevel", app.CONTROL_ACTIONS)
+        self.assertIn("farHalf", app.CONTROL_ACTIONS)
 
     def test_the_angle_limit_switch_reaches_the_chain(self):
         app.server_filter = ServerFilterStage()

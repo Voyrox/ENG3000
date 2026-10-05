@@ -408,6 +408,8 @@ let sentKalman = null;
 let sentAngleLimit = null;
 let sentDeadZone = null;
 let sentDynamicRules = null;
+let sentConfidenceLevel = null;
+let sentFarHalf = null;
 
 function sendToServer(message) {
   if (!socket || socket.readyState !== WebSocket.OPEN) return false;
@@ -478,6 +480,19 @@ function syncServerFilterSetup() {
   const rulesKey = JSON.stringify(rules);
   if (rulesKey !== sentDynamicRules && sendToServer({ type: "sensor:dynamicRules", rules })) {
     sentDynamicRules = rulesKey;
+  }
+
+  // The confidence level Dynamic's first rule places a node alone at.
+  const confidenceLevel = window.getConfidenceLevel();
+  if (confidenceLevel !== sentConfidenceLevel &&
+    sendToServer({ type: "sensor:confidenceLevel", pct: confidenceLevel })) {
+    sentConfidenceLevel = confidenceLevel;
+  }
+
+  // The far half switch, so the server's chain scores readings the same way.
+  const farHalf = window.getFarHalf();
+  if (farHalf !== sentFarHalf && sendToServer({ type: "sensor:farHalf", on: farHalf })) {
+    sentFarHalf = farHalf;
   }
 
   const perColumn = window.getCapturedCalibration();
@@ -625,9 +640,21 @@ function handleRemoteCommand(command) {
       holdAlert(Boolean(command.on));
       break;
     case "dynamicRules":
-      // Dynamic's rules on or off: { columnLock, loneNode, cornerNode }, only
-      // the switches named.
+      // Dynamic's rules on or off: { confidenceNode, columnLock, loneNode,
+      // cornerNode }, only the switches named.
       window.setDynamicRules(command.rules);
+      syncServerFilterSetup();
+      break;
+    case "confidenceLevel":
+      // The confidence level, in percent, at which a node places the player
+      // on its own (Dynamic's first rule). Clamped by the game.
+      window.setConfidenceLevel(command.pct);
+      syncServerFilterSetup();
+      break;
+    case "farHalf":
+      // Far half: a half reading in the back row counts as found towards
+      // Out of bounds, or as half.
+      window.setFarHalf(command.enabled);
       syncServerFilterSetup();
       break;
     default:
@@ -669,6 +696,8 @@ function sendGameStatus() {
     deadZone: window.getDeadZone(),
     alertHeld: window.isAlertHeld(),
     dynamicRules: window.getDynamicRules(),
+    confidenceLevel: window.getConfidenceLevel(),
+    farHalf: window.getFarHalf(),
   }));
 }
 
@@ -728,14 +757,16 @@ function connectSocket() {
     // playing on a frozen one.
     if (serverFiltering) window.setServerCoordinate(null);
     // A restarted server has forgotten the position method, the lost
-    // readings, the Kalman, angle limit and dead zone switches and Dynamic's
-    // rule switches; send them again.
+    // readings, the Kalman, angle limit, dead zone and far half switches,
+    // Dynamic's rule switches and the confidence level; send them again.
     sentPositionMethod = null;
     sentLostReadings = null;
     sentKalman = null;
     sentAngleLimit = null;
     sentDeadZone = null;
     sentDynamicRules = null;
+    sentConfidenceLevel = null;
+    sentFarHalf = null;
     if (reconnectTimer === null) {
       reconnectTimer = window.setTimeout(() => {
         reconnectTimer = null;

@@ -178,13 +178,16 @@
     // kalman.
     kalman: true,
     // The angle limit (Aaron, 5 Oct): a node's filtered distance further than
-    // its servo line runs on the grid (angleLimitCm()), plus
-    // angleLimitToleranceCm, is not a player on it. Line of sight and
-    // Dynamic's node rules drop such a reading; trilateration ignores the
-    // limit. Switched on the control panel. Python: FilterConfig angle_limit,
-    // angle_limit_tolerance_cm.
+    // its servo line runs on the grid (angleLimitCm()), plus farLeeway of it,
+    // is not a player on it. Line of sight and Dynamic's node rules drop such
+    // a reading; trilateration ignores the limit. Switched on the control
+    // panel. Python: FilterConfig angle_limit.
     angleLimit: true,
-    angleLimitToleranceCm: 5,
+    // The leeway at great distances (Aaron, 5 Oct: +20 percent), as a share:
+    // the angle limit, and the far edge a confident node's own point may
+    // reach (ownPoint()), are both this much further out. Python: FilterConfig
+    // far_leeway.
+    farLeeway: 0.2,
     // The dead zone (Aaron, 5 Oct): the strip across the front of the grid,
     // the alert threshold (10 cm) deep, where the nodes sit. On, a node's raw
     // reading is too close when its point along the servo line is in it
@@ -251,16 +254,25 @@
     confidentReadings: 2,
     confidentMs: 1500,
     // sideLockDepthCm: the side-column lock needs the servo lines to cross at
-    // least this far inside the left or right column. columnLock, loneNode,
-    // cornerNode: Dynamic's rules on or off - the column lock (centre and
-    // sides), a lone confident node, and the near node alone in its far
-    // corner (A1, A3) - set from the control panel (setDynamicRules()) and
-    // kept in this browser. Python: FilterConfig side_lock_depth_cm,
+    // least this far inside the left or right column. confidenceNode,
+    // columnLock, loneNode, cornerNode: Dynamic's rules on or off - a node at
+    // the confidence level, the column lock (centre and sides), a lone
+    // confident node, and the near node alone in its far corner (A1, A3) -
+    // set from the control panel (setDynamicRules()) and kept in this
+    // browser. Python: FilterConfig side_lock_depth_cm, confidence_node,
     // column_lock, lone_node, corner_node.
     sideLockDepthCm: 20,
+    confidenceNode: true,
     columnLock: true,
     loneNode: true,
     cornerNode: true,
+    // The confidence level (Aaron, 5 Oct), in percent: a node whose
+    // confidence (the server's, handover.py - the Confidence column on the
+    // control panel) is at least this places the player on its own (see
+    // dynamicRule(), rule 0). Set from the control panel
+    // (setConfidenceLevel()), kept in this browser. Python: FilterConfig
+    // confidence_level_pct.
+    confidenceLevelPct: 80,
     // Out of bounds, the only time the game says it (Aaron, 5 Oct): both
     // nodes are lost. A node is lost when its last lostReadings readings,
     // scored found +1, half 0, lost -1 (as the control panel shows each
@@ -268,13 +280,26 @@
     // does not stop it. Until a node has had lostReadings readings in the
     // round it is not lost, so it is always sustained. Set from the control
     // panel (setLostReadings()), kept in this browser. See bothNodesLost().
-    // Python: FilterConfig lost_readings.
-    lostReadings: 8,
+    // 21 readings (Aaron, 5 Oct: "the sweet spot"); it was 8. Python:
+    // FilterConfig lost_readings.
+    lostReadings: 21,
+    // Far half (Aaron, 5 Oct): a half reading - one of a node's two sensors
+    // has the player - whose own point is in the back row counts +1 towards
+    // the node seeing the player, as found does (lostScore()). Past 100 cm
+    // the nodes see a player with one sensor far more often than with both
+    // (5 Oct, 22:25-22:48: 86 % of the right node's readings 130-160 cm out
+    // were half), and at 0 for half such a node kept being lost. Nearer,
+    // half stays 0: there the floor and furniture give half readings in an
+    // empty room. Switched on the control panel. Python: FilterConfig
+    // far_half.
+    farHalf: true,
   };
 
   // The most readings a node's lost score can be taken over (setLostReadings()).
   const LOST_READINGS_MAX = 50;
-  const LOST_READINGS_KEY = "eng3000.lostReadings";
+  // ".21": the default went from 8 to 21, and a browser that kept the old
+  // setting would never see it.
+  const LOST_READINGS_KEY = "eng3000.lostReadings.21";
 
   // How many readings a node's lost score is taken over: from the control
   // panel (canvas.js, "lostReadings"), clamped to 1..LOST_READINGS_MAX and
@@ -303,10 +328,41 @@
     // As above: the default stands.
   }
 
-  // Dynamic's rules on or off, { columnLock, loneNode, cornerNode } (see
-  // dynamicRule()). From the control panel (canvas.js, "dynamicRules"); only
-  // the switches named change. Kept in this browser like lostReadings.
-  const DYNAMIC_RULE_SWITCHES = ["columnLock", "loneNode", "cornerNode"];
+  // The confidence level, in percent (tuning.confidenceLevelPct): from the
+  // control panel (canvas.js, "confidenceLevel"), rounded to a whole percent,
+  // clamped to 1..100 and kept in this browser like lostReadings. Returns the
+  // value in use.
+  const CONFIDENCE_LEVEL_KEY = "eng3000.confidenceLevelPct";
+
+  window.setConfidenceLevel = function setConfidenceLevel(pct) {
+    const level = Math.round(Number(pct));
+    if (Number.isFinite(level)) {
+      tuning.confidenceLevelPct = Math.max(1, Math.min(100, level));
+      try {
+        window.localStorage.setItem(CONFIDENCE_LEVEL_KEY, String(tuning.confidenceLevelPct));
+      } catch (err) {
+        // No storage (a private window, the tests): it lasts until a reload.
+      }
+    }
+    return tuning.confidenceLevelPct;
+  };
+
+  window.getConfidenceLevel = function getConfidenceLevel() {
+    return tuning.confidenceLevelPct;
+  };
+
+  try {
+    const saved = window.localStorage && window.localStorage.getItem(CONFIDENCE_LEVEL_KEY);
+    if (saved !== null && saved !== undefined) window.setConfidenceLevel(saved);
+  } catch (err) {
+    // As above: the default stands.
+  }
+
+  // Dynamic's rules on or off, { confidenceNode, columnLock, loneNode,
+  // cornerNode } (see dynamicRule()). From the control panel (canvas.js,
+  // "dynamicRules"); only the switches named change. Kept in this browser
+  // like lostReadings.
+  const DYNAMIC_RULE_SWITCHES = ["confidenceNode", "columnLock", "loneNode", "cornerNode"];
   const DYNAMIC_RULES_KEY = "eng3000.dynamicRules";
 
   window.getDynamicRules = function getDynamicRules() {
@@ -1643,12 +1699,12 @@
   }
 
   // Whether a node's filtered distance at its servo angle can be a player on
-  // the grid: no further than angleLimitCm() plus
-  // tuning.angleLimitToleranceCm. Always, with tuning.angleLimit off.
+  // the grid: no further than angleLimitCm() plus tuning.farLeeway of it
+  // (192 cm straight out). Always, with tuning.angleLimit off.
   // filterRules.py within_angle_limit().
   function withinAngleLimit(slot, distance, angle) {
     return !tuning.angleLimit ||
-      distance <= angleLimitCm(columnCentreCm(slot), angle) + tuning.angleLimitToleranceCm;
+      distance <= angleLimitCm(columnCentreCm(slot), angle) * (1 + tuning.farLeeway);
   }
 
   // The sensors' datasheet range (HC-SR04; the RCWL-1601 is a pin-compatible
@@ -2059,9 +2115,20 @@
     return leader;
   }
 
-  // --- Dynamic's rules: the far corners, the column lock, a lone node ---------
+  // --- Dynamic's rules: confidence, the far corners, the column lock, a lone node
   // Checked before the steadiest method (Aaron, 5 Oct), in this order. Each
   // can be switched off from the control panel (setDynamicRules()).
+  //
+  // 0. A node at the confidence level (tuning.confidenceNode). The server
+  //    works out how sure each node is of where the player is (handover.py:
+  //    the share of its readings in the last 5 s that put them in one spot,
+  //    the Confidence column on the control panel). A node whose confidence
+  //    is at least tuning.confidenceLevelPct places the player by its own
+  //    reading, along its servo line (ownPoint()), and the other node's
+  //    readings are left out. When both are at the level the higher one
+  //    does; two equal ones leave it to the rules below. A confidence counts
+  //    only once the server says it is ready (the node has reported for 5 s,
+  //    with 8 readings or more, and its room is learnt, if it has one).
   //
   // 1. The near node in its far corner (tuning.cornerNode). A1 and A3, the
   //    far-left and far-right squares, are far from the opposite node - the
@@ -2102,7 +2169,8 @@
   //    tuning.confidentReadings readings all found the player (both heads),
   //    the latest in the last tuning.confidentMs, and whose own reading - its
   //    distance along its servo line - puts the player inside the play area
-  //    (across the board, and between its column's near and far edges), is
+  //    (across the board, and between its column's near edge and its far
+  //    edge plus tuning.farLeeway), is
   //    confident. If only one node is, that reading places the player and the
   //    other node's readings are left out. When both are, the methods place
   //    the player as before. (On 5 Oct the left node, turned fully in, found
@@ -2198,17 +2266,46 @@
     return null;
   }
 
-  // A confident node's own reading, { x, y } - its distance along its servo
-  // line - or null when the node is not confident, the reading is past the
-  // angle limit, or that point is outside the play area.
-  function confidentPoint(slot, filtered, scans, now) {
-    if (foundStreak[slot] < tuning.confidentReadings || now - foundAt[slot] > tuning.confidentMs ||
-      filtered[slot] === null || scans[slot].angle === null) return null;
+  // A node's own reading, { x, y } - its distance along its servo line - or
+  // null when it has no reading or angle, the reading is past the angle
+  // limit, or that point is outside the play area: across the board, and
+  // between its column's near edge and its far edge plus tuning.farLeeway
+  // (Aaron, 5 Oct: +20 percent at great distances).
+  function ownPoint(slot, filtered, scans) {
+    if (filtered[slot] === null || scans[slot].angle === null) return null;
     if (!withinAngleLimit(slot, filtered[slot], scans[slot].angle)) return null;
     const point = scannerPoint(columnCentreCm(slot), bodyCentreCm(filtered[slot]), scans[slot].angle);
     if (point.x < 0 || point.x > PLAY_WIDTH_CM) return null;
     const span = columnSpan(columnAtCm(point.x));
-    return point.y >= span.near && point.y <= span.far ? point : null;
+    return point.y >= span.near && point.y <= span.far * (1 + tuning.farLeeway) ? point : null;
+  }
+
+  // A confident node's own reading (ownPoint()), or null when the node is
+  // not confident.
+  function confidentPoint(slot, filtered, scans, now) {
+    if (foundStreak[slot] < tuning.confidentReadings || now - foundAt[slot] > tuning.confidentMs) return null;
+    return ownPoint(slot, filtered, scans);
+  }
+
+  // A node's confidence from the server, 0-1, or null when it has none yet
+  // (no role, or not ready: see rule 0). game.js gets it with every node
+  // update; handover.py status().
+  function readConfidence(node) {
+    if (!node || !node.online || !node.confidence || node.confidence.ready !== true) return null;
+    const score = Number(node.confidence.score);
+    return Number.isFinite(score) ? score : null;
+  }
+
+  // Rule 0: the node at the confidence level, { slot, point }, or null. Both
+  // at it: the higher; equal: neither.
+  function levelNode(filtered, scans, confidence) {
+    const at = [LEFT_SENSOR, RIGHT_SENSOR]
+      .filter((slot) => confidence[slot] !== null && confidence[slot] * 100 >= tuning.confidenceLevelPct)
+      .map((slot) => ({ slot, score: confidence[slot], point: ownPoint(slot, filtered, scans) }))
+      .filter((c) => c.point);
+    if (at.length === 2 && at[0].score === at[1].score) return null;
+    if (at.length === 0) return null;
+    return at.length === 1 || at[0].score > at[1].score ? at[0] : at[1];
   }
 
   // Whether a node's own reading puts the player in its far corner: A1, the
@@ -2221,14 +2318,23 @@
   }
 
   // The rule placing the player for Dynamic, { by, fix: { x, y, source } } -
-  // by is "corner-left" | "corner-right" (rule 1), "centre" | "lock-left" |
-  // "lock-right" (rule 2) or "left" | "right" (rule 3) - or null to follow the
-  // steadiest method, whose position is `steadiest`.
-  function dynamicRule(filtered, scans, steadiest, now) {
+  // by is "conf-left" | "conf-right" (rule 0), "corner-left" | "corner-right"
+  // (rule 1), "centre" | "lock-left" | "lock-right" (rule 2) or "left" |
+  // "right" (rule 3) - or null to follow the steadiest method, whose position
+  // is `steadiest`. confidence: [l, c, r], each node's from the server
+  // (readConfidence()).
+  function dynamicRule(filtered, scans, confidence, steadiest, now) {
+    const side = (slot) => (slot === LEFT_SENSOR ? "left" : "right");
+    if (tuning.confidenceNode) {
+      const sure = levelNode(filtered, scans, confidence);
+      if (sure) {
+        const { slot, point } = sure;
+        return { by: `conf-${side(slot)}`, fix: { x: point.x, y: point.y, source: side(slot) } };
+      }
+    }
     const points = [LEFT_SENSOR, RIGHT_SENSOR]
       .map((slot) => ({ slot, point: confidentPoint(slot, filtered, scans, now) }))
       .filter((c) => c.point);
-    const side = (slot) => (slot === LEFT_SENSOR ? "left" : "right");
     if (tuning.cornerNode) {
       const corner = points.find((c) => inFarCorner(c.slot, c.point));
       if (corner) {
@@ -2318,6 +2424,18 @@
     return tuning.angleLimit;
   };
 
+  // The far half switch, on by default; see tuning.farHalf. Takes effect at
+  // once, on the readings already kept as well.
+  window.getFarHalf = function getFarHalf() {
+    return tuning.farHalf;
+  };
+
+  window.setFarHalf = function setFarHalf(on) {
+    tuning.farHalf = Boolean(on);
+    console.info(`[far half] ${tuning.farHalf ? "on" : "off"}`);
+    return tuning.farHalf;
+  };
+
   // How far each node's servo line runs on the grid at an angle (angleLimitCm()),
   // for the tests and the console: slot 0 is the left node, 2 the right.
   window.getAngleLimitCm = function getAngleLimitCm(slot, angle) {
@@ -2345,8 +2463,9 @@
   const lastSeenStamp = [null, null, null];
   const heardAt = [-Infinity, -Infinity, -Infinity];   // ms, a slot's last new reading
   const foundAt = [-Infinity, -Infinity, -Infinity];   // ms, its last new one with both heads on the player
-  // Each node's scan states this round, one per reading that arrived, the
-  // latest LOST_READINGS_MAX of them (bothNodesLost()).
+  // Each node's readings this round, one per reading that arrived, the latest
+  // LOST_READINGS_MAX of them (bothNodesLost()): { state, backRow }, its scan
+  // state and whether its own point was in the back row (inBackRow()).
   const stateLog = [[], [], []];
 
   // Which slots carry a new reading (fresh, see above), and which nodes'
@@ -2371,9 +2490,30 @@
   }
 
   // A reading's score towards a node being lost (Aaron, 5 Oct): found +1,
-  // half 0, lost -1.
-  function lostScore(state) {
-    return state === SCAN_FOUND ? 1 : state === SCAN_LOST ? -1 : 0;
+  // half 0, lost -1; with tuning.farHalf on, a half reading in the back row
+  // +1, as found. entry: a stateLog entry.
+  function lostScore(entry) {
+    if (entry.state === SCAN_FOUND) return 1;
+    if (entry.state === SCAN_LOST) return -1;
+    return tuning.farHalf && entry.backRow ? 1 : 0;
+  }
+
+  // Whether a node's reading puts the player in the back row (Aaron, 5 Oct):
+  // its own point - its distance to the middle of the player, along its
+  // servo line - is across the board, no nearer than where its column's back
+  // row starts (two thirds of the way from the near edge to the far one;
+  // 100 cm on the default bounds), no further than the far edge plus
+  // tuning.farLeeway, and the reading is within the angle limit.
+  // filterRules.py TwoSensorGeometry._in_back_row().
+  function inBackRow(slot, filtered, scans) {
+    const distance = filtered[slot];
+    const angle = scans[slot].angle;
+    if (distance === null || !withinAngleLimit(slot, distance, angle)) return false;
+    const point = scannerPoint(columnCentreCm(slot), bodyCentreCm(distance), angle);
+    if (point.x < 0 || point.x > PLAY_WIDTH_CM) return false;
+    const span = columnSpan(columnAtCm(point.x));
+    const backRow = span.near + ((GRID_ROWS - 1) * (span.far - span.near)) / GRID_ROWS;
+    return point.y >= backRow && point.y <= span.far * (1 + tuning.farLeeway);
   }
 
   // Each node's score now, [left, right], for the control panel: { score,
@@ -2397,12 +2537,12 @@
   // had that many readings this round, and one that sends no scan state never
   // is. Notes this update's readings first (and foundAt, as before).
   // TwoSensorGeometry._nobody_found() in filterRules.py.
-  function bothNodesLost(scans, fresh, heard, now) {
+  function bothNodesLost(filtered, scans, fresh, heard, now) {
     const lost = (slot) => {
       const state = scans[slot].state;
       if (fresh[slot] && state === SCAN_FOUND) foundAt[slot] = now;
       const log = stateLog[slot];
-      if (heard[slot] && state !== null) log.push(state);
+      if (heard[slot] && state !== null) log.push({ state, backRow: inBackRow(slot, filtered, scans) });
       if (log.length > LOST_READINGS_MAX) log.shift();
       const n = tuning.lostReadings;
       if (log.length < n) return false;
@@ -2430,7 +2570,8 @@
   //   method:     the method switched on,
   //   placedBy:   where the position above came from: the method switched
   //               on ("los" | "tri" | "avg"), or, with Dynamic on, one of its
-  //               rules (dynamicRule(): "corner-left" | "corner-right" |
+  //               rules (dynamicRule(): "conf-left" | "conf-right" |
+  //               "corner-left" | "corner-right" |
   //               "centre" | "lock-left" | "lock-right" | "left" | "right")
   //               or the steadiest method,
   //   depth:      [l, c, r] each node's own depth reading (filtered distance to
@@ -2463,12 +2604,13 @@
     const filtered = raw.map((value, slot) =>
       fresh[slot] ? conditionSensor(sensorFilters[slot], value, now, angles[slot]) : sensorFilters[slot].value);
     if (isNewReading) stepLosTrack(filtered, scans, fresh, now);
-    const nobodyFound = bothNodesLost(scans, fresh, heard, now);
+    const nobodyFound = bothNodesLost(filtered, scans, fresh, heard, now);
     if (isNewReading) stepDynamicRules(filtered, scans, fresh, now);
     const fixes = solvePositions(filtered, angles, now);
     if (isNewReading) stepDynamic(fixes, now);
     const steadiest = dynamicLeader(fixes, now);
-    const rule = dynamicRule(filtered, scans, steadiest ? fixes[steadiest] : null, now);
+    const confidence = [readConfidence(list[LEFT_SENSOR]), null, readConfidence(list[RIGHT_SENSOR])];
+    const rule = dynamicRule(filtered, scans, confidence, steadiest ? fixes[steadiest] : null, now);
     const following = rule ? rule.by : steadiest;
     fixes.dyn = rule ? rule.fix : steadiest ? fixes[steadiest] : null;
     const placedBy = positioning.method === "dyn" ? following : positioning.method;
@@ -3317,9 +3459,10 @@
     avg: { label: "Average", short: "AVG", colour: "#f8fafc" },
   };
   // What the control panel's Dynamic button says when one of its rules places
-  // the player (dynamicRule()): a far corner, the column lock, or a lone
-  // confident node.
+  // the player (dynamicRule()): a node at the confidence level, a far corner,
+  // the column lock, or a lone confident node.
   const DYNAMIC_RULE_SHORT = {
+    "conf-left": "CONF L", "conf-right": "CONF R",
     "corner-left": "A1", "corner-right": "A3",
     centre: "MID", "lock-left": "COL L", "lock-right": "COL R",
     left: "L", right: "R",

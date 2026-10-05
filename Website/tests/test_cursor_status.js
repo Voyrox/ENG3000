@@ -380,7 +380,7 @@ test("the lost readings are set from the control panel, and each node's score is
   const w = loadWindow();
   w.setGameInputMode("sensor");
   w.resetGame();
-  assert.strictEqual(w.getLostReadings(), 8, "the default");
+  assert.strictEqual(w.getLostReadings(), 21, "the default (Aaron, 5 Oct; it was 8)");
   assert.strictEqual(w.setLostReadings(5), 5);
   assert.strictEqual(w.setLostReadings(0), 1, "at least one");
   assert.strictEqual(w.setLostReadings(99), 50, "at most fifty");
@@ -485,10 +485,12 @@ test("a ring off the side of the board stays at the board's edge; no signal has 
   assert.ok(fixes.los.xCm < -10, `x was ${fixes.los.xCm}`);
   assert.ok(fixes.los.nx > -0.05 && fixes.los.nx < 0.05, `nx was ${fixes.los.nx}`);
 
+  // 50 cm off: past the limit plus its 20 % for both nodes (20 cm off, the
+  // right node's reading is inside it).
   const limited = loadWindow();
   limited.setGameInputMode("sensor");
   limited.resetGame();
-  run(limited, scannersSeeing(-20, 80));
+  run(limited, scannersSeeing(-50, 80));
   assert.strictEqual(limited.getGameCursorStatus(CANVAS).sensor.fixes.los, null,
     "line of sight drops readings past the angle limit");
 
@@ -733,9 +735,11 @@ test("Dynamic: the near node alone places the player in its far corner (A1, A3)"
 
 test("Dynamic: each rule has a switch, as the control panel sets it", () => {
   const w = loadWindow();
-  assert.deepStrictEqual({ ...w.getDynamicRules() }, { columnLock: true, loneNode: true, cornerNode: true });
+  assert.deepStrictEqual({ ...w.getDynamicRules() },
+    { confidenceNode: true, columnLock: true, loneNode: true, cornerNode: true });
   assert.deepStrictEqual({ ...w.setDynamicRules({ columnLock: false, bogus: true, loneNode: "no" }) },
-    { columnLock: false, loneNode: true, cornerNode: true }, "only booleans for known switches change");
+    { confidenceNode: true, columnLock: false, loneNode: true, cornerNode: true },
+    "only booleans for known switches change");
   w.setGameInputMode("sensor");
   w.resetGame();
   run(w, bothSee(75, 80));
@@ -743,4 +747,69 @@ test("Dynamic: each rule has a switch, as the control panel sets it", () => {
   w.setDynamicRules({ columnLock: true });
   run(w, bothSee(75, 80), 4);
   assert.strictEqual(w.getGameState().sensor.placedBy, "centre");
+});
+
+// A node record carrying the server's confidence in it (handover.py), as
+// nodes:update does.
+const withConfidence = (node, score, ready = true) => ({ ...node, confidence: { score, ready } });
+
+test("Dynamic: a node at the confidence level places the player alone", () => {
+  const w = loadWindow();
+  assert.strictEqual(w.getConfidenceLevel(), 80, "the default");
+  w.setGameInputMode("sensor");
+  w.resetGame();
+  // The left node, 90 % sure, finds the player in front of it; the right
+  // one, 30 % sure, finds something in the centre.
+  const nodes = scanners({ avg: echoCm(0, 25, 70), angle: aimAt(0, 25, 70), scanState: 0 },
+    { avg: echoCm(2, 90, 50), angle: aimAt(2, 90, 50), scanState: 0 });
+  nodes[0] = withConfidence(nodes[0], 0.9);
+  nodes[2] = withConfidence(nodes[2], 0.3);
+  run(w, nodes, 30);
+  const sensor = w.getGameState().sensor;
+  assert.strictEqual(sensor.placedBy, "conf-left");
+  assert.strictEqual(sensor.column, 0);
+  assert.strictEqual(w.getDynamicFollowing(), "CONF L");
+
+  // Under the level, not ready, or switched off: the other rules decide.
+  w.setConfidenceLevel(95);
+  run(w, nodes, 30);
+  assert.notStrictEqual(w.getGameState().sensor.placedBy, "conf-left");
+  w.setConfidenceLevel(80);
+  run(w, [withConfidence(nodes[0], 0.9, false), nodes[1], nodes[2]], 30);
+  assert.notStrictEqual(w.getGameState().sensor.placedBy, "conf-left");
+  w.setDynamicRules({ confidenceNode: false });
+  run(w, nodes, 30);
+  assert.notStrictEqual(w.getGameState().sensor.placedBy, "conf-left");
+});
+
+test("the confidence level is set from the control panel, 1-100 %", () => {
+  const w = loadWindow();
+  assert.strictEqual(w.setConfidenceLevel(65), 65);
+  assert.strictEqual(w.setConfidenceLevel(0), 1, "at least 1");
+  assert.strictEqual(w.setConfidenceLevel(150), 100, "at most 100");
+  assert.strictEqual(w.setConfidenceLevel("sure"), 100, "not a number: unchanged");
+  assert.strictEqual(w.setConfidenceLevel(72.4), 72, "whole percents");
+});
+
+test("far half: half readings in the back row keep a player in play", () => {
+  // Both nodes hear a player 130 cm out with one sensor each (half), as the
+  // rig's nodes mostly did past 100 cm on 5 Oct.
+  const half = (x, y) => scanners({ avg: echoCm(0, x, y), angle: aimAt(0, x, y), scanState: 1 },
+    { avg: echoCm(2, x, y), angle: aimAt(2, x, y), scanState: 1 });
+  const w = loadWindow();
+  assert.strictEqual(w.getFarHalf(), true, "on by default");
+  w.setGameInputMode("sensor");
+  w.resetGame();
+  run(w, half(75, 130), 120);
+  assert.notStrictEqual(w.getGameState().sensor.status, "out-of-bounds");
+  w.setFarHalf(false);
+  run(w, half(75, 130), 1);
+  assert.strictEqual(w.getGameState().sensor.status, "out-of-bounds", "off: at once, on the kept readings too");
+
+  // In the front row half stays 0, far half on or off.
+  const near = loadWindow();
+  near.setGameInputMode("sensor");
+  near.resetGame();
+  run(near, half(75, 50), 120);
+  assert.strictEqual(near.getGameState().sensor.status, "out-of-bounds");
 });

@@ -258,13 +258,58 @@ function buildStream() {
   for (let i = 0; i < 40; i++) push([jitter(60, 2), 150, 0], [jitter(14, 0.5), 31, 0]);
   for (let i = 0; i < 40; i++) push(scanned(SENSOR_X_CM[0], 100, 60), scanned(SENSOR_X_CM[1], 100, 60));
 
+  // 28. Far half (Aaron, 5 Oct): the player stands in the back row of the
+  //     centre column, 130 cm out, and each node hears them with one sensor
+  //     only (half), as the rig's nodes mostly did past 100 cm on 5 Oct. With
+  //     tuning.farHalf on each half reading scores +1 and nobody is lost;
+  //     off, they score 0 and it is Out of bounds once each node has had
+  //     tuning.lostReadings of them. Then both find the player again.
+  for (let i = 0; i < 90; i++) {
+    push(scanned(SENSOR_X_CM[0], 75, 130, 1), scanned(SENSOR_X_CM[1], 75, 130, 1));
+  }
+  for (let i = 0; i < 40; i++) push(scanned(SENSOR_X_CM[0], 75, 130), scanned(SENSOR_X_CM[1], 75, 130));
+
+  // 29. The same in the front row, 50 cm out: a half reading there scores 0
+  //     with far half on as well, so it is Out of bounds either way (in an
+  //     empty room the floor and furniture near the nodes give half readings).
+  for (let i = 0; i < 90; i++) {
+    push(scanned(SENSOR_X_CM[0], 75, 50, 1), scanned(SENSOR_X_CM[1], 75, 50, 1));
+  }
+  for (let i = 0; i < 40; i++) push(scanned(SENSOR_X_CM[0], 75, 50), scanned(SENSOR_X_CM[1], 75, 50));
+
+  // 30. The confidence level (Dynamic's first rule; Aaron, 5 Oct). Each
+  //     entry also carries the node's confidence from the server
+  //     (handover.py), as nodes:update does. The left node, 90 % sure, finds
+  //     the player in front of it (25, 70) while the right one, 30 % sure,
+  //     finds something in the centre: the left node places the player alone.
+  //     Then the other way round, the right node 95 % sure at (125, 70). Then
+  //     both 85 % sure, which leaves it to the other rules; then the left one
+  //     at 75 %, under the level, and the right one with no confidence yet.
+  const withConfidence = (reading, confidence) => [...reading, confidence];
+  for (let i = 0; i < 60; i++) {
+    push(withConfidence(scanned(SENSOR_X_CM[0], 25, 70), 0.9),
+      withConfidence(scanned(SENSOR_X_CM[1], 90, 50), 0.3));
+  }
+  for (let i = 0; i < 60; i++) {
+    push(withConfidence(scanned(SENSOR_X_CM[0], 60, 50), 0.3),
+      withConfidence(scanned(SENSOR_X_CM[1], 125, 70), 0.95));
+  }
+  for (let i = 0; i < 40; i++) {
+    push(withConfidence(scanned(SENSOR_X_CM[0], 75, 90), 0.85),
+      withConfidence(scanned(SENSOR_X_CM[1], 75, 90), 0.85));
+  }
+  for (let i = 0; i < 40; i++) {
+    push(withConfidence(scanned(SENSOR_X_CM[0], 25, 70), 0.75),
+      withConfidence(scanned(SENSOR_X_CM[1], 90, 50), null));
+  }
+
   return steps;
 }
 
 // --- Run the real JS -----------------------------------------------------------
 
 function runJs(stream, calibration, method, kalman = true, dynamicRules = null, angleLimit = true,
-  deadZone = true) {
+  deadZone = true, farHalf = true) {
   let clock = 0;
   const context = {
     console,
@@ -302,6 +347,7 @@ function runJs(stream, calibration, method, kalman = true, dynamicRules = null, 
   w.setKalman(kalman);
   w.setAngleLimit(angleLimit);
   w.setDeadZone(deadZone);
+  w.setFarHalf(farHalf);
   if (dynamicRules) w.setDynamicRules(dynamicRules);
   w.setGameInputMode("sensor");
   w.resetGame();
@@ -319,13 +365,18 @@ function runJs(stream, calibration, method, kalman = true, dynamicRules = null, 
     clock = (i + 1) * STEP_MS;
     reading.forEach((value, s) => {
       if (!nodes[s] || value === SILENT) return;
-      // A scanner entry is [distance, angle, scanState]; a plain number has
-      // neither. Each message gets a new server stamp, as last_seen does.
-      const [distance, angle, state] = Array.isArray(value) ? value : [value, undefined, undefined];
+      // A scanner entry is [distance, angle, scanState], and from segment 29
+      // the node's confidence as well; a plain number has none of them. Each
+      // message gets a new server stamp, as last_seen does. The confidence
+      // rides on the node record, as the server sends it (a ready one, or
+      // none).
+      const [distance, angle, state, confidence] = Array.isArray(value) ? value : [value];
       const payload = { avg: distance === NO_ECHO ? -1 : distance };
       if (angle !== undefined) payload.angle = angle;
       if (state !== undefined) payload.scanState = state;
       nodes[s].latest = JSON.stringify(payload);
+      nodes[s].confidence = confidence === undefined || confidence === null ? null
+        : { score: confidence, ready: true };
       stamp += 1;
       nodes[s].last_seen = stamp;
     });
@@ -356,7 +407,7 @@ const FIELDS = ["status", "gx", "gy", "rawGx", "rawGy", "column", "held", "heldF
   "fresh", "x", "y"];
 
 const stream = buildStream();
-const RULES_OFF = { columnLock: false, loneNode: false, cornerNode: false };
+const RULES_OFF = { confidenceNode: false, columnLock: false, loneNode: false, cornerNode: false };
 // [near, far] per column; the centre entry is ignored (no centre sensor to capture it).
 const calibrated = [[28.47, 140.68], [20.44, 138.26], [10.89, 145.81]];
 // A far edge past 150 cm, as on a 150 cm board starting 10 cm in front of the
@@ -390,6 +441,8 @@ const trace = {
     // reading, whatever the angle.
     deadZoneOff: { method: "los", deadZone: false, ...runJs(stream, null, "los", true, null, true, false) },
     deadZoneOffDynamic: { method: "dyn", deadZone: false, ...runJs(stream, null, "dyn", true, null, true, false) },
+    // Dynamic with far half off: a half reading in the back row scores 0.
+    farHalfOff: { method: "dyn", farHalf: false, ...runJs(stream, null, "dyn", true, null, true, true, false) },
   },
 };
 
