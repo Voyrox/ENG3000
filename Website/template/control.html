@@ -82,10 +82,21 @@
     </section>
 
     <section>
+        <h2>Empty room <small>every node</small></h2>
+        <div class="grid2">
+            <button data-room="learn">Learn room</button>
+            <button data-room="forget">Forget room</button>
+        </div>
+        <p class="note">Learn: with nobody in the play area, each node sweeps its range and from then on
+            ignores the room's echoes. Forget: the nodes wipe the learnt room and every echo counts again.
+            Each node's room is in the Room column below.</p>
+    </section>
+
+    <section>
         <h2>Sensors</h2>
         <table>
-            <thead><tr><th>Node</th><th>State</th><th>Filtered cm</th><th>Angle</th><th>Scan</th><th>RPS</th></tr></thead>
-            <tbody id="nodes"><tr><td colspan="6">No nodes</td></tr></tbody>
+            <thead><tr><th>Node</th><th>State</th><th>Filtered cm</th><th>Angle</th><th>Scan</th><th>Room</th><th>RPS</th></tr></thead>
+            <tbody id="nodes"><tr><td colspan="7">No nodes</td></tr></tbody>
         </table>
     </section>
 
@@ -202,6 +213,19 @@
 
         document.querySelectorAll("[data-mode]").forEach((btn) => {
             btn.addEventListener("click", () => send({ action: "mode", mode: btn.dataset.mode }));
+        });
+
+        // The empty room goes straight to the nodes (no game page needed).
+        // Both ask first: forgetting wipes what the nodes learnt, and learning
+        // needs the play area empty.
+        const ROOM_CONFIRM = {
+            learn: "Learn the empty room? Nobody may stand in the play area while the nodes sweep.",
+            forget: "Forget the learnt room on every node? Echoes from the room count again until it is learnt again.",
+        };
+        document.querySelectorAll("[data-room]").forEach((btn) => {
+            btn.addEventListener("click", () => {
+                if (confirm(ROOM_CONFIRM[btn.dataset.room])) send({ action: "room", room: btn.dataset.room });
+            });
         });
 
         document.querySelectorAll("[data-action]").forEach((btn) => {
@@ -407,9 +431,11 @@
             }));
         }
 
-        // A node's servo angle and scan state, from its latest message - the
-        // same fields the game's sensor panel shows (readScan() in game.js).
+        // A node's servo angle, scan state and empty room, from its latest
+        // message - the same fields the game's sensor panel reads (readScan()
+        // in game.js). Firmware without the room filter sends no room.
         const SCAN_STATES = { 0: ["found", "#22c55e"], 1: ["half", "#f59e0b"], 2: ["lost", "#ef4444"] };
+        const ROOM_STATES = { 0: ["none", "#63736f"], 1: ["learning", "#f59e0b"], 2: ["learnt", "#22c55e"] };
 
         function readScan(n) {
             let payload = n.latest;
@@ -420,19 +446,23 @@
                     payload = null;
                 }
             }
-            if (!payload || typeof payload !== "object") return { angle: null, state: null };
+            if (!payload || typeof payload !== "object") return { angle: null, state: null, room: null };
             const number = (value) => {
                 if (value === null || value === undefined || value === "") return null;
                 const v = Number(value);
                 return Number.isFinite(v) ? v : null;
             };
-            return { angle: number(payload.angle), state: number(payload.scanState ?? payload.state) };
+            return {
+                angle: number(payload.angle),
+                state: number(payload.scanState ?? payload.state),
+                room: number(payload.room),
+            };
         }
 
         function renderNodes(nodes) {
             const body = $("nodes");
             if (!nodes.length) {
-                body.innerHTML = '<tr><td colspan="6">No nodes</td></tr>';
+                body.innerHTML = '<tr><td colspan="7">No nodes</td></tr>';
                 return;
             }
             body.innerHTML = nodes
@@ -441,11 +471,13 @@
                 .map((n) => {
                     const cm = n.filtered_distance == null ? "--" : n.filtered_distance.toFixed(1);
                     const state = n.online ? (n.has_turn ? "scanning" : "online") : "offline";
-                    const scan = n.online ? readScan(n) : { angle: null, state: null };
+                    const scan = n.online ? readScan(n) : { angle: null, state: null, room: null };
                     const angle = scan.angle === null ? "--" : `${scan.angle.toFixed(0)}°`;
                     const [scanName, scanColour] = SCAN_STATES[scan.state] || ["--", "#63736f"];
+                    const [roomName, roomColour] = ROOM_STATES[scan.room] || ["--", "#63736f"];
                     return `<tr><td>${n.id}</td><td>${state}</td><td>${cm}</td><td>${angle}</td>` +
-                        `<td style="color:${scanColour}">${scanName}</td><td>${(n.rps || 0).toFixed(1)}</td></tr>`;
+                        `<td style="color:${scanColour}">${scanName}</td>` +
+                        `<td style="color:${roomColour}">${roomName}</td><td>${(n.rps || 0).toFixed(1)}</td></tr>`;
                 })
                 .join("");
         }

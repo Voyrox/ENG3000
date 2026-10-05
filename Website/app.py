@@ -613,8 +613,8 @@ def send_node_pulses(node_id):
     send_command(node_id, command)
 
 
-# The empty room, from the Room button on the game screen (nodes:room) or
-# POST /api/room. LEARN: with nobody in the play area, each scanner node sweeps
+# The empty room, from the Room button on the game screen (nodes:room), the
+# control panel's Learn room / Forget room ("room" action) or POST /api/room. LEARN: with nobody in the play area, each scanner node sweeps
 # its range and records the room's echoes, and from then on ignores them.
 # FORGET clears that. The nodes keep the room in flash and report it in every
 # reading ("room": 0 not learnt, 1 learning, 2 learnt), so a node that
@@ -827,7 +827,9 @@ async def browser_handler(websocket):
 
 
 async def control_handler(websocket):
-    """Phone control panel: relays commands to every game browser."""
+    """Phone control panel: relays commands to every game browser. The empty
+    room ("room": learn or forget) goes straight to the nodes instead, so it
+    works with no game page open."""
     CONTROL_CONNECTIONS.add(websocket)
     print(f"Control panel connected from {websocket.remote_address}")
     try:
@@ -836,6 +838,10 @@ async def control_handler(websocket):
             try:
                 event = json.loads(message)
             except json.JSONDecodeError:
+                continue
+            if event.get("action") == "room":
+                print(f"Control panel: {event}")
+                await asyncio.to_thread(send_nodes_room, event.get("room"))
                 continue
             if event.get("action") not in CONTROL_ACTIONS:
                 continue

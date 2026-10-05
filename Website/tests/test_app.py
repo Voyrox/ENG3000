@@ -1564,6 +1564,13 @@ class ControlPanelTests(BrokerTestCase):
     def test_an_unknown_action_is_not_relayed(self):
         self.assertEqual(self.relayed({"action": "selfDestruct"}), [])
 
+    def test_learn_and_forget_room_go_straight_to_the_nodes(self):
+        _, node = self.add_node(conn=RecordingConn())
+        sent = self.relayed({"action": "room", "room": "forget"}, {"action": "room", "room": "learn"},
+                            {"action": "room", "room": "wipe"})
+        self.assertEqual(sent, [], "the game page is not needed for the room")
+        self.assertEqual(node["conn"].sent, ["FORGET\n", "LEARN\n"])
+
 
 class ScanStateTests(unittest.TestCase):
     """What a scanner node's scan made of a reading, from its message."""

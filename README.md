@@ -93,6 +93,8 @@ With the flag off neither field is present.
 
 `canvas.js` connects to `ws://<host>:8765/browser` and renders live node data on an HTML canvas. It can also send `menu:select` messages back to the server for UI interactions, `nodes:aim` from the calibration screen (above), and `{"type": "nodes:pulses", "count": 1|2|3}` from the game screen's Pulses button (multi-pulse, above; sent when it changes and after a reconnect; any other count is ignored).
 
+The phone control panel (`/control`, `CON=1`) has **Learn room** and **Forget room** under *Empty room*. Each asks first, then sends `{"action": "room", "room": "learn"|"forget"}`, which the server turns into `LEARN` / `FORGET` for every connected node itself, with no game page needed (forgetting also wipes the room from the node's flash). The panel's Sensors table shows each node's room from the `room` field of its readings: none, learning or learnt (`--` for firmware without the room filter).
+
 With server-side filtering on, the server also accepts:
 
 ```json
