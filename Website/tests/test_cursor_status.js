@@ -567,16 +567,19 @@ test("Dynamic: a lone confident node places the player by itself", () => {
   const w = loadWindow();
   w.setGameInputMode("sensor");
   w.resetGame();
-  run(w, scanners({ avg: echoCm(0, 25, 85), angle: 90, scanState: 0 }, FURNITURE));
+  // 40 cm across: the left node's line and the furniture's cross at 48 cm,
+  // short of the centre and not deep in the left column (no column lock).
+  const left = { avg: echoCm(0, 40, 85), angle: aimAt(0, 40, 85), scanState: 0 };
+  run(w, scanners(left, FURNITURE));
   const sensor = w.getGameState().sensor;
   assert.strictEqual(sensor.placedBy, "left");
   assert.strictEqual(sensor.column, 0);
-  assert.ok(Math.abs(sensor.xCm - 25) < 0.5 && Math.abs(sensor.yCm - 85) < 0.5, `(${sensor.xCm}, ${sensor.yCm})`);
+  assert.ok(Math.abs(sensor.xCm - 40) < 0.5 && Math.abs(sensor.yCm - 85) < 0.5, `(${sensor.xCm}, ${sensor.yCm})`);
   assert.strictEqual(w.getDynamicFollowing(), "L");
 
   // Line of sight, switched on by itself, takes the furniture too.
   w.setPositionMethod("los");
-  run(w, scanners({ avg: echoCm(0, 25, 85), angle: 90, scanState: 0 }, FURNITURE), 2);
+  run(w, scanners(left, FURNITURE), 2);
   assert.strictEqual(w.getGameState().sensor.placedBy, "los");
   assert.strictEqual(w.getDynamicFollowing(), null, "Dynamic is off");
 });
@@ -615,4 +618,51 @@ test("Dynamic: a lone node whose own reading is in front of the board's near edg
   // out, in front of the near edge (20 cm).
   run(w, scanners({ avg: 27, angle: 160, scanState: 0 }, FURNITURE));
   assert.notStrictEqual(w.getGameState().sensor.placedBy, "left");
+});
+
+// Both scanners on the player at (x, y), found.
+const bothSee = (x, y) => scanners({ avg: echoCm(0, x, y), angle: aimAt(0, x, y), scanState: 0 },
+  { avg: echoCm(2, x, y), angle: aimAt(2, x, y), scanState: 0 });
+
+test("Dynamic: servo lines crossing deep in a side column lock it", () => {
+  const w = loadWindow();
+  w.setGameInputMode("sensor");
+  w.resetGame();
+  run(w, bothSee(15, 80));
+  let sensor = w.getGameState().sensor;
+  assert.strictEqual(sensor.placedBy, "lock-left");
+  assert.strictEqual(sensor.column, 0);
+  run(w, bothSee(135, 80));
+  sensor = w.getGameState().sensor;
+  assert.strictEqual(sensor.placedBy, "lock-right");
+  assert.strictEqual(sensor.column, 2);
+  assert.strictEqual(w.getDynamicFollowing(), "COL R");
+});
+
+test("Dynamic: the near node alone places the player in its far corner (A1, A3)", () => {
+  const w = loadWindow();
+  w.setGameInputMode("sensor");
+  w.resetGame();
+  // The left node finds the player in A1; the right one is acting up,
+  // finding something in the centre near the screen.
+  const acting = { avg: echoCm(2, 75, 50), angle: aimAt(2, 75, 50), scanState: 0 };
+  run(w, scanners({ avg: echoCm(0, 25, 125), angle: aimAt(0, 25, 125), scanState: 0 }, acting));
+  const sensor = w.getGameState().sensor;
+  assert.strictEqual(sensor.placedBy, "corner-left");
+  assert.strictEqual(sensor.column, 0);
+  assert.strictEqual(w.getDynamicFollowing(), "A1");
+});
+
+test("Dynamic: each rule has a switch, as the control panel sets it", () => {
+  const w = loadWindow();
+  assert.deepStrictEqual({ ...w.getDynamicRules() }, { columnLock: true, loneNode: true, cornerNode: true });
+  assert.deepStrictEqual({ ...w.setDynamicRules({ columnLock: false, bogus: true, loneNode: "no" }) },
+    { columnLock: false, loneNode: true, cornerNode: true }, "only booleans for known switches change");
+  w.setGameInputMode("sensor");
+  w.resetGame();
+  run(w, bothSee(75, 80));
+  assert.notStrictEqual(w.getGameState().sensor.placedBy, "centre");
+  w.setDynamicRules({ columnLock: true });
+  run(w, bothSee(75, 80), 4);
+  assert.strictEqual(w.getGameState().sensor.placedBy, "centre");
 });

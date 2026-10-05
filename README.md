@@ -53,7 +53,7 @@ build_flags =
 
 **Calibration** is the game's sensor-assignment screen: both servos are held still at 90 degrees (`AIM 90`) for the whole screen - through both steps, LEFT then RIGHT - while the operator aims the nodes straight out into the play area by hand and identifies each node with a hand in front of it; each live-readings row shows the angle the node reports, amber if it is not 90; Start Game then lets the nodes scan again (`SCAN`). There is no play-area (corner) calibration: the game plays on the default bounds, rows between 20 and 140 cm in every column. Each game page asks for the hold with `{"type": "nodes:aim", "hold": true}` and releases it with `false`; the servos stay held while any open page is on the calibration screen, so another tab or device on a different screen cannot release them, and a page that closes stops holding.
 
-The game puts each node on the screen edge at the centre of an outer column. How the player is placed is switched on the phone's `/control` page only (Aaron, 5 Oct; the game board draws one cursor and no buttons): **Dynamic** (the default), **Line of sight**, **Trilateration** or **Average**, under *Placing the player*. Picking one of the last three turns Dynamic off. With Dynamic on, its button says which one it is following (e.g. `Dynamic (TRI)`), or which of its rules is placing the player: `MID` (both servo lines cross in the centre column) or `L` / `R` (a lone confident node). **Compare**, beside it, rings where line of sight, trilateration and the average put the player (LOS, TRI, AVG) on the control panel's pad, while the cyan cursor follows the one placing the player (the thick ring). The game's sensor panel lists all three positions. See *Placing the player* under the filtering pipeline. With no `angle` from either node there is no line of sight, and every method is trilateration.
+The game puts each node on the screen edge at the centre of an outer column. How the player is placed is switched on the phone's `/control` page only (Aaron, 5 Oct; the game board draws one cursor and no buttons): **Dynamic** (the default), **Line of sight**, **Trilateration** or **Average**, under *Placing the player*. Picking one of the last three turns Dynamic off. With Dynamic on, its button says which one it is following (e.g. `Dynamic (TRI)`), or which of its rules is placing the player: `A1` / `A3` (the near node in its far corner), `MID`, `COL L` / `COL R` (the column lock: where the two servo lines cross) or `L` / `R` (a lone confident node); each rule has its own switch under *Dynamic's rules*. **Compare**, beside it, rings where line of sight, trilateration and the average put the player (LOS, TRI, AVG) on the control panel's pad, while the cyan cursor follows the one placing the player (the thick ring). The game's sensor panel lists all three positions. See *Placing the player* under the filtering pipeline. With no `angle` from either node there is no line of sight, and every method is trilateration.
 
 **Out of bounds** appears in one case only: both nodes are lost (Aaron, 5 Oct). Each node's last *n* readings are scored as the control panel shows them - *found* +1, *half* 0, *lost* -1 - and a node whose scores add up to 0 or less is lost, so the odd found reading among lost ones does not stop it, and a node mostly finding the player never is. *n* is 8 by default; set it on the phone control panel under *Out of bounds* (minus and plus), which also shows each node's score now. The game keeps it in that browser, and passes it to the server when `SERVER_FILTERING` is on. Each reading counts once, when it arrives; a node waiting for its turn keeps the readings of its last one, and a node is not lost until it has had *n* readings in the round. A position off the board keeps the player on the edge square, a tenth of a square inside the edge (`EDGE_INSET`), and the game carries on; the sensor panel says `off board: edge`. Unusable readings are ridden out on the last square for as long as they last. If neither node sends anything for 5 s (`tuneSensor({ offlineMs })`), or the server says both are offline, the game says **Sensors offline** instead and the round waits. Waiting for a first position shows no message.
 
@@ -151,45 +151,67 @@ are never read at the same moment, and a node that has lost the player keeps
 reporting whatever its beam hits while it sweeps. The position methods
 (`solvePositions()` in `game.js`, `TwoSensorGeometry(method=...)` here):
 
-- **Dynamic** (`dyn`, the default): first two rules (`dynamicRule()`,
-  `TwoSensorGeometry._rule()` here; Aaron, 5 Oct), checked in this order:
-  1. **The centre.** Each node's servo points where it last found or
-     half-found the player. If both have done so in the last 1.5 s and the two
-     servo lines cross inside the centre column, the player is in the centre
-     column (`DYN MID`), whatever the methods make of the distances. x is
-     the crossing's, kept 8 cm inside the column so the column hysteresis
-     cannot hold the player in the column they came from; y is the steadiest
-     method's. Once the lines have crossed in the centre column, the player
-     stays in it for 1 s while both nodes still see them, even if the
-     crossing strays outside: standing still in the centre must never touch
-     a side column (Aaron). (Aaron's first form, LEFT above 90 and RIGHT
-     below 90, holds anywhere between the two nodes, which sit in the middle
-     of the outer columns: on the 4 Oct centre run it said centre at L-80
-     every time and at R-80 61 % of the time, because the servos read 20-30°
-     further in than the player - L-80 read 112°, R-80 59.5°. The crossing
-     said centre at L-80 0 %, R-80 38 %, and C-40/C-80/C-120 100/100/81 %.)
-  2. **A lone confident node.** A node whose last two readings found the
-     player (both heads), the latest in the last 1.5 s - so it lasts through
-     the other node's 1 s turn - and whose own reading (its distance along
-     its servo line) is inside the play area - across the board, and between
-     its column's near and far edges - is confident. If only one node is,
-     that reading places the player (`DYN L` / `DYN R`) and the other node's
-     readings are left out. When both are, the steadiest method places the
-     player.
+- **Dynamic** (`dyn`, the default): first three rules (`dynamicRule()`,
+  `TwoSensorGeometry._rule()` here; Aaron, 5 Oct), checked in this order.
+  Each has a switch on the control panel, under *Dynamic's rules*
+  (`setDynamicRules({ cornerNode, columnLock, loneNode })`, kept in the
+  browser; Python `FilterConfig(corner_node=..., column_lock=...,
+  lone_node=...)`), and the Dynamic button there says which one is placing
+  the player.
+  1. **Far corners** (`Dynamic (A1)` / `(A3)`). A1 and A3, the far-left and
+     far-right squares, are far from the opposite node - the back-left square
+     is some 156 cm from the right node, at a shallow angle. When the left
+     node is confident (rule 3) and its own reading puts the player in A1,
+     that reading places them and the right node's readings are left out;
+     the same for the right node and A3.
+  2. **Column lock** (`Dynamic (MID)`, `(COL L)`, `(COL R)`). Each node's servo
+     points where it last found or half-found the player. If both have done
+     so in the last 1.5 s, where the two servo lines cross says the column,
+     whatever the methods make of the distances:
+     - **The centre**: the lines cross in the centre column. x is the
+       crossing's, kept 8 cm inside the column so the column hysteresis
+       cannot hold the player in the column they came from; y is the
+       steadiest method's. Once the lines have crossed in the centre, the
+       player stays there for 1 s while both nodes still see them, even if
+       the crossing strays outside: standing still in the centre must never
+       touch a side column (Aaron).
+     - **The sides**: the lines cross at least 20 cm inside the left or
+       right column (`sideLockDepthCm`), i.e. x 30 cm or less, or 120 cm or
+       more. No hold, and it ends any centre hold. Locking a side column
+       wherever the lines crossed in it would have cost the 4 Oct
+       walk-centre a quarter of its time in the centre column: the servos
+       read 20-30° further in than the player, so the crossing strays into
+       a side column now and then.
 
-  `tuneSensor({ centreSeenMs, centreHoldMs, confidentReadings, confidentMs })`,
-  Python `FilterConfig(centre_seen_ms=..., centre_hold_ms=...,
-  confident_readings=..., confident_ms=...)`. On the rig on 5 Oct (serial
-  logs 19:23-19:43, replayed through `filterRules.py`), while the two servo
-  lines crossed in the centre column the cursor was in a side column 7 % of
-  the time before the rules and never with them. The play-area check keeps
-  out what the left node found there turned fully in - something 9 cm in
-  front of the screen line - and off the left edge of the board. On the 4 Oct
-  centre run the rules take C-120 from 62 % to 99 % in its column (column
-  changes 23 to 2) and walk-centre from 86 % to 100 % (15 to 0); L-80, C-40
-  and C-80 stay at 100 %; R-80 stays poor (4 % to 0 %): the right node reads
-  59.5° with the player straight in front of it, so the lines cross in the
-  centre.
+     (Aaron's first form of the centre, LEFT above 90 and RIGHT below 90,
+     holds anywhere between the two nodes, which sit in the middle of the
+     outer columns: on the 4 Oct centre run it said centre at L-80 every time
+     and at R-80 61 % of the time, because the servos read further in than
+     the player - L-80 read 112°, R-80 59.5°. The crossing said centre at
+     L-80 0 %, R-80 38 %, and C-40/C-80/C-120 100/100/81 %.)
+  3. **Lone node** (`Dynamic (L)` / `(R)`). A node whose last two readings found
+     the player (both heads), the latest in the last 1.5 s - so it lasts
+     through the other node's 1 s turn - and whose own reading (its distance
+     along its servo line) is inside the play area - across the board, and
+     between its column's near and far edges - is confident. If only one
+     node is, that reading places the player and the other node's readings
+     are left out. When both are, the steadiest method places the player.
+
+  `tuneSensor({ centreSeenMs, centreHoldMs, sideLockDepthCm,
+  confidentReadings, confidentMs })`, Python `FilterConfig(centre_seen_ms=...,
+  centre_hold_ms=..., side_lock_depth_cm=..., confident_readings=...,
+  confident_ms=...)`. On the rig on 5 Oct (serial logs 19:23-19:43, replayed
+  through `filterRules.py`), while the two servo lines crossed in the centre
+  column the cursor was in a side column 7 % of the time before the rules,
+  and once in 1,507 readings with them (A1's rule, which comes first). The
+  side lock placed 182 of 2,868 readings and the far corners 18. The
+  play-area check keeps out what the left node found there turned fully in -
+  something 9 cm in front of the screen line - and off the left edge of the
+  board. On the 4 Oct centre run the rules take C-120 from 62 % to 99 % in
+  its column (column changes 23 to 2) and walk-centre from 86 % to 100 % (15
+  to 0); L-80, C-40 and C-80 stay at 100 %; R-80 stays poor (4 % to 0 %): the
+  right node reads 59.5° with the player straight in front of it, so the
+  lines cross in the centre.
 
   Otherwise Dynamic follows whichever of the other three has kept the
   player in one square of the board the longest (`dynamicLeader()`,

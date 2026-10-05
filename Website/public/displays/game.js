@@ -224,6 +224,17 @@
     centreHoldMs: 1000,
     confidentReadings: 2,
     confidentMs: 1500,
+    // sideLockDepthCm: the side-column lock needs the servo lines to cross at
+    // least this far inside the left or right column. columnLock, loneNode,
+    // cornerNode: Dynamic's rules on or off - the column lock (centre and
+    // sides), a lone confident node, and the near node alone in its far
+    // corner (A1, A3) - set from the control panel (setDynamicRules()) and
+    // kept in this browser. Python: FilterConfig side_lock_depth_cm,
+    // column_lock, lone_node, corner_node.
+    sideLockDepthCm: 20,
+    columnLock: true,
+    loneNode: true,
+    cornerNode: true,
     // Out of bounds, the only time the game says it (Aaron, 5 Oct): both
     // nodes are lost. A node is lost when its last lostReadings readings,
     // scored found +1, half 0, lost -1 (as the control panel shows each
@@ -264,6 +275,37 @@
     if (saved !== null && saved !== undefined) window.setLostReadings(saved);
   } catch (err) {
     // As above: the default stands.
+  }
+
+  // Dynamic's rules on or off, { columnLock, loneNode, cornerNode } (see
+  // dynamicRule()). From the control panel (canvas.js, "dynamicRules"); only
+  // the switches named change. Kept in this browser like lostReadings.
+  const DYNAMIC_RULE_SWITCHES = ["columnLock", "loneNode", "cornerNode"];
+  const DYNAMIC_RULES_KEY = "eng3000.dynamicRules";
+
+  window.getDynamicRules = function getDynamicRules() {
+    return Object.fromEntries(DYNAMIC_RULE_SWITCHES.map((name) => [name, tuning[name]]));
+  };
+
+  window.setDynamicRules = function setDynamicRules(rules) {
+    if (rules && typeof rules === "object") {
+      DYNAMIC_RULE_SWITCHES.forEach((name) => {
+        if (typeof rules[name] === "boolean") tuning[name] = rules[name];
+      });
+      try {
+        window.localStorage.setItem(DYNAMIC_RULES_KEY, JSON.stringify(window.getDynamicRules()));
+      } catch (err) {
+        // No storage (private window, tests): the switches hold until reload.
+      }
+    }
+    return window.getDynamicRules();
+  };
+
+  try {
+    const saved = window.localStorage && window.localStorage.getItem(DYNAMIC_RULES_KEY);
+    if (saved) window.setDynamicRules(JSON.parse(saved));
+  } catch (err) {
+    // A missing or unreadable setting: every rule stays on.
   }
 
   window.tuneSensor = function tuneSensor(partial) {
@@ -1909,39 +1951,55 @@
     return leader;
   }
 
-  // --- Dynamic's rules: the centre, and a lone confident node ------------------
-  // Checked before the steadiest method (Aaron, 5 Oct), in this order:
+  // --- Dynamic's rules: the far corners, the column lock, a lone node ---------
+  // Checked before the steadiest method (Aaron, 5 Oct), in this order. Each
+  // can be switched off from the control panel (setDynamicRules()).
   //
-  // 1. The centre. Each node's servo points where it last found or half-found
-  //    the player. If both have done so in the last tuning.centreSeenMs and
-  //    the two servo lines cross inside the centre column, the player is in
-  //    the centre column - wherever the methods put them. The line from a
-  //    node, not its distance, is what the rule trusts: a player in the
-  //    centre is hard to place by distance because each node's beam finds
-  //    the edge of their body. (Aaron's own form, LEFT above 90 and RIGHT
-  //    below it, also holds anywhere between the two nodes, which sit in the
-  //    middle of the outer columns; on the 4 Oct centre run it said centre at
-  //    the left spot every time. The crossing said so at the left spot 0 % of
-  //    the time and 81-100 % at the centre spots.) x is the crossing's, kept
-  //    COLUMN_MARGIN_CM inside the column so the column hysteresis cannot hold
-  //    the player in the column they came from; y is the steadiest method's,
-  //    or the crossing's when no method has a position. Once the lines have
-  //    crossed in the centre column the player stays there for
-  //    tuning.centreHoldMs while both nodes still see them, even if the
-  //    crossing strays just outside it: standing still in the centre must
-  //    never touch a side column (Aaron). On the rig on 5 Oct the crossing
-  //    strayed to 103.5 cm for two readings in 20 minutes.
+  // 1. The near node in its far corner (tuning.cornerNode). A1 and A3, the
+  //    far-left and far-right squares, are far from the opposite node - the
+  //    back-left square is some 156 cm from the right node, at a shallow
+  //    angle. When the left node is confident (rule 3) and its own reading
+  //    puts the player in A1, that reading places them and the right node's
+  //    readings are left out; the same for the right node and A3.
   //
-  // 2. A lone confident node. A node whose last tuning.confidentReadings
-  //    readings all found the player (both heads), the latest in the last
-  //    tuning.confidentMs, and whose own reading - its distance along its
-  //    servo line - puts the player inside the play area (across the board,
-  //    and between its column's near and far edges), is confident. If only one
-  //    node is, that reading places the player and the other node's readings
-  //    are left out. When both are, the methods place the player as before.
-  //    (On 5 Oct the left node, turned fully in, found something 9 cm in front
-  //    of the screen line, and at times something off the left edge; neither
-  //    is the player.)
+  // 2. The column lock (tuning.columnLock), from the two servo lines. Each
+  //    node's servo points where it last found or half-found the player; if
+  //    both have done so in the last tuning.centreSeenMs, where their lines
+  //    cross says which column the player is in, wherever the methods put
+  //    them. The line from a node, not its distance, is what the lock
+  //    trusts: a player is hard to place by distance because each node's
+  //    beam finds the edge of their body.
+  //    - The centre: the lines cross in the centre column. x is the
+  //      crossing's, kept COLUMN_MARGIN_CM inside the column so the column
+  //      hysteresis cannot hold the player in the column they came from; y is
+  //      the steadiest method's, or the crossing's when no method has a
+  //      position. Once the lines have crossed in the centre the player stays
+  //      there for tuning.centreHoldMs while both nodes still see them, even
+  //      if the crossing strays just outside: standing still in the centre
+  //      must never touch a side column (Aaron). On the rig on 5 Oct the
+  //      crossing strayed to 103.5 cm for two readings in 20 minutes.
+  //    - The sides: the lines cross at least tuning.sideLockDepthCm inside
+  //      the left or right column (and on the board). No hold, and it ends
+  //      any centre hold. Without the depth, the servos' lean (they read
+  //      20-30 degrees further in than the player on 4 Oct) put the crossing
+  //      in a side column while the player walked the centre: in that run's
+  //      replay walk-centre fell from 100 % to 76 % in its column.
+  //    (Aaron's first form of the centre, LEFT above 90 and RIGHT below it,
+  //    holds anywhere between the two nodes, which sit in the middle of the
+  //    outer columns; on the 4 Oct centre run it said centre at the left
+  //    spot every time. The crossing said so at the left spot 0 % of the
+  //    time and 81-100 % at the centre spots.)
+  //
+  // 3. A lone confident node (tuning.loneNode). A node whose last
+  //    tuning.confidentReadings readings all found the player (both heads),
+  //    the latest in the last tuning.confidentMs, and whose own reading - its
+  //    distance along its servo line - puts the player inside the play area
+  //    (across the board, and between its column's near and far edges), is
+  //    confident. If only one node is, that reading places the player and the
+  //    other node's readings are left out. When both are, the methods place
+  //    the player as before. (On 5 Oct the left node, turned fully in, found
+  //    something 9 cm in front of the screen line, and at times something off
+  //    the left edge; neither is the player.)
   //
   // Python: TwoSensorGeometry._rule() in filterRules.py.
   const seenAim = [null, null, null];   // { at, angle }: a slot's last new reading that found or half-found the player
@@ -1968,6 +2026,7 @@
     });
     const crossing = linesCrossing(now);
     if (crossing && inCentreColumn(crossing.x)) centreHeld = { at: now, x: crossing.x, y: crossing.y };
+    else if (crossing && deepSideColumn(crossing.x) !== null) centreHeld = null;
   }
 
   // Whether both nodes found or half-found the player in the last
@@ -1994,15 +2053,38 @@
     return x >= pitch && x <= 2 * pitch;
   }
 
-  // Where the centre rule puts the player, { x, y }: where the lines cross if
-  // that is in the centre column, else where they last did so, within
-  // tuning.centreHoldMs and while both lines are recent; otherwise null.
-  function centreCrossing(now) {
+  // The side column, 0 or 2, the lines' crossing is at least
+  // tuning.sideLockDepthCm inside (and on the board), or null.
+  function deepSideColumn(x) {
+    const pitch = PLAY_WIDTH_CM / 3;
+    if (x >= 0 && x <= pitch - tuning.sideLockDepthCm) return LEFT_SENSOR;
+    if (x <= PLAY_WIDTH_CM && x >= 2 * pitch + tuning.sideLockDepthCm) return RIGHT_SENSOR;
+    return null;
+  }
+
+  // The column lock, { by: "centre" | "lock-left" | "lock-right", fix }, or
+  // null: the lines cross in the centre column, or deep in a side column, or
+  // the centre is still held (tuning.centreHoldMs, both lines recent).
+  function columnLock(steadiest, now) {
     const crossing = linesCrossing(now);
-    if (crossing && inCentreColumn(crossing.x)) return crossing;
-    if (centreHeld && now - centreHeld.at <= tuning.centreHoldMs && bothLinesRecent(now)) {
-      return { x: centreHeld.x, y: centreHeld.y };
+    const pitch = PLAY_WIDTH_CM / 3;
+    const centre = (at) => ({
+      by: "centre",
+      fix: {
+        x: Math.max(pitch + COLUMN_MARGIN_CM, Math.min(2 * pitch - COLUMN_MARGIN_CM, at.x)),
+        y: steadiest ? steadiest.y : at.y,
+        source: "both",
+      },
+    });
+    if (crossing && inCentreColumn(crossing.x)) return centre(crossing);
+    const side = crossing ? deepSideColumn(crossing.x) : null;
+    if (side !== null) {
+      return {
+        by: side === LEFT_SENSOR ? "lock-left" : "lock-right",
+        fix: { x: crossing.x, y: steadiest ? steadiest.y : crossing.y, source: "both" },
+      };
     }
+    if (centreHeld && now - centreHeld.at <= tuning.centreHoldMs && bothLinesRecent(now)) return centre(centreHeld);
     return null;
   }
 
@@ -2018,23 +2100,40 @@
     return point.y >= span.near && point.y <= span.far ? point : null;
   }
 
-  // The rule placing the player for Dynamic, { by: "centre" | "left" |
-  // "right", fix: { x, y, source } }, or null to follow the steadiest method,
-  // whose position is `steadiest`.
+  // Whether a node's own reading puts the player in its far corner: A1, the
+  // far-left square, for the left node; A3, the far-right one, for the right.
+  function inFarCorner(slot, point) {
+    const column = slot === LEFT_SENSOR ? 0 : 2;
+    if (columnAtCm(point.x) !== column) return false;
+    const grid = window.rawToGrid(column, point.y, null);
+    return Boolean(grid) && grid.gy === GRID_ROWS - 1;
+  }
+
+  // The rule placing the player for Dynamic, { by, fix: { x, y, source } } -
+  // by is "corner-left" | "corner-right" (rule 1), "centre" | "lock-left" |
+  // "lock-right" (rule 2) or "left" | "right" (rule 3) - or null to follow the
+  // steadiest method, whose position is `steadiest`.
   function dynamicRule(filtered, scans, steadiest, now) {
-    const crossing = centreCrossing(now);
-    if (crossing) {
-      const pitch = PLAY_WIDTH_CM / 3;
-      const x = Math.max(pitch + COLUMN_MARGIN_CM, Math.min(2 * pitch - COLUMN_MARGIN_CM, crossing.x));
-      return { by: "centre", fix: { x, y: steadiest ? steadiest.y : crossing.y, source: "both" } };
-    }
     const points = [LEFT_SENSOR, RIGHT_SENSOR]
       .map((slot) => ({ slot, point: confidentPoint(slot, filtered, scans, now) }))
       .filter((c) => c.point);
-    if (points.length !== 1) return null;
-    const { slot, point } = points[0];
-    const by = slot === LEFT_SENSOR ? "left" : "right";
-    return { by, fix: { x: point.x, y: point.y, source: by } };
+    const side = (slot) => (slot === LEFT_SENSOR ? "left" : "right");
+    if (tuning.cornerNode) {
+      const corner = points.find((c) => inFarCorner(c.slot, c.point));
+      if (corner) {
+        const { slot, point } = corner;
+        return { by: `corner-${side(slot)}`, fix: { x: point.x, y: point.y, source: side(slot) } };
+      }
+    }
+    if (tuning.columnLock) {
+      const lock = columnLock(steadiest, now);
+      if (lock) return lock;
+    }
+    if (tuning.loneNode && points.length === 1) {
+      const { slot, point } = points[0];
+      return { by: side(slot), fix: { x: point.x, y: point.y, source: side(slot) } };
+    }
+    return null;
   }
 
   // --- Which method places the player ----------------------------------------
@@ -2188,10 +2287,11 @@
   //   fixes:      { dyn, los, tri, avg } - every method's position, see
   //               solvePositions(), dynamicLeader() and dynamicRule(),
   //   method:     the method switched on,
-  //   placedBy:   "los" | "tri" | "avg" | "centre" | "left" | "right" - where
-  //               the position above came from: the method switched on, or,
-  //               with Dynamic on, the centre rule ("centre"), a lone
-  //               confident node ("left" / "right") or the steadiest method,
+  //   placedBy:   where the position above came from: the method switched
+  //               on ("los" | "tri" | "avg"), or, with Dynamic on, one of its
+  //               rules (dynamicRule(): "corner-left" | "corner-right" |
+  //               "centre" | "lock-left" | "lock-right" | "left" | "right")
+  //               or the steadiest method,
   //   depth:      [l, c, r] each node's own depth reading (filtered distance to
   //               the middle of the player, bodyCentreCm(), turned by its servo
   //               angle) - what corner calibration captures,
@@ -3077,8 +3177,13 @@
     avg: { label: "Average", short: "AVG", colour: "#f8fafc" },
   };
   // What the control panel's Dynamic button says when one of its rules places
-  // the player (dynamicRule()): the centre rule, or a lone confident node.
-  const DYNAMIC_RULE_SHORT = { centre: "MID", left: "L", right: "R" };
+  // the player (dynamicRule()): a far corner, the column lock, or a lone
+  // confident node.
+  const DYNAMIC_RULE_SHORT = {
+    "corner-left": "A1", "corner-right": "A3",
+    centre: "MID", "lock-left": "COL L", "lock-right": "COL R",
+    left: "L", right: "R",
+  };
   // The scanner's state (src/scanning.cpp): both sensors agree, one sees the
   // player, or it is sweeping for them.
   const SCAN_STATE_NAMES = { 0: "found", 1: "half", 2: "lost" };

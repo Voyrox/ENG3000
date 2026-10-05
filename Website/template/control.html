@@ -57,6 +57,20 @@
     </section>
 
     <section>
+        <h2>Dynamic's rules <small>checked in this order</small></h2>
+        <div class="row">
+            <button data-rule="cornerNode">Far corners: on</button>
+            <button data-rule="columnLock">Column lock: on</button>
+            <button data-rule="loneNode">Lone node: on</button>
+        </div>
+        <p class="note">Far corners: in A1 (back left) or A3 (back right), the near node places the player
+            on its own when it is sure of them (Dynamic says A1 / A3). Column lock: where the two servo
+            lines cross says the column - the centre (held 1 s), or at least 20 cm into a side column
+            (MID, COL L, COL R). Lone node: when only one node is sure of the player, it places them on
+            its own (L, R).</p>
+    </section>
+
+    <section>
         <h2>Out of bounds <small>readings per node</small></h2>
         <div class="row">
             <button id="lostLess" aria-label="Fewer readings">&minus;</button>
@@ -229,6 +243,17 @@
             });
         });
 
+        // Dynamic's rule switches: each press flips one (on until the game
+        // says otherwise).
+        const RULE_LABELS = { cornerNode: "Far corners", columnLock: "Column lock", loneNode: "Lone node" };
+        const ruleOn = (name) => !(game && game.dynamicRules && game.dynamicRules[name] === false);
+        document.querySelectorAll("[data-rule]").forEach((btn) => {
+            btn.addEventListener("click", () => {
+                const name = btn.dataset.rule;
+                send({ action: "dynamicRules", rules: { [name]: !ruleOn(name) } });
+            });
+        });
+
         document.querySelectorAll("[data-action]").forEach((btn) => {
             btn.addEventListener("click", () => {
                 const action = btn.dataset.action;
@@ -248,7 +273,8 @@
         // game sends the methods it has, and the one in use, with its status,
         // so a new method shows up here without changing this page. While
         // Dynamic is on its button says what it is following, as the game's
-        // own button did (dynamicFollowing: LOS, TRI, AVG, MID, L or R).
+        // own button did (dynamicFollowing: LOS, TRI, AVG, or a rule - A1, A3,
+        // MID, COL L, COL R, L or R).
         const DEFAULT_POSITION_METHODS = [
             { id: "dyn", label: "Dynamic" },
             { id: "los", label: "Line of sight" },
@@ -340,6 +366,11 @@
             $("compareBtn").classList.toggle("selected", game.compare !== false);
             $("kalmanBtn").textContent = `Kalman: ${game.kalman === false ? "off" : "on"}`;
             $("kalmanBtn").classList.toggle("selected", game.kalman === false);
+            document.querySelectorAll("[data-rule]").forEach((btn) => {
+                const on = ruleOn(btn.dataset.rule);
+                btn.textContent = `${RULE_LABELS[btn.dataset.rule]}: ${on ? "on" : "off"}`;
+                btn.classList.toggle("selected", on);
+            });
             document.querySelectorAll("[data-mode]").forEach((btn) => {
                 btn.classList.toggle("selected", btn.dataset.mode === game.mode);
             });

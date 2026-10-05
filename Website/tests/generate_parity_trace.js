@@ -227,12 +227,27 @@ function buildStream() {
   //     furniture. It is not the player, so it does not place them alone.
   for (let i = 0; i < 60; i++) push([jitter(27, 1), 160, 0], [jitter(150, 2), 60, 1]);
 
+  // 24. The side lock: both scanners find the player deep in the left column
+  //     (15 cm across), where the servo lines cross more than
+  //     tuning.sideLockDepthCm inside it; then deep in the right column; then
+  //     near the left-hand column boundary (40 cm), where there is no lock.
+  for (let i = 0; i < 50; i++) push(scanned(SENSOR_X_CM[0], 15, 80), scanned(SENSOR_X_CM[1], 15, 80));
+  for (let i = 0; i < 50; i++) push(scanned(SENSOR_X_CM[0], 135, 80), scanned(SENSOR_X_CM[1], 135, 80));
+  for (let i = 0; i < 50; i++) push(scanned(SENSOR_X_CM[0], 40, 80), scanned(SENSOR_X_CM[1], 40, 80));
+
+  // 25. The far corners: the left scanner finds the player in A1 (the far-left
+  //     square) while the right one is acting up - it finds something in the
+  //     centre, near the screen - so the left node alone places the player.
+  //     Then the same in A3 with the left scanner acting up.
+  for (let i = 0; i < 50; i++) push(scanned(SENSOR_X_CM[0], 25, 125), scanned(SENSOR_X_CM[1], 75, 50));
+  for (let i = 0; i < 50; i++) push(scanned(SENSOR_X_CM[0], 75, 50), scanned(SENSOR_X_CM[1], 125, 125));
+
   return steps;
 }
 
 // --- Run the real JS -----------------------------------------------------------
 
-function runJs(stream, calibration, method, kalman = true) {
+function runJs(stream, calibration, method, kalman = true, dynamicRules = null) {
   let clock = 0;
   const context = {
     console,
@@ -268,6 +283,7 @@ function runJs(stream, calibration, method, kalman = true) {
 
   w.setPositionMethod(method);
   w.setKalman(kalman);
+  if (dynamicRules) w.setDynamicRules(dynamicRules);
   w.setGameInputMode("sensor");
   w.resetGame();
   const canvas = { clientWidth: 1280, clientHeight: 720, width: 1280, height: 720 };
@@ -321,6 +337,7 @@ const FIELDS = ["status", "gx", "gy", "rawGx", "rawGy", "column", "held", "heldF
   "fresh", "x", "y"];
 
 const stream = buildStream();
+const RULES_OFF = { columnLock: false, loneNode: false, cornerNode: false };
 // [near, far] per column; the centre entry is ignored (no centre sensor to capture it).
 const calibrated = [[28.47, 140.68], [20.44, 138.26], [10.89, 145.81]];
 
@@ -341,6 +358,8 @@ const trace = {
     dynamicCalibrated: { method: "dyn", ...runJs(stream, calibrated, "dyn") },
     kalmanOff: { method: "los", kalman: false, ...runJs(stream, null, "los", false) },
     kalmanOffDynamic: { method: "dyn", kalman: false, ...runJs(stream, null, "dyn", false) },
+    // Dynamic with all three of its rules switched off: the steadiest method only.
+    dynamicRulesOff: { method: "dyn", dynamicRules: RULES_OFF, ...runJs(stream, null, "dyn", true, RULES_OFF) },
   },
 };
 

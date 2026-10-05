@@ -88,8 +88,10 @@ CONTROL_ENABLED = os.environ.get("CON") == "1"
 # "lostReadings" sets how many readings each node's lost score is taken over
 # (Out of bounds when both nodes are lost).
 # "kalman" turns the game's Kalman filters on or off.
+# "dynamicRules" turns Dynamic's rules on or off (the far corners, the column
+# lock, a lone node).
 CONTROL_ACTIONS = {"point", "release", "start", "mode", "pause", "resume", "restart", "menu", "testMode",
-                   "position", "compare", "lostReadings", "kalman"}
+                   "position", "compare", "lostReadings", "kalman", "dynamicRules"}
 # Every raw node reading to logs/raw-*.csv, for the bench noise test
 # (tools/bench_noise.py). Off unless started with REC=1; see sessionRecorder.py.
 recorder = SessionRecorder.from_env(os.environ)
@@ -780,6 +782,9 @@ def apply_filter_event(event):
             elif event.get("type") == "filter:kalman":
                 # The control panel's Kalman switch, passed on by the game.
                 server_filter.set_kalman(bool(event["on"]))
+            elif event.get("type") == "sensor:dynamicRules":
+                # Dynamic's rule switches, from the control panel by way of the game.
+                server_filter.set_dynamic_rules(event["rules"])
     except (KeyError, TypeError, ValueError) as exc:
         print(f"Ignored bad {event.get('type')} message: {exc}")
 

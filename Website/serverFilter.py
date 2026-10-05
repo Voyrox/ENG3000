@@ -25,6 +25,7 @@ import dataclasses
 from typing import Optional, Sequence
 
 from filterRules import (
+    DYNAMIC_RULE_SWITCHES,
     GRID_SIZE,
     LOST_READINGS_MAX,
     CoordinatePipeline,
@@ -108,6 +109,18 @@ class ServerFilterStage:
         if not hasattr(self.pipeline.geometry, "method"):
             raise ValueError("this geometry has no position methods")
         self.pipeline.geometry.method = method
+
+    def set_dynamic_rules(self, rules) -> None:
+        """Dynamic's rule switches from the game's control panel
+        (setDynamicRules(): columnLock, loneNode, cornerNode -> FilterConfig
+        column_lock, lone_node, corner_node). Only the switches named change.
+        ValueError for an unknown switch or a value that is not true/false."""
+        changes = {}
+        for name, on in dict(rules).items():
+            if name not in DYNAMIC_RULE_SWITCHES or not isinstance(on, bool):
+                raise ValueError(f"not a rule switch: {name}={on!r}")
+            changes[DYNAMIC_RULE_SWITCHES[name]] = on
+        self.pipeline.config = dataclasses.replace(self.pipeline.config, **changes)
 
     def set_kalman(self, on: bool) -> None:
         """The game's Kalman switch: both Kalman filters on or off

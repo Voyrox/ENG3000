@@ -35,6 +35,7 @@ from filterRules import (  # noqa: E402
     CellStabiliser,
     ChannelFilter,
     CoordinatePipeline,
+    DYNAMIC_RULE_SWITCHES,
     DynamicPicker,
     FilterConfig,
     LOST_READINGS_MAX,
@@ -72,8 +73,12 @@ class ParityWithGameJs(unittest.TestCase):
         fields = self.trace["fields"]
         area = (PlayArea.calibrated(run["calibration"]) if run["calibration"]
                 else PlayArea.default())
+        # Dynamic's rule switches, as the run set them (setDynamicRules()).
+        switches = run.get("dynamicRules") or {}
+        config = FilterConfig(kalman=run.get("kalman", True),
+                              **{DYNAMIC_RULE_SWITCHES[name]: on for name, on in switches.items()})
         pipeline = CoordinatePipeline(TwoSensorGeometry(method=run["method"]), area=area,
-                                      config=FilterConfig(kalman=run.get("kalman", True)))
+                                      config=config)
 
         # A node that is "silent" for a step sent nothing: its last reading
         # stands, as the server keeps it, and the recorded fresh mask (what
@@ -152,6 +157,11 @@ class ParityWithGameJs(unittest.TestCase):
         self.assertGreater(smoothing, 50, "the distances should differ without the Kalman")
         self.assertGreater(placed, 50, "line of sight should place the player differently")
 
+    def test_dynamic_with_its_rules_switched_off(self):
+        self.assertGreater(self._replay("dynamicRulesOff"), 0)
+        followed = set(self.trace["runs"]["dynamicRulesOff"]["placedBy"]) - {None}
+        self.assertLessEqual(followed, {"los", "tri", "avg"})
+
     def test_dynamic_follows_every_method_and_rule_somewhere_on_the_recorded_stream(self):
         # Otherwise the parity above would not show the picker and the rules
         # agreeing. Since the centre hold, the centre rule takes the stretches
@@ -159,7 +169,8 @@ class ParityWithGameJs(unittest.TestCase):
         # methods are required (DynamicPickerBehaviour covers the average).
         for run in ("dynamic", "dynamicCalibrated"):
             followed = set(self.trace["runs"][run]["placedBy"]) - {None}
-            self.assertLessEqual({"centre", "left", "right"}, followed, run)
+            self.assertLessEqual({"corner-left", "corner-right", "centre", "lock-left",
+                                  "lock-right", "left", "right"}, followed, run)
             self.assertGreaterEqual(len(followed & {"los", "tri", "avg"}), 2, run)
 
     def test_the_methods_really_differ_on_the_recorded_stream(self):
@@ -565,13 +576,15 @@ class DynamicPositionMethod(unittest.TestCase):
             TwoSensorGeometry(method="steady")
 
     def test_the_position_is_the_one_dynamic_follows(self):
-        # In the left column, seen by both nodes: neither of Dynamic's rules
-        # applies (the servo lines cross in the left column, and both nodes
-        # are confident), so it follows the steadiest method.
+        # In the left column near its boundary with the centre, seen by both
+        # nodes: none of Dynamic's rules applies (the servo lines cross in
+        # the left column but not tuning's 20 cm inside it, both nodes are
+        # confident, and it is not a far corner), so it follows the steadiest
+        # method.
         pipe = CoordinatePipeline(TwoSensorGeometry(method="dyn"))
         geometry = pipe.geometry
         for step in range(40):
-            got = pipe.update(scanner_sample(28.0 + (step % 3), 90.0), step * 50.0)
+            got = pipe.update(scanner_sample(38.0 + (step % 3), 90.0), step * 50.0)
             fixes = geometry.fixes(got.filtered, pipe.area)
             follows = geometry.placed_by(got.filtered, pipe.area)
             self.assertIn(follows, ("los", "tri", "avg"), step)
@@ -639,17 +652,24 @@ class DynamicRules(unittest.TestCase):
         self.assertEqual(by, "centre")
         self.assertEqual((fix.x_cm, fix.column), (50.0 + self.config.column_margin_cm, 1))
 
+    # The lone-node tests stand the player 40 cm across: the left node's line
+    # and the furniture's then cross at 48 cm, short of the centre and not
+    # deep in the left column, so the column lock stays out of it.
+    LONE = (40.0, 85.0)
+
     def test_a_lone_confident_node_places_the_player_by_itself(self):
         geometry = TwoSensorGeometry()
-        left = scanner_sample(25.0, 85.0)[0]
+        left = scanner_sample(*self.LONE)[0]
         for k in range(2):
             fix, by = self.scan(geometry, [left, None, self.FURNITURE], 50.0 * k)
         self.assertEqual(by, "left")
-        self.assertEqual((fix.x_cm, fix.y_cm, fix.column), (25.0, 85.0, 0))
+        self.assertAlmostEqual(fix.x_cm, 40.0)
+        self.assertAlmostEqual(fix.y_cm, 85.0)
+        self.assertEqual(fix.column, 0)
 
     def test_one_reading_that_found_the_player_is_not_confident(self):
         geometry = TwoSensorGeometry()
-        left = scanner_sample(25.0, 85.0)[0]
+        left = scanner_sample(*self.LONE)[0]
         self.scan(geometry, [(left[0], left[1], 1), None, self.FURNITURE], 0.0)
         _, by = self.scan(geometry, [left, None, self.FURNITURE], 50.0)
         self.assertNotEqual(by, "left")
@@ -658,7 +678,7 @@ class DynamicRules(unittest.TestCase):
 
     def test_confidence_lasts_through_the_other_nodes_turn_then_lapses(self):
         geometry = TwoSensorGeometry()
-        left = scanner_sample(25.0, 85.0)[0]
+        left = scanner_sample(*self.LONE)[0]
         for k in range(2):
             self.scan(geometry, [left, None, self.FURNITURE], 50.0 * k)
         # Only the right node reports now; the left node's last reading is
@@ -672,9 +692,10 @@ class DynamicRules(unittest.TestCase):
         self.assertNotEqual(by, "left")
 
     def test_both_nodes_confident_follow_the_steadiest_method(self):
+        # In the right column, short of the side lock's 20 cm.
         geometry = TwoSensorGeometry()
         for k in range(5):
-            _, by = self.scan(geometry, scanner_sample(130.0, 90.0), 50.0 * k)
+            _, by = self.scan(geometry, scanner_sample(110.0, 90.0), 50.0 * k)
         self.assertIn(by, ("los", "tri", "avg"))
 
     def test_the_centre_rule_comes_before_a_lone_confident_node(self):
@@ -752,6 +773,79 @@ class DynamicRules(unittest.TestCase):
         for k in range(3):
             _, by = self.scan(geometry, [(112.0, 59, 0), None, self.FURNITURE], 50.0 * k)
         self.assertNotEqual(by, "left")
+
+    # --- the side lock, the far corners and the switches (Aaron, 5 Oct) ---
+
+    def test_servo_lines_crossing_deep_in_a_side_column_lock_it(self):
+        for x, by_want, column in ((15.0, "lock-left", 0), (135.0, "lock-right", 2)):
+            geometry = TwoSensorGeometry()
+            for k in range(3):
+                fix, by = self.scan(geometry, scanner_sample(x, 80.0), 50.0 * k)
+            self.assertEqual((by, fix.column), (by_want, column), x)
+            self.assertAlmostEqual(fix.x_cm, x)
+
+    def test_a_crossing_short_of_the_side_lock_depth_does_not_lock(self):
+        # 30 cm across is exactly 20 cm inside the left column: locked. 31 cm
+        # is not.
+        geometry = TwoSensorGeometry()
+        _, by = self.scan(geometry, scanner_sample(30.0, 80.0), 0.0)
+        self.assertEqual(by, "lock-left")
+        geometry = TwoSensorGeometry()
+        _, by = self.scan(geometry, scanner_sample(31.0, 80.0), 0.0)
+        self.assertNotEqual(by, "lock-left")
+
+    def test_a_deep_side_crossing_ends_the_centre_hold(self):
+        geometry = TwoSensorGeometry()
+        for k in range(3):
+            self.scan(geometry, scanner_sample(75.0, 80.0), 50.0 * k)
+        _, by = self.scan(geometry, scanner_sample(15.0, 80.0), 150.0)
+        self.assertEqual(by, "lock-left")
+        # Back to near the boundary, well within the hold: the hold has ended,
+        # so it is not the centre again.
+        _, by = self.scan(geometry, scanner_sample(40.0, 80.0), 200.0)
+        self.assertNotEqual(by, "centre")
+
+    def test_the_near_node_alone_places_the_player_in_its_far_corner(self):
+        # A1 for the left node, A3 for the right, while the other node is
+        # acting up: it finds something in the centre near the screen.
+        for slot, spot, by_want, column in ((0, (25.0, 125.0), "corner-left", 0),
+                                            (2, (125.0, 125.0), "corner-right", 2)):
+            geometry = TwoSensorGeometry()
+            near = scanner_sample(*spot)[slot]
+            other = scanner_sample(75.0, 50.0)[2 - slot]
+            sample = [near, None, other] if slot == 0 else [other, None, near]
+            for k in range(3):
+                fix, by = self.scan(geometry, sample, 50.0 * k)
+            self.assertEqual((by, fix.column), (by_want, column), by_want)
+            self.assertAlmostEqual(fix.x_cm, spot[0])
+            self.assertAlmostEqual(fix.y_cm, spot[1])
+
+    def test_the_corner_needs_the_far_row(self):
+        # The left node finds the player in the left column's middle row: not
+        # A1, so the corner rule stays out of it.
+        geometry = TwoSensorGeometry()
+        sample = [scanner_sample(25.0, 80.0)[0], None, scanner_sample(75.0, 50.0)[2]]
+        for k in range(3):
+            _, by = self.scan(geometry, sample, 50.0 * k)
+        self.assertNotEqual(by, "corner-left")
+
+    def test_each_rule_has_a_switch(self):
+        corner = [scanner_sample(25.0, 125.0)[0], None, scanner_sample(75.0, 50.0)[2]]
+        lone = [scanner_sample(*self.LONE)[0], None, self.FURNITURE]
+        cases = (("corner_node", corner, "corner-left"),
+                 ("column_lock", scanner_sample(75.0, 80.0), "centre"),
+                 ("column_lock", scanner_sample(15.0, 80.0), "lock-left"),
+                 ("lone_node", lone, "left"))
+        for switch, sample, by_on in cases:
+            for on in (True, False):
+                self.config = FilterConfig(**{switch: on})
+                geometry = TwoSensorGeometry()
+                for k in range(3):
+                    _, by = self.scan(geometry, sample, 50.0 * k)
+                if on:
+                    self.assertEqual(by, by_on, switch)
+                else:
+                    self.assertNotEqual(by, by_on, switch)
 
 
 class TwoSensorGeometryBehaviour(unittest.TestCase):

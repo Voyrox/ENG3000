@@ -229,6 +229,18 @@ class StageTwoSensorRig(unittest.TestCase):
         stage.set_kalman(True)
         self.assertTrue(stage.pipeline.config.kalman)
 
+    def test_dynamic_rule_switches_reach_the_config(self):
+        stage = ServerFilterStage()
+        stage.set_dynamic_rules({"columnLock": False})
+        config = stage.pipeline.config
+        self.assertEqual((config.column_lock, config.lone_node, config.corner_node), (False, True, True))
+        stage.set_dynamic_rules({"loneNode": False, "cornerNode": False, "columnLock": True})
+        config = stage.pipeline.config
+        self.assertEqual((config.column_lock, config.lone_node, config.corner_node), (True, False, False))
+        for bad in ({"selfDestruct": True}, {"loneNode": "off"}):
+            with self.assertRaises(ValueError):
+                stage.set_dynamic_rules(bad)
+
     def test_turn_discards_only_that_nodes_distance_history(self):
         stage = ServerFilterStage()
         stage.assign_slots([LEFT, None, RIGHT])
@@ -476,6 +488,16 @@ class AppWiring(unittest.TestCase):
         self.assertFalse(app.server_filter.pipeline.config.kalman)
         app.apply_filter_event({"type": "filter:kalman", "on": True})
         self.assertTrue(app.server_filter.pipeline.config.kalman)
+
+    def test_dynamic_rule_switches_reach_the_chain(self):
+        app.server_filter = ServerFilterStage()
+        app.apply_filter_event({"type": "sensor:dynamicRules", "rules": {"cornerNode": False}})
+        self.assertFalse(app.server_filter.pipeline.config.corner_node)
+        self.assertTrue(app.server_filter.pipeline.config.column_lock)
+        # A bad switch is ignored, as other bad messages are.
+        app.apply_filter_event({"type": "sensor:dynamicRules", "rules": {"cornerNode": "yes"}})
+        self.assertFalse(app.server_filter.pipeline.config.corner_node)
+        self.assertIn("dynamicRules", app.CONTROL_ACTIONS)
 
     def test_the_scan_state_reaches_the_chain(self):
         app.server_filter = ServerFilterStage()

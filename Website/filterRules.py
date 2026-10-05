@@ -168,6 +168,14 @@ class FilterConfig:
     centre_hold_ms: float = 1000.0
     confident_readings: int = 2
     confident_ms: float = 1500.0
+    # The side-column lock needs the servo lines to cross at least this far
+    # inside the left or right column (tuning.sideLockDepthCm). And each of
+    # Dynamic's rules on or off, from the control panel (tuning.columnLock,
+    # tuning.loneNode, tuning.cornerNode; serverFilter.set_dynamic_rules()).
+    side_lock_depth_cm: float = 20.0
+    column_lock: bool = True
+    lone_node: bool = True
+    corner_node: bool = True
 
     # Out of bounds, the only one the pipeline reports (Aaron, 5 Oct): both
     # nodes are lost, with no hold. A node is lost when its last lost_readings
@@ -719,6 +727,10 @@ EDGE_INSET = 0.1
 SENSOR_MIN_CM = 2.0
 SENSOR_MAX_CM = 400.0
 SCAN_FOUND = 0         # scanState: both heads hear the player
+# Dynamic's rule switches: the control panel's names (setDynamicRules() in
+# game.js) -> FilterConfig fields.
+DYNAMIC_RULE_SWITCHES = {"columnLock": "column_lock", "loneNode": "lone_node",
+                         "cornerNode": "corner_node"}
 SCAN_HALF = 1          # scanState: one head hears the player
 SCAN_LOST = 2         # scanState: sweeping, the player is not in its line of sight
 
@@ -1146,6 +1158,8 @@ class TwoSensorGeometry(Geometry):
         crossing = self._lines_crossing(area)
         if crossing is not None and self._in_centre_column(crossing[0], area):
             self._centre_held = (now_ms, crossing[0], crossing[1])
+        elif crossing is not None and self._deep_side_column(crossing[0], area) is not None:
+            self._centre_held = None
         self._dynamic.step(self._picked_from(filtered, area), now_ms, area)
 
     def _lost(self, slot, config) -> bool:
@@ -1210,19 +1224,42 @@ class TwoSensorGeometry(Geometry):
         pitch = area.width_cm / GRID_SIZE
         return pitch <= x_cm <= 2 * pitch
 
-    def _centre_crossing(self, area) -> Optional[tuple]:
-        """centreCrossing() in game.js: where the centre rule puts the player,
-        (x_cm, y_cm) - where the lines cross if that is in the centre column,
-        else where they last did so, within centre_hold_ms and while both
-        lines are recent - or None."""
+    def _deep_side_column(self, x_cm: float, area) -> Optional[int]:
+        """deepSideColumn() in game.js: the side column, LEFT or RIGHT, the
+        lines' crossing is at least side_lock_depth_cm inside (and on the
+        board), or None."""
+        config = self._config or FilterConfig()
+        pitch = area.width_cm / GRID_SIZE
+        if 0.0 <= x_cm <= pitch - config.side_lock_depth_cm:
+            return self.LEFT
+        if 2 * pitch + config.side_lock_depth_cm <= x_cm <= area.width_cm:
+            return self.RIGHT
+        return None
+
+    def _column_lock(self, area, steadiest: Optional[tuple]) -> Optional[tuple]:
+        """columnLock() in game.js: ("centre" | "lock-left" | "lock-right",
+        (x_cm, y_cm)) when the lines cross in the centre column, or deep in a
+        side column, or the centre is still held (centre_hold_ms, both lines
+        recent); otherwise None."""
         config = self._config or FilterConfig()
         crossing = self._lines_crossing(area)
+        pitch = area.width_cm / GRID_SIZE
+
+        def centre(x, y):
+            return "centre", (_clamp(x, pitch + config.column_margin_cm,
+                                     2 * pitch - config.column_margin_cm),
+                              steadiest[1] if steadiest else y)
+
         if crossing is not None and self._in_centre_column(crossing[0], area):
-            return crossing
+            return centre(*crossing)
+        side = None if crossing is None else self._deep_side_column(crossing[0], area)
+        if side is not None:
+            return (("lock-left" if side == self.LEFT else "lock-right"),
+                    (crossing[0], steadiest[1] if steadiest else crossing[1]))
         held = self._centre_held
         if (held is not None and self._now_ms - held[0] <= config.centre_hold_ms
                 and self._lines_recent()):
-            return held[1], held[2]
+            return centre(held[1], held[2])
         return None
 
     def _confident_point(self, slot, filtered, area) -> Optional[tuple]:
@@ -1242,37 +1279,55 @@ class TwoSensorGeometry(Geometry):
         near, far = area.per_column[area.column_at(x)]
         return (x, y) if near <= y <= far else None
 
+    def _in_far_corner(self, slot, point, area) -> bool:
+        """inFarCorner() in game.js: whether a node's own reading puts the
+        player in its far corner - A1, the far-left square, for the left
+        node; A3, the far-right one, for the right."""
+        column = 0 if slot == self.LEFT else GRID_SIZE - 1
+        return (area.column_at(point[0]) == column
+                and area.row_for(column, point[1]) == GRID_SIZE - 1)
+
     def _rule(self, filtered, area, steadiest: Optional[tuple]) -> Optional[tuple]:
         """dynamicRule() in game.js: the rule placing the player for Dynamic,
-        ("centre" | "left" | "right", (x_cm, y_cm)), or None to follow the
-        steadiest method, whose position is `steadiest`. Checked in order
-        (Aaron, 5 Oct):
+        (placed_by, (x_cm, y_cm)), or None to follow the steadiest method,
+        whose position is `steadiest`. Checked in order (Aaron, 5 Oct), each
+        with its switch in FilterConfig:
 
-        1. The centre (_centre_crossing()): both nodes' servo lines, each from
-           its last reading that found or half-found the player within
-           centre_seen_ms, cross inside the centre column - or did within
-           centre_hold_ms, while both lines are still recent. x is the
-           crossing's, kept column_margin_cm inside the column so the column
-           hysteresis cannot hold the player in the column they came from; y
-           is the steadiest method's, or the crossing's when no method has a
-           position.
-        2. A lone confident node (_confident_point()): its distance along its
-           servo line places the player, and the other node is left out. When
-           both are confident, the steadiest method places the player."""
+        1. corner_node - the near node in its far corner: a confident node
+           (_confident_point()) whose own reading puts the player in A1 (the
+           left node) or A3 (the right) places them alone ("corner-left" /
+           "corner-right").
+        2. column_lock (_column_lock()) - the servo lines cross in the centre
+           column ("centre"), or at least side_lock_depth_cm inside a side
+           column ("lock-left" / "lock-right"); or the centre is held for
+           centre_hold_ms after they last crossed in it, while both lines are
+           recent. x is the crossing's (kept column_margin_cm inside the
+           centre column), y the steadiest method's, or the crossing's when
+           no method has a position.
+        3. lone_node - a lone confident node: its distance along its servo
+           line places the player ("left" / "right"), and the other node is
+           left out. When both are confident, the steadiest method places the
+           player."""
         config = self._config or FilterConfig()
-        crossing = self._centre_crossing(area)
-        if crossing is not None:
-            pitch = area.width_cm / GRID_SIZE
-            x = _clamp(crossing[0], pitch + config.column_margin_cm,
-                       2 * pitch - config.column_margin_cm)
-            return "centre", (x, steadiest[1] if steadiest else crossing[1])
         points = [(slot, self._confident_point(slot, filtered, area))
                   for slot in (self.LEFT, self.RIGHT)]
         points = [(slot, point) for slot, point in points if point is not None]
-        if len(points) != 1:
-            return None
-        slot, point = points[0]
-        return ("left" if slot == self.LEFT else "right"), point
+
+        def side(slot):
+            return "left" if slot == self.LEFT else "right"
+
+        if config.corner_node:
+            for slot, point in points:
+                if self._in_far_corner(slot, point, area):
+                    return f"corner-{side(slot)}", point
+        if config.column_lock:
+            lock = self._column_lock(area, steadiest)
+            if lock is not None:
+                return lock
+        if config.lone_node and len(points) == 1:
+            slot, point = points[0]
+            return side(slot), point
+        return None
 
     def _dynamic_pick(self, picked_from: dict, filtered, area) -> tuple:
         """What Dynamic follows and where: (placedBy, (x_cm, y_cm) or None)."""
