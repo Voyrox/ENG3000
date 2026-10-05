@@ -12,13 +12,23 @@ player." He chose (6 Oct):
     the player, then goes to the cell, then sweeps;
   - the server re-sends LOOK, with no firmware change.
 
-The cell. The game's cell confidence map (cells:confidence, nine scores,
-index gx * 3 + gy; uni-2026-s2-ea's agent/cell-confidence) says how likely
-each cell is to hold the player; the search goes to the highest. Ties go to
-the cell the game shows. Until the map arrives, or while every score is 0,
-the target is the cell the game last showed this round (game:status's
-cursor). No round on screen, or no game page: no target, and the node
-sweeps as it always has, asking again at each lost reading.
+The cell (Aaron's pick in uni-2026-s2-0c's session, 6 Oct): the cell both
+nodes' found and half-found readings put the player in most often over the
+last ~3 s before the loss - robust to one bad reading just before it, and
+not the cursor's cell, which lags. Each such reading is one vote for the
+cell its own point is in (the node's distance plus the body radius, along
+its servo angle: scanner_point(), body_centre_cm()); points off the board
+vote for nothing. The votes counted are those from WINDOW_S before the
+latest one, so a loss of both nodes keeps the memory; ties go to the cell
+voted for last. With no vote in the last TARGET_MAX_AGE_S there is no
+target, and a lost node sweeps as it always has, asking again at each lost
+reading (the other node may find the player meanwhile).
+
+A moving player (Aaron's other pick there): the cell they were walking into,
+from the game's position track (track:update; heading.py, uni-2026-s2-0c),
+whenever heading_target() gives one - the track is fresh and the game says
+they are moving. Otherwise the cell above. The Heading switch turns this
+part off.
 
 A search, for one node:
   1. Its first lost reading starts it. After a far echo (FAR_RANGE_CM or
@@ -51,18 +61,20 @@ apart from the shared geometry.
 
 from __future__ import annotations
 
-import math
+from collections import Counter, deque
 from dataclasses import dataclass
 from typing import Dict, Optional, Sequence, Tuple
 
-from filterRules import GRID_SIZE, PlayArea
+from filterRules import GRID_SIZE, FilterConfig, PlayArea, body_centre_cm, scanner_point
 from handover import ROOM_LEARNING, bearing_deg, node_x_cm
+from heading import Track, heading_target
 
 CHECK_READINGS = 3        # lost readings at the cell before the node is left to sweep
 AT_CELL_DEG = 1           # a reading this close to the LOOK's angle was read at the cell
 LOOK_RETRY_S = 0.5        # re-send a LOOK not yet acted on after this long
 SEARCH_TIMEOUT_S = 5.0    # a search that has not finished by then is given up
-GAME_FRESH_S = 2.0        # no game:status for this long: the game page is gone
+WINDOW_S = 3.0            # the votes counted: this long before the latest one
+TARGET_MAX_AGE_S = 10.0   # no vote for this long: nowhere to look
 
 # src/Config.h: the far hold, and each mount's servo limits (min, max).
 FAR_RANGE_CM = 100.0
@@ -71,6 +83,9 @@ SERVO_LIMITS = {"LEFT": (40, 160), "RIGHT": (30, 140)}
 
 # Scan states, as the firmware reports them (app.py parse_scan_state()).
 FOUND, HALF_FOUND, LOST = 0, 1, 2
+
+# The body radius each distance falls short of the player's middle by.
+_CONFIG = FilterConfig()
 
 ROW_NAMES = ("front", "middle", "back")
 COLUMN_NAMES = ("left", "centre", "right")
@@ -89,6 +104,7 @@ class SearchLook:
     degrees: int
     cell: Tuple[int, int]
     checks: int               # lost readings already taken at the cell
+    by: str = "readings"      # "readings" (a still player) or "heading" (a moving one)
 
     @property
     def command(self) -> str:
@@ -96,7 +112,7 @@ class SearchLook:
 
 
 class _Node:
-    __slots__ = ("last_echo_cm", "lost_streak", "state", "cell", "target_deg",
+    __slots__ = ("last_echo_cm", "lost_streak", "state", "cell", "by", "target_deg",
                  "checks", "started_at", "look_sent_at")
 
     def __init__(self):
@@ -104,6 +120,7 @@ class _Node:
         self.lost_streak = 0       # lost readings in a row
         self.state = "ready"       # "ready" | "checking" | "sweeping"
         self.cell = None           # the cell being checked
+        self.by = None             # how it was chosen: "readings" or "heading"
         self.target_deg = None     # the LOOK's angle
         self.checks = 0
         self.started_at = None
@@ -111,63 +128,74 @@ class _Node:
 
     def ready(self):
         self.state = "ready"
-        self.cell = self.target_deg = self.started_at = self.look_sent_at = None
+        self.cell = self.by = self.target_deg = self.started_at = self.look_sent_at = None
         self.checks = 0
 
 
 class Search:
-    def __init__(self, enabled: bool = True, area: Optional[PlayArea] = None):
+    def __init__(self, enabled: bool = True, area: Optional[PlayArea] = None,
+                 heading: bool = True):
         self.enabled = enabled
+        self.heading = heading       # a moving player: where they were heading
         self.area = area or PlayArea.default()
         self._nodes: Dict[int, _Node] = {}
-        self._scores: Optional[Tuple[float, ...]] = None
-        self._shown_cell: Optional[Tuple[int, int]] = None
-        self._game_at: Optional[float] = None    # the latest game:status with a round on screen
+        self._votes = deque()        # (t_s, (gx, gy)), oldest first
+        self._track: Optional[Track] = None
 
-    # --- What the game says ---------------------------------------------------------
-
-    def game_status(self, cursor: Optional[dict], now_s: float) -> None:
-        """game:status's cursor: None with no round on screen. The cell is
-        the sensor cursor's (gx, gy), the cell the game shows."""
-        if not isinstance(cursor, dict):
-            self._game_at = None
-            self._shown_cell = None
-            return
-        self._game_at = now_s
-        sensor = cursor.get("sensor")
-        if isinstance(sensor, dict):
-            cell = (sensor.get("gx"), sensor.get("gy"))
-            if all(isinstance(v, int) and not isinstance(v, bool) and 0 <= v < GRID_SIZE
-                   for v in cell):
-                self._shown_cell = cell
-
-    def set_scores(self, scores: Sequence[float]) -> None:
-        """cells:confidence: nine scores, index gx * GRID_SIZE + gy."""
-        values = tuple(float(s) for s in scores)
-        if len(values) != GRID_SIZE * GRID_SIZE or not all(math.isfinite(v) for v in values):
-            raise ValueError(f"need {GRID_SIZE * GRID_SIZE} finite scores")
-        self._scores = values
+    # --- Where the player was -------------------------------------------------------
 
     def set_calibration(self, per_column: Sequence[tuple]) -> None:
         """calibration:update's (near, far) per column, for the cells' depths."""
         self.area = PlayArea.calibrated(per_column, self.area.width_cm)
 
+    def set_track(self, track: Optional[Track]) -> None:
+        """The game's position track (heading.track_from_event())."""
+        self._track = track
+
     def reset(self) -> None:
         """A new round: nothing from the last one says where the player is."""
-        self._scores = None
-        self._shown_cell = None
+        self._votes.clear()
+        self._track = None
         for node in self._nodes.values():
             node.ready()
 
-    def target_cell(self, now_s: float) -> Optional[Tuple[int, int]]:
-        """The cell a lost node checks, or None with no round on screen."""
-        if self._game_at is None or now_s - self._game_at > GAME_FRESH_S:
+    def cell_of(self, role: str, distance_cm: float,
+                angle_deg: float) -> Optional[Tuple[int, int]]:
+        """The cell a node's reading puts the player in, or None off the board."""
+        x, y = scanner_point(node_x_cm(role, self.area), body_centre_cm(distance_cm, _CONFIG),
+                             angle_deg)
+        if not self.area.contains_point(x, y):
             return None
-        if self._scores is not None and max(self._scores) > 0:
-            best = max(self._scores)
-            tied = [divmod(i, GRID_SIZE) for i, s in enumerate(self._scores) if s == best]
-            return self._shown_cell if self._shown_cell in tied else tied[0]
-        return self._shown_cell
+        column = self.area.column_at(x)
+        return column, self.area.row_for(column, y)
+
+    def _vote(self, cell: Tuple[int, int], now_s: float) -> None:
+        self._votes.append((now_s, cell))
+        while self._votes and now_s - self._votes[0][0] > TARGET_MAX_AGE_S + WINDOW_S:
+            self._votes.popleft()
+
+    def target(self, now_s: float) -> Optional[Tuple[Tuple[int, int], str]]:
+        """The cell a lost node checks and how it was chosen: where a moving
+        player was heading ("heading"), else the cell of target_cell()
+        ("readings"); None with neither."""
+        if self.heading:
+            cell = heading_target(self._track, now_s, self.area)
+            if cell is not None:
+                return cell, "heading"
+        cell = self.target_cell(now_s)
+        return None if cell is None else (cell, "readings")
+
+    def target_cell(self, now_s: float) -> Optional[Tuple[int, int]]:
+        """The cell the readings put a still player in: the one voted for most
+        in the WINDOW_S up to the latest vote, ties to the latest; None with
+        no vote in the last TARGET_MAX_AGE_S."""
+        if not self._votes or now_s - self._votes[-1][0] > TARGET_MAX_AGE_S:
+            return None
+        latest = self._votes[-1][0]
+        recent = [cell for t, cell in self._votes if t >= latest - WINDOW_S]
+        counts = Counter(recent)
+        best = max(counts.values())
+        return next(cell for cell in reversed(recent) if counts[cell] == best)
 
     def cell_centre(self, cell: Tuple[int, int]) -> Tuple[float, float]:
         gx, gy = cell
@@ -201,24 +229,32 @@ class Search:
 
     def record(self, node_id: int, role: Optional[str], state: Optional[int],
                distance_cm: Optional[float], angle_deg: Optional[float], now_s: float,
-               room: Optional[int] = None, far_hold: bool = True,
-               held: bool = False) -> Optional[SearchLook]:
+               room: Optional[int] = None, far_hold: bool = True, held: bool = False,
+               echo_cm: Optional[float] = None) -> Optional[SearchLook]:
         """One reading from a node; returns the LOOK to send, if any.
 
         state is the firmware's scan state (None from firmware that does not
         say: then an echo is found and no echo is lost). distance_cm is the
-        nearer of its two sensors' echoes, which the far hold goes by
-        (app.py parse_nearest_echo_cm()). far_hold is the Far hold switch,
-        held is calibration holding the servos at 90.
+        distance it reported, which places its vote; echo_cm is the nearer of
+        its two sensors' echoes, which the far hold goes by (app.py
+        parse_nearest_echo_cm(); distance_cm when not given). far_hold is the
+        Far hold switch, held is calibration holding the servos at 90.
         """
         node = self._nodes.setdefault(node_id, _Node())
+        if echo_cm is None:
+            echo_cm = distance_cm
         if state is None:
             state = LOST if distance_cm is None or distance_cm <= 0 else FOUND
 
         if state != LOST:
-            node.last_echo_cm = distance_cm
+            node.last_echo_cm = echo_cm
             node.lost_streak = 0
             node.ready()
+            if (not held and room != ROOM_LEARNING and SERVO_LIMITS.get(role) is not None
+                    and angle_deg is not None and distance_cm is not None and distance_cm > 0):
+                cell = self.cell_of(role, distance_cm, angle_deg)
+                if cell is not None:
+                    self._vote(cell, now_s)
             return None
 
         node.lost_streak += 1
@@ -230,14 +266,14 @@ class Search:
         if node.state == "ready":
             if self._far_holding(node, role, angle_deg, far_hold):
                 return None
-            cell = self.target_cell(now_s)
-            if cell is None:
+            target = self.target(now_s)
+            if target is None:
                 # Nowhere to look yet: it sweeps, and its next lost reading
                 # asks again (the other node may have found the player).
                 return None
             node.state = "checking"
-            node.cell = cell
-            node.target_deg = self.bearing_to(role, cell)
+            node.cell, node.by = target
+            node.target_deg = self.bearing_to(role, node.cell)
             node.started_at = now_s
             node.checks = 0
 
@@ -258,7 +294,7 @@ class Search:
         node.look_sent_at = now_s
         node.last_echo_cm = None
         return SearchLook(node_id=node_id, degrees=node.target_deg, cell=node.cell,
-                          checks=node.checks)
+                          checks=node.checks, by=node.by)
 
     @staticmethod
     def _far_holding(node: _Node, role: str, angle_deg: float, far_hold: bool) -> bool:
@@ -284,4 +320,5 @@ class Search:
         if node.cell is not None:
             out["cell"] = list(node.cell)
             out["name"] = cell_name(node.cell)
+            out["by"] = node.by
         return out

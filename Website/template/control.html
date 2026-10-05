@@ -171,6 +171,7 @@
         <div class="row">
             <button id="handoverBtn">Handover: on</button>
             <button id="searchBtn">Search: on</button>
+            <button id="headingBtn">Heading: on</button>
             <button id="farHoldBtn">Far hold: on</button>
             <button id="farSteerBtn">Far steer: on</button>
         </div>
@@ -183,11 +184,13 @@
             at Dynamic's confidence level; "following n" is a node
             being aimed at node n's fix. Handover off: confidence is still worked out, but no
             node is aimed (no LOOK).</p>
-        <p class="note">Search: a node that loses the player is first aimed back at the cell they most
-            likely are in (the game's cell confidence, or the cell it shows), and only sweeps after 3
-            lost readings there; State says "checking" and the cell, then "sweeping" until it finds
-            someone. After a far echo the far hold comes first. Off: a lost node sweeps at once.
-            The server does it (LOOK), so it works on the firmware as flashed.</p>
+        <p class="note">Search: a node that loses the player is first aimed back at the cell both
+            nodes' readings put them in most often over the last 3 s, and only sweeps after 3 lost
+            readings there; State says "checking" and the cell, then "sweeping" until it finds
+            someone. After a far echo the far hold comes first. Heading: if the game says the
+            player was moving (the Tracking detector), the cell they were walking into instead
+            ("heading" in State). Off: a lost node sweeps at once. The server does it (LOOK), so
+            it works on the firmware as flashed.</p>
         <p class="note">Far hold: after an echo 100 cm or more out, a node keeps its servo still for up
             to 3 lost pairs before it sweeps (not at its servo's stop). Far steer: a half-found echo
             100 cm or more out steers the servo 1&deg; instead of 3&deg;. Both are in the nodes'
@@ -325,14 +328,17 @@
         // answers with handover:status.
         let handoverOn = true;
         $("handoverBtn").addEventListener("click", () => send({ action: "handover", enabled: !handoverOn }));
-        // So does Search, which answers with search:status.
-        let searchOn = true;
-        $("searchBtn").addEventListener("click", () => send({ action: "search", enabled: !searchOn }));
-        function renderSearch(on) {
-            if (typeof on !== "boolean") return;
-            searchOn = on;
-            $("searchBtn").textContent = `Search: ${on ? "on" : "off"}`;
-            $("searchBtn").classList.toggle("selected", !on);
+        // So do Search and its Heading, which answer with search:status.
+        let search = { on: true, heading: true };
+        $("searchBtn").addEventListener("click", () => send({ action: "search", enabled: !search.on }));
+        $("headingBtn").addEventListener("click", () => send({ action: "searchHeading", enabled: !search.heading }));
+        function renderSearch(status) {
+            if (!status || typeof status.on !== "boolean" || typeof status.heading !== "boolean") return;
+            search = { on: status.on, heading: status.heading };
+            $("searchBtn").textContent = `Search: ${search.on ? "on" : "off"}`;
+            $("searchBtn").classList.toggle("selected", !search.on);
+            $("headingBtn").textContent = `Heading: ${search.heading ? "on" : "off"}`;
+            $("headingBtn").classList.toggle("selected", !search.heading);
         }
         // Far hold and far steer go straight to the server, which tells the
         // nodes (FARHOLD / FARSTEER) and answers with far:status.
@@ -714,11 +720,13 @@
                 .join("");
         }
 
-        // A node's search (search.py): the cell it is checking and how many
-        // lost readings it has taken there, or sweeping after it.
-        function searchState(search) {
-            if (search.state === "checking") return `checking ${search.name} ${search.checks}/${search.of}`;
-            return search.name ? `sweeping (not in ${search.name})` : "sweeping";
+        // A node's search (search.py): the cell it is checking, why ("heading"
+        // for a moving player) and how many lost readings it has taken there,
+        // or sweeping after it.
+        function searchState(s) {
+            const by = s.by === "heading" ? " (heading)" : "";
+            if (s.state === "checking") return `checking ${s.name}${by} ${s.checks}/${s.of}`;
+            return s.name ? `sweeping (not in ${s.name})` : "sweeping";
         }
 
         // A node's confidence (handover.py): the score, and ± the spread of
@@ -750,7 +758,7 @@
                 } else if (payload.type === "handover:status") {
                     renderHandover(payload.on);
                 } else if (payload.type === "search:status") {
-                    renderSearch(payload.on);
+                    renderSearch(payload);
                 } else if (payload.type === "far:status") {
                     renderFar(payload);
                 }

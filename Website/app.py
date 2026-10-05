@@ -11,6 +11,7 @@ import numpy as np
 
 from filterRules import FilterConfig
 from handover import Handover
+from heading import track_from_event
 from search import CHECK_READINGS, Search, cell_name
 from serverFilter import ServerFilterStage, server_filtering_enabled
 from sessionRecorder import SessionRecorder
@@ -458,8 +459,9 @@ def update_node(node_id, message):
         handover.record(node_id, parse_distance_cm(payload), parse_angle_deg(payload), now,
                         room=room)
         search_look = search.record(node_id, node_roles.get(node_id), parse_scan_state(payload),
-                                    parse_nearest_echo_cm(payload), parse_angle_deg(payload), now,
-                                    room=room, far_hold=nodes_far["hold"], held=nodes_aim_held)
+                                    parse_distance_cm(payload), parse_angle_deg(payload), now,
+                                    room=room, far_hold=nodes_far["hold"], held=nodes_aim_held,
+                                    echo_cm=parse_nearest_echo_cm(payload))
         looks = handover.commands(dict(node_roles),
                                   {other_id: other["has_turn"] for other_id, other in nodes.items()},
                                   now, held=nodes_aim_held,
@@ -485,7 +487,8 @@ def update_node(node_id, message):
     # Sent once state_lock is released, because send_command takes it too.
     if search_look is not None:
         print(f"Search: node {search_look.node_id} {search_look.command}, checking the "
-              f"{cell_name(search_look.cell)} cell ({search_look.checks}/{CHECK_READINGS} read)")
+              f"{cell_name(search_look.cell)} cell, by {search_look.by} "
+              f"({search_look.checks}/{CHECK_READINGS} read)")
         send_command(search_look.node_id, search_look.command)
     for look in looks:
         print(f"Handover: node {look.node_id} {look.command}, towards node {look.source_id}'s "
@@ -973,13 +976,12 @@ async def browser_handler(websocket):
                 status = json.dumps({"type": "menu:status", "message": f"Selected: {option}"})
                 broadcast(BROWSER_CONNECTIONS.copy(), status)
             elif event.get("type") == "game:status":
-                # The game's state for the phone control panel; never a filter
-                # event. Its cursor tells the search which cell the game shows.
-                await asyncio.to_thread(note_game_status, event.get("cursor"))
+                # The game's state for the phone control panel; never a filter event.
                 if CONTROL_CONNECTIONS:
                     broadcast(CONTROL_CONNECTIONS.copy(), message)
-            elif event.get("type") in ("cells:confidence", "round:start"):
-                # The game's cell confidence map, and a new round, for the search.
+            elif event.get("type") in ("round:start", "track:update"):
+                # A new round: the search forgets where the player was. The
+                # game's position track: where a moving player is heading.
                 await asyncio.to_thread(apply_search_event, event)
             elif event.get("type") == "calibration:update":
                 # The cells' depths, for the search; and the chain's, with
@@ -1011,21 +1013,14 @@ async def browser_handler(websocket):
         await asyncio.to_thread(request_nodes_aim, websocket, False)
 
 
-def note_game_status(cursor):
-    """game:status's cursor (None with no round on screen), for the search."""
-    with state_lock:
-        search.game_status(cursor, time.monotonic())
-
-
 def apply_search_event(event):
-    """The game's cell confidence map (cells:confidence, nine scores, index
-    gx * 3 + gy), a new round (round:start) or the corner calibration
-    (calibration:update), for the search; a new round restarts the
-    server-side chain too."""
+    """A new round (round:start), the game's position track (track:update)
+    or the corner calibration (calibration:update), for the search; a new
+    round restarts the server-side chain too."""
     try:
         with state_lock:
-            if event.get("type") == "cells:confidence":
-                search.set_scores(event["scores"])
+            if event.get("type") == "track:update":
+                search.set_track(track_from_event(event, time.monotonic()))
             elif event.get("type") == "round:start":
                 # The browser starts its chain afresh too (resetSensorFilters()).
                 search.reset()
@@ -1045,9 +1040,17 @@ def set_search(enabled):
     print(f"Search: {'on' if search.enabled else 'off'} (control panel)")
 
 
+def set_search_heading(enabled):
+    """The control panel's Heading switch. Off, a lost node is aimed at the
+    readings' cell even when the player was moving."""
+    with state_lock:
+        search.heading = enabled is True
+    print(f"Search heading: {'on' if search.heading else 'off'} (control panel)")
+
+
 def search_message():
-    """What the control panel's Search switch shows."""
-    return {"type": "search:status", "on": search.enabled}
+    """What the control panel's Search and Heading switches show."""
+    return {"type": "search:status", "on": search.enabled, "heading": search.heading}
 
 
 def set_handover(enabled):
@@ -1066,8 +1069,8 @@ async def control_handler(websocket):
     """Phone control panel: relays commands to every game browser. The empty
     room ("room": learn or forget) and the Far hold and Far steer switches
     ("farHold", "farSteer") go straight to the nodes instead, so they work with
-    no game page open, and the Handover and Search switches ("handover",
-    "search") to the server."""
+    no game page open, and the Handover, Search and Heading switches
+    ("handover", "search", "searchHeading") to the server."""
     CONTROL_CONNECTIONS.add(websocket)
     print(f"Control panel connected from {websocket.remote_address}")
     try:
@@ -1088,8 +1091,9 @@ async def control_handler(websocket):
                 set_handover(event.get("enabled"))
                 broadcast(CONTROL_CONNECTIONS.copy(), json.dumps(handover_message()))
                 continue
-            if event.get("action") == "search":
-                await asyncio.to_thread(set_search, event.get("enabled"))
+            if event.get("action") in ("search", "searchHeading"):
+                setter = set_search if event["action"] == "search" else set_search_heading
+                await asyncio.to_thread(setter, event.get("enabled"))
                 broadcast(CONTROL_CONNECTIONS.copy(), json.dumps(search_message()))
                 continue
             if event.get("action") in ("farHold", "farSteer"):
