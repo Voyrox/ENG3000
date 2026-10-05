@@ -14,6 +14,7 @@
 //   window.getGameAlertInfo()                   - { active, distanceCm }
 //   window.setAlertHeld(on) / window.isAlertHeld() - the control panel's held alert
 //   window.setDeadZone(on) / window.getDeadZone()   - too close by depth, or by the raw reading
+//   window.setCellLock(on) / window.getCellLock()   - the drawn cursor and its hits keep to the voted cell
 //   window.handleGameClick(canvas, x, y)        - register a hit attempt
 //   window.getGamePauseButtonAtPoint(canvas,x,y)- hit-test the pause icon
 //   window.getPauseMenuButtonAtPoint(canvas,x,y)- hit-test Resume / Restart / Main Menu
@@ -164,6 +165,16 @@
     // Votes a rival cell needs to take over. Must stay above half of
     // cellWindow, otherwise two cells can trade the lead and the cursor flips.
     cellVotes: 13,
+    // The cell lock (Aaron, 5 Oct): the drawn cursor, and the hole it scores
+    // in, keep to the voted cell above. The cursor still follows the player
+    // inside that cell's hole, held CELL_LOCK_INSET of a hole in from its
+    // edges, but cannot cross into a neighbour until the vote moves; and only
+    // the voted cell's hole scores, so a cursor on its way between two holes
+    // cannot whack a mole in a third. Off, the cursor is drawn from the
+    // position alone and scores whichever hole it is over, as before. Only
+    // the drawing and the hover change: the cell, the position and the
+    // server's copy (filterRules.py) do not. Switched on the control panel.
+    cellLock: true,
     // Neither node has sent a new reading for this long (ms), or the server
     // says both are offline: the game says Sensors offline and the round
     // waits. Unusable readings are otherwise ridden out on the last good
@@ -413,14 +424,15 @@
   const TOO_CLOSE_FRAMES = 2;     // consecutive raw frames needed to raise the alert
 
   // --- Continuous position ---------------------------------------------------
-  // The grid CELL is still what gets whacked, and it is still decided with the
-  // hysteresis and majority vote that stop a single bad frame changing which
-  // mole is live - the part ported to filterRules.py and pinned by
-  // fixtures/js_parity_trace.json. But the cursor no longer has to sit on that
-  // cell's centre: it is drawn from the continuous position in centimetres
-  // (readSensorCoordinate()), so it glides across the board instead of jumping
-  // between nine fixed points. The cursor is a presentation concern; the cell
-  // is the game rule.
+  // The grid CELL is decided with the hysteresis and majority vote that stop a
+  // single bad frame changing which mole is live - the part ported to
+  // filterRules.py and pinned by fixtures/js_parity_trace.json. The cursor is
+  // drawn from the continuous position in centimetres
+  // (readSensorCoordinate()), so it glides across the board instead of
+  // jumping between nine fixed points. With the cell lock on (tuning.cellLock)
+  // the cursor glides only inside the voted cell's hole and only that hole
+  // scores, so the cell is what gets whacked; with it off, the cursor goes
+  // wherever the position does and scores whichever hole it is over.
   //
   // The position is the same one the column and row are derived from, so the
   // cursor cannot drift somewhere the grid mapping does not also believe the
@@ -431,6 +443,10 @@
   // position, took that check's place.)
   const CURSOR_SMOOTH_TIME = 0.14; // s to close most of the gap to a new position
   const CURSOR_MAX_SPEED = 900;     // px/s ceiling, so one bad frame cannot fling it
+  // With the cell lock on, how far in from each edge of the voted cell's hole
+  // the cursor is held, as a share of the hole: 0.2 keeps the 10 px ring well
+  // inside a 135 px hole at 1280 x 720, and leaves it 60 % of the hole to move in.
+  const CELL_LOCK_INSET = 0.2;
 
   // HUD layout (see renderHud()). Bottom-left: the sensor panel (sensor mode
   // only), with LIVE STATS above it.
@@ -2424,6 +2440,18 @@
     return tuning.kalman;
   };
 
+  // The cell lock switch, on by default; see tuning.cellLock. Takes effect
+  // from the next frame.
+  window.getCellLock = function getCellLock() {
+    return tuning.cellLock;
+  };
+
+  window.setCellLock = function setCellLock(on) {
+    tuning.cellLock = Boolean(on);
+    console.info(`[cell lock] ${tuning.cellLock ? "on" : "off"}`);
+    return tuning.cellLock;
+  };
+
   // The angle limit switch, on by default; see tuning.angleLimit. Takes effect
   // from the next reading.
   window.getAngleLimit = function getAngleLimit() {
@@ -2818,14 +2846,36 @@
   // Drives the drawn cursor from a continuous position, through the spring.
   // Returns the pixel actually drawn, because the hover test has to use the
   // drawn position too - scoring against the raw target would whack a mole a
-  // moment before the cursor visibly reached it.
-  function moveCursor(canvas, world, column, dt) {
-    const target = worldToCanvasPoint(canvas, world.x, world.y, column);
+  // moment before the cursor visibly reached it. cell is the voted cell
+  // ({ gx, gy }): with the cell lock on, the cursor aims for the nearest point
+  // to the position inside that cell's hole (lockedToCell()).
+  function moveCursor(canvas, world, column, dt, cell) {
+    let target = worldToCanvasPoint(canvas, world.x, world.y, column);
     if (!target) return null;
+    if (tuning.cellLock && cell) target = lockedToCell(canvas, target, cell);
     const point = cursorSmoother.step(target, dt);
     if (!point) return null;
     gameState.cursor = { x: point.x, y: point.y, inBounds: true };
     return point;
+  }
+
+  // The hole of a cell ({ gx, gy }) on the board, or null.
+  function holeOfCell(canvas, cell) {
+    const index = holeForCell(cell.gx, cell.gy);
+    return window.getGameGridLayout(canvas).holes.find((h) => h.index === index) || null;
+  }
+
+  // A canvas point moved to the nearest point inside a cell's hole, at least
+  // CELL_LOCK_INSET of the hole in from its edges: the cell lock's target.
+  function lockedToCell(canvas, point, cell) {
+    const hole = holeOfCell(canvas, cell);
+    if (!hole) return point;
+    const inset = hole.size * CELL_LOCK_INSET;
+    const clamp = (v, low, high) => Math.max(low, Math.min(high, v));
+    return {
+      x: clamp(point.x, hole.x + inset, hole.x + hole.size - inset),
+      y: clamp(point.y, hole.y + inset, hole.y + hole.size - inset),
+    };
   }
 
   // Last known-good cell, ridden out on through unusable readings.
@@ -2902,8 +2952,16 @@
 
   // The sensors' cursor over a hole scores, as the mouse's does - unless the
   // phone pad has the cursor, whose own hover scores instead.
-  function hoverFromSensors(canvas, point) {
-    if (!gameState.remoteActive) window.handleGameHover(canvas, point.x, point.y);
+  // With the cell lock on, only the voted cell's hole scores (cell, { gx, gy }):
+  // the cursor easing from one hole to the next never whacks a third.
+  function hoverFromSensors(canvas, point, cell) {
+    if (gameState.remoteActive) return;
+    if (tuning.cellLock && cell) {
+      const hole = holeOfCell(canvas, cell);
+      const over = holeAtPoint(window.getGameGridLayout(canvas), point.x, point.y);
+      if (!hole || !over || over.index !== hole.index) return;
+    }
+    window.handleGameHover(canvas, point.x, point.y);
   }
 
   // Reads the sensors, maps the fix into grid space, and drives the cursor from
@@ -2955,8 +3013,8 @@
         calibrated: grid.calibrated, held: false, heldFor: 0,
         xCm: world.x, yCm: world.y, resolved: world.resolved,
       };
-      const point = moveCursor(canvas, world, cell.gx, dt);
-      if (point) hoverFromSensors(canvas, point);
+      const point = moveCursor(canvas, world, cell.gx, dt, cell);
+      if (point) hoverFromSensors(canvas, point, cell);
       return;
     }
 
@@ -2991,8 +3049,8 @@
       };
       // The spring keeps running while held, so the cursor eases to a stop
       // instead of freezing mid-board the moment a frame is dropped.
-      const point = moveCursor(canvas, world, held.gx, dt);
-      if (point) hoverFromSensors(canvas, point);
+      const point = moveCursor(canvas, world, held.gx, dt, held);
+      if (point) hoverFromSensors(canvas, point, held);
       return;
     }
 

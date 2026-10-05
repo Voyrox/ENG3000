@@ -534,6 +534,62 @@ test("the Kalman switch is on until the control panel turns it off", () => {
   assert.strictEqual(w.setKalman(true), true);
 });
 
+test("the cell lock is on until the control panel turns it off", () => {
+  const w = loadWindow();
+  assert.strictEqual(w.getCellLock(), true);
+  assert.strictEqual(w.setCellLock(false), false);
+  assert.strictEqual(w.tuneSensor({}).cellLock, false, "the cursor reads it from tuning");
+  assert.strictEqual(w.setCellLock(true), true);
+});
+
+// A player settled in the centre (hole 4) steps right (hole 5), where a mole
+// is up. The vote is made slow (39 of 40 readings), so for the frames below
+// the voted cell is still the centre while the position is already in the
+// right column.
+function stepRightUnderASlowVote(cellLock) {
+  const w = loadWindow();
+  w.setGameInputMode("sensor");
+  w.resetGame();
+  w.tuneSensor({ cellWindow: 40, cellVotes: 39 });
+  w.setCellLock(cellLock);
+  run(w, scannersSeeing(75, 85));
+  const state = w.getGameState();
+  Object.assign(state, { activeHole: 5, moleType: "mole", moleSpawnedAt: 0, score: 0 });
+  for (let i = 1; i <= 30; i += 1) {
+    const t = (240 + i) * FRAME_MS;
+    w.performance.now = () => t;
+    w.markSensorFrame();
+    w.updateGame(t, CANVAS, scannersSeeing(125, 85));
+  }
+  return { w, state, status: w.getGameCursorStatus(CANVAS) };
+}
+
+test("cell lock on: the cursor and its hits keep to the voted cell until the vote moves", () => {
+  const { w, state, status } = stepRightUnderASlowVote(true);
+  assert.strictEqual(status.sensor.gx, 1, "the vote still says the centre");
+  assert.ok(status.sensor.xCm > 100, `the position is in the right column (x ${status.sensor.xCm})`);
+  assert.strictEqual(status.hole, 4, "the cursor stays in the centre hole");
+  // It leans towards the player, inside the hole.
+  const centre = w.gridToCanvasPoint(CANVAS, 1, 1);
+  assert.ok(w.getGameState().cursor.x > centre.x + 10, "the cursor leans right inside its hole");
+  assert.strictEqual(state.score, 0, "the mole in the next hole is not hit");
+  assert.strictEqual(state.activeHole, 5);
+
+  // Once the vote moves, the cursor follows and the mole is hit.
+  run(w, scannersSeeing(125, 85), 80);
+  const after = w.getGameCursorStatus(CANVAS);
+  assert.strictEqual(after.sensor.gx, 2);
+  assert.strictEqual(after.hole, 5);
+  assert.strictEqual(state.score, 1, "the mole is hit once the vote reaches it");
+});
+
+test("cell lock off: the cursor follows the position into the next hole and hits it before the vote", () => {
+  const { state, status } = stepRightUnderASlowVote(false);
+  assert.strictEqual(status.sensor.gx, 1, "the vote still says the centre");
+  assert.strictEqual(status.hole, 5, "the cursor is already over the next hole");
+  assert.strictEqual(state.score, 1, "and it hit the mole there");
+});
+
 test("the angle limit is on until the control panel turns it off, and follows the grid", () => {
   const w = loadWindow();
   assert.strictEqual(w.getAngleLimit(), true);

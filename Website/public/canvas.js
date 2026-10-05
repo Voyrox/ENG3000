@@ -649,6 +649,11 @@ function handleRemoteCommand(command) {
       window.setDeadZone(command.enabled);
       syncServerFilterSetup();
       break;
+    case "cellLock":
+      // The cell lock: the drawn cursor, and the hole it scores in, keep to
+      // the voted cell. Drawing only, so the server's chain is not told.
+      window.setCellLock(command.enabled);
+      break;
     case "tooCloseHold":
       // The hold button, down (and re-sent while held) or up.
       holdAlert(Boolean(command.on));
@@ -709,6 +714,7 @@ function sendGameStatus() {
     angleLimit: window.getAngleLimit(),
     triAimTolerance: window.getTriAimTolerance(),
     deadZone: window.getDeadZone(),
+    cellLock: window.getCellLock(),
     alertHeld: window.isAlertHeld(),
     dynamicRules: window.getDynamicRules(),
     confidenceLevel: window.getConfidenceLevel(),

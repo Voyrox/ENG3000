@@ -53,6 +53,7 @@
             <button id="kalmanBtn" data-action="kalman">Kalman: on</button>
             <button id="angleLimitBtn" data-action="angleLimit">Angle limit: on</button>
             <button id="triAimToleranceBtn" data-action="triAimTolerance">Tri aim tolerance: on</button>
+            <button id="cellLockBtn" data-action="cellLock">Cell lock: on</button>
         </div>
         <p class="note">Kalman off: each node's distance goes median → FFT, and line of sight puts the
             player at the newest reading, with no gate. The servos do not use it.</p>
@@ -62,6 +63,9 @@
         <p class="note">Tri aim tolerance on: trilateration keeps the two nodes' crossing when a
             servo points up to 20° further off it than its beam; off, it falls back to the nearer
             node on its own.</p>
+        <p class="note">Cell lock on: the game's cursor stays inside the cell the vote decided, and
+            only that cell's hole scores, until the vote moves. Off: the cursor goes wherever the
+            position does and scores whichever hole it is over.</p>
     </section>
 
     <section>
@@ -345,6 +349,7 @@
                 if (action === "angleLimit") return send({ action, enabled: Boolean(game) && game.angleLimit === false });
                 if (action === "triAimTolerance") return send({ action, enabled: Boolean(game) && game.triAimTolerance === false });
                 if (action === "deadZone") return send({ action, enabled: Boolean(game) && game.deadZone === false });
+                if (action === "cellLock") return send({ action, enabled: Boolean(game) && game.cellLock === false });
                 if (action === "farHalf") return send({ action, enabled: Boolean(game) && game.farHalf === false });
                 if (action === "compare") return send({ action, enabled: Boolean(game) && game.compare === false });
                 if (action === "pause" && game && game.status === "paused") return send({ action: "resume" });
@@ -485,6 +490,8 @@
             $("triAimToleranceBtn").classList.toggle("selected", game.triAimTolerance === false);
             $("deadZoneBtn").textContent = `Dead zone: ${game.deadZone === false ? "off" : "on"}`;
             $("deadZoneBtn").classList.toggle("selected", game.deadZone === false);
+            $("cellLockBtn").textContent = `Cell lock: ${game.cellLock === false ? "off" : "on"}`;
+            $("cellLockBtn").classList.toggle("selected", game.cellLock === false);
             $("farHalfBtn").textContent = `Far half: ${game.farHalf === false ? "off" : "on"}`;
             $("farHalfBtn").classList.toggle("selected", game.farHalf === false);
             document.querySelectorAll("[data-rule]").forEach((btn) => {
