@@ -76,8 +76,8 @@ constexpr double SOUND_CM_PER_US = 0.034;
 
 // A reading inside this range is taken to be the player; outside it there is no
 // target.
-constexpr float MIN_TARGET_CM = 10;
-constexpr float MAX_TARGET_CM = 230;
+constexpr float MIN_TARGET_CM = 0;
+constexpr float MAX_TARGET_CM = 228;  // 190 + 20 % (Aaron, 5 Oct)
 
 // How long a reading may wait for its echo. pulseIn() counts from the trigger,
 // not from the start of the echo pulse, and the rig's sensors only raise ECHO
