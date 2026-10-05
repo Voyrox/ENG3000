@@ -111,9 +111,12 @@
     <section>
         <h2>Sensors</h2>
         <table>
-            <thead><tr><th>Node</th><th>State</th><th>Filtered cm</th><th>Angle</th><th>Scan</th><th>Room</th><th>RPS</th></tr></thead>
-            <tbody id="nodes"><tr><td colspan="7">No nodes</td></tr></tbody>
+            <thead><tr><th>Node</th><th>State</th><th>Filtered cm</th><th>Angle</th><th>Scan</th><th>Room</th><th>RPS</th><th>Confidence</th></tr></thead>
+            <tbody id="nodes"><tr><td colspan="8">No nodes</td></tr></tbody>
         </table>
+        <p class="note">Confidence: the share of a node's readings in the last 5 s that put the
+            player in one spot, ± how tightly. Green is confident; "following n" is a node
+            being aimed at node n's fix.</p>
     </section>
 
     <script>
@@ -502,7 +505,7 @@
         function renderNodes(nodes) {
             const body = $("nodes");
             if (!nodes.length) {
-                body.innerHTML = '<tr><td colspan="7">No nodes</td></tr>';
+                body.innerHTML = '<tr><td colspan="8">No nodes</td></tr>';
                 return;
             }
             body.innerHTML = nodes
@@ -510,16 +513,28 @@
                 .sort((a, b) => a.id - b.id)
                 .map((n) => {
                     const cm = n.filtered_distance == null ? "--" : n.filtered_distance.toFixed(1);
-                    const state = n.online ? (n.has_turn ? "scanning" : "online") : "offline";
+                    const conf = n.confidence;
+                    let state = n.online ? (n.has_turn ? "scanning" : "online") : "offline";
+                    if (n.online && conf && conf.following != null) state = `following ${conf.following}`;
                     const scan = n.online ? readScan(n) : { angle: null, state: null, room: null };
                     const angle = scan.angle === null ? "--" : `${scan.angle.toFixed(0)}°`;
                     const [scanName, scanColour] = SCAN_STATES[scan.state] || ["--", "#63736f"];
                     const [roomName, roomColour] = ROOM_STATES[scan.room] || ["--", "#63736f"];
                     return `<tr><td>${n.id}</td><td>${state}</td><td>${cm}</td><td>${angle}</td>` +
                         `<td style="color:${scanColour}">${scanName}</td>` +
-                        `<td style="color:${roomColour}">${roomName}</td><td>${(n.rps || 0).toFixed(1)}</td></tr>`;
+                        `<td style="color:${roomColour}">${roomName}</td><td>${(n.rps || 0).toFixed(1)}</td>` +
+                        `${confidenceCell(conf)}</tr>`;
                 })
                 .join("");
+        }
+
+        // A node's confidence (handover.py): the score, and ± the spread of
+        // its points; "--" before calibration has given it a role.
+        function confidenceCell(conf) {
+            if (!conf) return "<td>--</td>";
+            const pct = `${Math.round(conf.score * 100)}%`;
+            const spread = conf.spread_cm == null ? "" : ` ±${Math.round(conf.spread_cm)}`;
+            return `<td class="${conf.confident ? "sure" : ""}">${pct}${spread}</td>`;
         }
 
         function connect() {
@@ -731,6 +746,7 @@
     table { width: 100%; border-collapse: collapse; font-size: 14px; }
     th { text-align: left; color: #9298aa; font-weight: normal; font-size: 12px; }
     th, td { padding: 6px 4px; border-bottom: 1px solid #2a2a3a; }
+    td.sure { color: #86efac; font-weight: 600; }
 </style>
 
 </html>

@@ -10,6 +10,7 @@ from websockets.asyncio.server import broadcast, serve
 import numpy as np
 
 from filterRules import FilterConfig
+from handover import Handover
 from serverFilter import ServerFilterStage, server_filtering_enabled
 from sessionRecorder import SessionRecorder
 from tracking import ConstantVelocityTracker
@@ -95,6 +96,11 @@ CONTROL_ACTIONS = {"point", "release", "start", "mode", "pause", "resume", "rest
 # Every raw node reading to logs/raw-*.csv, for the bench noise test
 # (tools/bench_noise.py). Off unless started with REC=1; see sessionRecorder.py.
 recorder = SessionRecorder.from_env(os.environ)
+# When one node has seen the player in one place for 5 s, the other is aimed at
+# them with LOOK <deg> (handover.py). Each node's confidence is always worked
+# out and sent with nodes:update; HANDOVER=0 only stops the LOOKs, for runs to
+# compare with and without.
+handover = Handover(steer=os.environ.get("HANDOVER") != "0")
 
 state_lock = threading.Lock()
 next_node_id = 1
@@ -149,6 +155,10 @@ def serialize_node(node):
         "rps": node["rps"],
         "synced": node["synced"],
         "has_turn": node["has_turn"],
+        # How sure the node is of where the player is, and which node it is
+        # being aimed by (handover.py); None before calibration gives it a role
+        # and after it goes offline.
+        "confidence": handover.status(node["id"], node_roles.get(node["id"]), time.monotonic()),
     }
 
 
@@ -381,6 +391,12 @@ def update_node(node_id, message):
         node["last_seen"] = now
         update_rate(node, now)
         update_distance(node, payload, now)
+        room = payload.get("room")
+        handover.record(node_id, parse_distance_cm(payload), parse_angle_deg(payload), now,
+                        room=room if isinstance(room, int) else None)
+        looks = handover.commands(dict(node_roles),
+                                  {other_id: other["has_turn"] for other_id, other in nodes.items()},
+                                  now, held=nodes_aim_held)
         if recorder is not None:
             recorder.record(node_id, payload, role=node_roles.get(node_id),
                             has_turn=node["has_turn"], ms_since_turn=ms_since_turn(node, now),
@@ -395,6 +411,12 @@ def update_node(node_id, message):
                                          angle_deg=parse_angle_deg(payload),
                                          scan_state=parse_scan_state(payload))
     schedule_broadcast_nodes()
+
+    # Sent once state_lock is released, because send_command takes it too.
+    for look in looks:
+        print(f"Handover: node {look.node_id} {look.command}, towards node {look.source_id}'s "
+              f"fix at ({look.point[0]:.0f}, {look.point[1]:.0f}) cm +/-{look.spread_cm:.0f}")
+        send_command(look.node_id, look.command)
 
 
 def mark_node_offline(node_id, conn=None):
@@ -419,6 +441,7 @@ def mark_node_offline(node_id, conn=None):
         node["synced"] = False
         node["has_turn"] = False
         node["conn"] = None
+        handover.forget(node_id)
         if server_filter is not None:
             server_filter.on_missing(node_id)
     schedule_broadcast_nodes()
