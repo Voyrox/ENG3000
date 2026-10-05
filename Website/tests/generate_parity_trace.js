@@ -337,7 +337,7 @@ function buildStream() {
 // --- Run the real JS -----------------------------------------------------------
 
 function runJs(stream, calibration, method, kalman = true, dynamicRules = null, angleLimit = true,
-  deadZone = true, farHalf = true, triAimTolerance = true, cellDecision = true) {
+  deadZone = true, farHalf = true, triAimTolerance = true, cellDecision = true, trackMoving = false) {
   let clock = 0;
   const context = {
     console,
@@ -378,6 +378,7 @@ function runJs(stream, calibration, method, kalman = true, dynamicRules = null, 
   w.setFarHalf(farHalf);
   w.setTriAimTolerance(triAimTolerance);
   w.setCellDecision(cellDecision);
+  w.setTrackMoving(trackMoving);
   if (dynamicRules) w.setDynamicRules(dynamicRules);
   w.setGameInputMode("sensor");
   w.resetGame();
@@ -427,6 +428,7 @@ function runJs(stream, calibration, method, kalman = true, dynamicRules = null, 
       (s.fresh || [true, true, true]).map((f) => (f ? 1 : 0)),
       s.status === "ok" ? round6(s.xCm) : null,
       s.status === "ok" ? round6(s.yCm) : null,
+      s.moving ? 1 : 0,
     ]);
     placedBy.push(s.placedBy ?? null);
   });
@@ -434,7 +436,7 @@ function runJs(stream, calibration, method, kalman = true, dynamicRules = null, 
 }
 
 const FIELDS = ["status", "gx", "gy", "rawGx", "rawGy", "column", "held", "heldFor", "filtered",
-  "fresh", "x", "y"];
+  "fresh", "x", "y", "moving"];
 
 const stream = buildStream();
 const RULES_OFF = { farPriority: false, confidenceNode: false, columnLock: false, loneNode: false, cornerNode: false };
@@ -496,6 +498,12 @@ const trace = {
     cellDecisionOffLos: {
       method: "los", cellDecision: false,
       ...runJs(stream, null, "los", true, null, true, true, true, true, false),
+    },
+    // Dynamic with tracking on (off by default): the cell decision dwells
+    // less while the player moves.
+    trackMovingOn: {
+      method: "dyn", trackMoving: true,
+      ...runJs(stream, null, "dyn", true, null, true, true, true, true, true, true),
     },
   },
 };

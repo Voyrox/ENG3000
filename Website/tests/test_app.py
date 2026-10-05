@@ -1661,6 +1661,10 @@ class ControlPanelTests(BrokerTestCase):
         sent = self.relayed({"action": "deadZone", "enabled": False})
         self.assertEqual(sent, [{"action": "deadZone", "enabled": False, "type": "remote:command"}])
 
+    def test_the_tracking_switch_is_relayed_to_the_game(self):
+        sent = self.relayed({"action": "trackMoving", "enabled": False})
+        self.assertEqual(sent, [{"action": "trackMoving", "enabled": False, "type": "remote:command"}])
+
     def test_the_cell_decision_switch_is_relayed_to_the_game(self):
         sent = self.relayed({"action": "cellDecision", "enabled": False})
         self.assertEqual(sent, [{"action": "cellDecision", "enabled": False, "type": "remote:command"}])

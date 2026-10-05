@@ -409,6 +409,7 @@ let sentAngleLimit = null;
 let sentTriAimTolerance = null;
 let sentDeadZone = null;
 let sentCellDecision = null;
+let sentTrackMoving = null;
 let sentDynamicRules = null;
 let sentConfidenceLevel = null;
 let sentFarHalf = null;
@@ -489,6 +490,13 @@ function syncServerFilterSetup() {
   if (cellDecision !== sentCellDecision &&
       sendToServer({ type: "filter:cellDecision", on: cellDecision })) {
     sentCellDecision = cellDecision;
+  }
+
+  // The tracking switch, so the server's chain follows a moving player the same way.
+  const trackMoving = window.getTrackMoving();
+  if (trackMoving !== sentTrackMoving &&
+      sendToServer({ type: "filter:trackMoving", on: trackMoving })) {
+    sentTrackMoving = trackMoving;
   }
 
   // Dynamic's rule switches, so the server's chain places the player the same way.
@@ -663,6 +671,12 @@ function handleRemoteCommand(command) {
       window.setCellDecision(command.enabled);
       syncServerFilterSetup();
       break;
+    case "trackMoving":
+      // Tracking: while the player moves, the cell decision follows them.
+      // Off by default (Aaron, 6 Oct).
+      window.setTrackMoving(command.enabled);
+      syncServerFilterSetup();
+      break;
     case "cellLock":
       // The cell lock: the drawn cursor, and the hole it scores in, keep to
       // the voted cell. Drawing only, so the server's chain is not told.
@@ -730,6 +744,7 @@ function sendGameStatus() {
     deadZone: window.getDeadZone(),
     cellLock: window.getCellLock(),
     cellDecision: window.getCellDecision(),
+    trackMoving: window.getTrackMoving(),
     alertHeld: window.isAlertHeld(),
     dynamicRules: window.getDynamicRules(),
     confidenceLevel: window.getConfidenceLevel(),
@@ -803,6 +818,7 @@ function connectSocket() {
     sentTriAimTolerance = null;
     sentDeadZone = null;
     sentCellDecision = null;
+    sentTrackMoving = null;
     sentDynamicRules = null;
     sentConfidenceLevel = null;
     sentFarHalf = null;

@@ -545,6 +545,37 @@ test("the cell lock is on until the control panel turns it off", () => {
   assert.strictEqual(w.setCellLock(true), true);
 });
 
+test("tracking is off until the control panel turns it on", () => {
+  const w = loadWindow();
+  assert.strictEqual(w.getTrackMoving(), false);
+  assert.strictEqual(w.setTrackMoving(true), true);
+  assert.strictEqual(w.tuneSensor({}).trackMoving, true, "the cell decision reads it from tuning");
+  assert.strictEqual(w.setTrackMoving(false), false);
+});
+
+test("a still player is still, a walking one is moving, and the control panel is told", () => {
+  const w = loadWindow();
+  w.setGameInputMode("sensor");
+  w.resetGame();
+  run(w, scannersSeeing(75, 85));
+  assert.strictEqual(w.getGameCursorStatus(CANVAS).sensor.moving, false);
+  // Walking right at 60 cm/s, a frame every 16 ms and new readings every
+  // 6 frames (about 10 a second, as on the rig).
+  let moving = false;
+  let nodes = scannersSeeing(75, 85);
+  for (let i = 1; i <= 60; i += 1) {
+    const t = (240 + i) * FRAME_MS;
+    w.performance.now = () => t;
+    if (i % 6 === 0) {
+      nodes = scannersSeeing(75 + 0.96 * i, 85);
+      w.markSensorFrame();
+    }
+    w.updateGame(t, CANVAS, nodes);
+    moving = moving || w.getGameCursorStatus(CANVAS).sensor.moving;
+  }
+  assert.strictEqual(moving, true);
+});
+
 test("the cell decision is on until the control panel turns it off", () => {
   const w = loadWindow();
   assert.strictEqual(w.getCellDecision(), true);

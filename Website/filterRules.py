@@ -254,6 +254,19 @@ class FilterConfig:
     cell_still_hold_ms: float = 1500.0
     cell_anchor_rate: float = 0.1
 
+    # Tracking (tuning.trackMoving, moveCm, moveSpeedCmS, moveConfirmReadings,
+    # stillAfterMs, stillPoints, stillCm, cellMovingDwellMs; MotionDetector):
+    # while moving, the cell decision dwells cell_moving_dwell_ms. Off by
+    # default (Aaron, 6 Oct)
+    track_moving: bool = False
+    move_cm: float = 15.0
+    move_speed_cm_s: float = 40.0
+    move_confirm_readings: int = 2
+    still_after_ms: float = 700.0
+    still_points: int = 5
+    still_cm: float = 10.0
+    cell_moving_dwell_ms: float = 200.0
+
     # StreakHold and MajorityWindowHold, and tools/chain_replay.py. The
     # pipeline itself rides out unusable readings for as long as they last
     # (CoordinatePipeline.update()), as game.js does since 5 Oct.
@@ -399,6 +412,7 @@ class FilteredCoordinate:
     calibrated: bool = False
     raw: list = field(default_factory=list)
     filtered: list = field(default_factory=list)
+    moving: bool = False
 
     @property
     def has_cell(self) -> bool:
@@ -419,6 +433,7 @@ class FilteredCoordinate:
             "calibrated": self.calibrated,
             "raw": self.raw,
             "filtered": self.filtered,
+            "moving": self.moving,
         }
 
 
@@ -721,6 +736,11 @@ class Geometry(ABC):
 
     def reset(self) -> None:
         """Clear any state carried between updates. Override if stateful."""
+
+    def track_speed_cm_s(self, now_ms: float, config: FilterConfig) -> float:
+        """losSpeedCmS() in game.js: the speed of the geometry's position
+        track, cm/s, or 0 with none."""
+        return 0.0
 
     def reading_points(self, raw: Sequence[Optional[float]],
                        filtered: Sequence[Optional[float]], fresh: Sequence[bool],
@@ -1473,6 +1493,13 @@ class TwoSensorGeometry(Geometry):
         near, far = area.per_column[area.column_at(x)]
         return (x, y) if near <= y <= far * (1 + config.far_leeway) else None
 
+    def track_speed_cm_s(self, now_ms: float, config: FilterConfig) -> float:
+        """losSpeedCmS() in game.js: the line-of-sight track's speed, or 0
+        when it has no live track."""
+        if self._los.fix(now_ms, config) is None:
+            return 0.0
+        return math.hypot(self._los.x[2], self._los.x[3])
+
     def reading_points(self, raw, filtered, fresh, area) -> list:
         """readingNodes() in game.js: each node with a fresh reading that is
         not lost (found or half), at its own point (_own_point()), as
@@ -1788,6 +1815,75 @@ class CellStabiliser:
         return self.cell
 
 
+class MotionDetector:
+    """Moving or still. Port of stepMotion() in game.js, which says why.
+
+    A node's own point move_cm or more from where that same node put the
+    player MOTION_POINTS - 1 readings before (within MOTION_POINT_MAX_AGE_MS),
+    or the position track going at move_speed_cm_s or more, is a move;
+    move_confirm_readings counted readings in a row with one make the player
+    moving, still again after still_after_ms with none. Standing still wins:
+    a reading node whose last still_points own points all lie within still_cm
+    of their middle makes the player still at once.
+    """
+
+    MOTION_POINTS = 3
+    MOTION_POINT_MAX_AGE_MS = 2500.0
+
+    def __init__(self):
+        self.reset()
+
+    def reset(self) -> None:
+        self.moving = False
+        self._evidence_ms = -math.inf
+        self._streak = 0
+        self._points: list = [[] for _ in range(GRID_SIZE)]
+
+    def _holds_still(self, history: list, now_ms: float, config: FilterConfig) -> bool:
+        """nodeHoldsStill() in game.js."""
+        n = config.still_points
+        if len(history) < n:
+            return False
+        last = history[-n:]
+        if now_ms - last[0][2] > self.MOTION_POINT_MAX_AGE_MS:
+            return False
+        mx = sum(p[0] for p in last) / n
+        my = sum(p[1] for p in last) / n
+        return all(math.hypot(p[0] - mx, p[1] - my) <= config.still_cm for p in last)
+
+    def step(self, points: list, speed_cm_s: float, now_ms: float,
+             config: FilterConfig) -> bool:
+        """Once per counted reading with the position on the board. points:
+        Geometry.reading_points(); speed_cm_s: Geometry.track_speed_cm_s()."""
+        keep = max(self.MOTION_POINTS, config.still_points)
+        seen = False
+        still = False
+        for slot, (x, y) in points:
+            history = self._points[slot]
+            history.append((x, y, now_ms))
+            del history[:-keep]
+            if len(history) >= self.MOTION_POINTS:
+                fx, fy, at = history[-self.MOTION_POINTS]
+                if (now_ms - at <= self.MOTION_POINT_MAX_AGE_MS
+                        and math.hypot(x - fx, y - fy) >= config.move_cm):
+                    seen = True
+            if self._holds_still(history, now_ms, config):
+                still = True
+        if speed_cm_s >= config.move_speed_cm_s:
+            seen = True
+        if still:
+            self.moving = False
+            self._streak = 0
+            return False
+        self._streak = self._streak + 1 if seen else 0
+        if self._streak >= config.move_confirm_readings:
+            self.moving = True
+            self._evidence_ms = now_ms
+        elif self.moving and now_ms - self._evidence_ms >= config.still_after_ms:
+            self.moving = False
+        return self.moving
+
+
 class CellDecider:
     """The cell decision. Port of decideCell() in game.js, which says why.
 
@@ -1836,9 +1932,13 @@ class CellDecider:
                 and top - margin <= y_cm <= top + row_depth + margin)
 
     def decide(self, x_cm: float, y_cm: float, counted: bool, points: list,
-               now_ms: float, area: PlayArea, config: FilterConfig) -> tuple:
+               now_ms: float, area: PlayArea, config: FilterConfig,
+               tracking: bool = False) -> tuple:
         """The decided cell for an ok fix at (x_cm, y_cm). counted: the update
-        carries a node's new reading. points: Geometry.reading_points()."""
+        carries a node's new reading. points: Geometry.reading_points().
+        tracking: following a moving player (track_moving and
+        MotionDetector.moving): the dwell is cell_moving_dwell_ms; the nodes
+        still hold the cell."""
         here = self._cell_of(x_cm, y_cm, area)
         if not counted:
             return self.cell if self.cell is not None else here
@@ -1896,7 +1996,8 @@ class CellDecider:
         challenger = self._challenger
         if challenger is not None:
             next_to = abs(challenger[0] - current[0]) <= 1 and abs(challenger[1] - current[1]) <= 1
-            if self._evidence_ms >= config.cell_dwell_ms * (1 if next_to else 2):
+            dwell = config.cell_moving_dwell_ms if tracking else config.cell_dwell_ms
+            if self._evidence_ms >= dwell * (1 if next_to else 2):
                 self.cell = challenger
                 self._challenger = None
                 self._evidence_ms = 0.0
@@ -2014,6 +2115,7 @@ class CoordinatePipeline:
         self._guard = ProximityGuard(self.config)
         self._stabiliser = CellStabiliser(self.config)
         self._decider = CellDecider(self.config)
+        self._motion = MotionDetector()
         self._held_cell: Optional[tuple] = None
         self._held_xy: Optional[tuple] = None
 
@@ -2056,6 +2158,13 @@ class CoordinatePipeline:
         for channel in self._channels:
             channel._cfg = self.config
 
+    def set_track_moving(self, on: bool) -> None:
+        """The tracking switch (setTrackMoving() in game.js), from the next
+        reading; nothing else in the config changes."""
+        self.config = replace(self.config, track_moving=bool(on))
+        for channel in self._channels:
+            channel._cfg = self.config
+
     def set_cell_decision(self, on: bool) -> None:
         """The cell decision switch (setCellDecision() in game.js): the cell
         decision or the vote from the next reading, either starting afresh;
@@ -2073,6 +2182,7 @@ class CoordinatePipeline:
         self._guard.reset()
         self._stabiliser.reset()
         self._decider.reset()
+        self._motion.reset()
         self.hold.reset()
         self.geometry.reset()
         self._held_cell = None
@@ -2133,12 +2243,17 @@ class CoordinatePipeline:
         cell = self._resolve_cell(fix)
         if cell is not None:
             raw_gx, raw_gy = cell
+            # Only an update carrying a node's new reading counts.
+            counted = any(is_fresh and value is not None for is_fresh, value in zip(fresh, raw))
+            points = (self.geometry.reading_points(raw, filtered, fresh, self.area)
+                      if counted else [])
+            if counted:
+                self._motion.step(points, self.geometry.track_speed_cm_s(now_ms, self.config),
+                                  now_ms, self.config)
             if self.config.cell_decision:
-                # Only an update carrying a node's new reading counts.
-                counted = any(is_fresh and value is not None for is_fresh, value in zip(fresh, raw))
-                points = self.geometry.reading_points(raw, filtered, fresh, self.area)
+                tracking = self.config.track_moving and self._motion.moving
                 gx, gy = self._decider.decide(fix.x_cm, fix.y_cm, counted, points, now_ms,
-                                              self.area, self.config)
+                                              self.area, self.config, tracking)
             else:
                 gx, gy = self._stabiliser.vote(raw_gx, raw_gy)
             self.hold.record(True)
@@ -2146,7 +2261,7 @@ class CoordinatePipeline:
             self._held_xy = (fix.x_cm, fix.y_cm)
             return FilteredCoordinate(STATUS_OK, x_cm=fix.x_cm, y_cm=fix.y_cm,
                                       gx=gx, gy=gy, raw_gx=raw_gx, raw_gy=raw_gy,
-                                      **base)
+                                      moving=self._motion.moving, **base)
 
         self.hold.record(False)
         # Unusable readings are ridden out on the last good cell for as long
@@ -2156,7 +2271,8 @@ class CoordinatePipeline:
             gx, gy = self._held_cell
             x, y = self._held_xy
             return FilteredCoordinate(STATUS_OK, x_cm=x, y_cm=y, gx=gx, gy=gy,
-                                      held=True, held_for=self.hold.bad_count, **base)
+                                      held=True, held_for=self.hold.bad_count,
+                                      moving=self._motion.moving, **base)
 
         # No cell to ride out on: out of bounds if nobody is found, otherwise
         # no signal yet (the game waits for a first position, with no message).

@@ -35,6 +35,7 @@ from filterRules import (  # noqa: E402
     CartesianGeometry,
     CellDecider,
     CellStabiliser,
+    MotionDetector,
     ChannelFilter,
     CoordinatePipeline,
     DYNAMIC_RULE_SWITCHES,
@@ -86,6 +87,7 @@ class ParityWithGameJs(unittest.TestCase):
                               far_half=run.get("farHalf", True),
                               tri_aim_tolerance=run.get("triAimTolerance", True),
                               cell_decision=run.get("cellDecision", True),
+                              track_moving=run.get("trackMoving", False),
                               **{DYNAMIC_RULE_SWITCHES[name]: on for name, on in switches.items()})
         pipeline = CoordinatePipeline(TwoSensorGeometry(method=run["method"]), area=area,
                                       config=config)
@@ -112,6 +114,7 @@ class ParityWithGameJs(unittest.TestCase):
             self.assertEqual(got.column, expected["column"], where)
             self.assertEqual(got.held, bool(expected["held"]), where)
             self.assertEqual(got.held_for, expected["heldFor"], where)
+            self.assertEqual(got.moving, bool(expected["moving"]), f"{where}, moving")
             # The raw cell is only reported on a fresh, un-held ok.
             if got.status == STATUS_OK and not got.held:
                 self.assertEqual((got.raw_gx, got.raw_gy),
@@ -184,6 +187,13 @@ class ParityWithGameJs(unittest.TestCase):
 
     def test_line_of_sight_with_the_cell_decision_off(self):
         self.assertGreater(self._replay("cellDecisionOffLos"), 0)
+
+    def test_dynamic_with_tracking_on(self):
+        self.assertGreater(self._replay("trackMovingOn"), 0)
+
+    def test_the_stream_has_the_player_moving_and_still(self):
+        moving = {row[self.trace["fields"].index("moving")] for row in self.trace["runs"]["dynamic"]["steps"]}
+        self.assertEqual(moving, {0, 1}, "the detector must say both somewhere on the stream")
 
     def test_the_cell_decision_runs_differ_from_the_vote_somewhere(self):
         on = [(row[1], row[2]) for row in self.trace["runs"]["dynamic"]["steps"]]
@@ -471,6 +481,66 @@ class CellStabiliserRules(unittest.TestCase):
             FilterConfig(cell_window=10, cell_votes=5)
 
 
+class MotionDetectorRules(unittest.TestCase):
+    """Moving or still (stepMotion() in game.js). Readings 100 ms apart."""
+
+    def setUp(self):
+        self.config = FilterConfig()
+        self.motion = MotionDetector()
+        self.now = 0.0
+
+    def step(self, points=(), speed=0.0, ms=100.0):
+        self.now += ms
+        return self.motion.step(list(points), speed, self.now, self.config)
+
+    def test_a_node_whose_point_holds_still_is_still(self):
+        for _ in range(10):
+            self.assertFalse(self.step([(0, (70.0, 80.0))]))
+
+    def test_a_node_whose_point_keeps_moving_is_moving_on_the_second_move(self):
+        self.assertFalse(self.step([(0, (70.0, 80.0))]))
+        self.assertFalse(self.step([(0, (78.0, 80.0))]))
+        self.assertFalse(self.step([(0, (86.0, 80.0))]))     # 16 cm from two readings before: once
+        self.assertTrue(self.step([(0, (94.0, 80.0))]))      # and again: moving
+
+    def test_a_spike_that_comes_back_is_not_a_move(self):
+        self.step([(0, (70.0, 80.0))])
+        self.step([(0, (70.0, 80.0))])
+        self.assertFalse(self.step([(0, (90.0, 80.0))]))     # 20 cm from two before: once
+        self.assertFalse(self.step([(0, (70.0, 80.0))]))     # back where it was two before
+        self.assertFalse(self.step([(0, (70.0, 80.0))]))
+
+    def test_standing_still_wins_over_the_track_speed(self):
+        # A node that has held the player within 10 cm for 5 readings makes
+        # them still, however fast the track says they go.
+        for _ in range(5):
+            self.step([(0, (70.0, 80.0))], speed=60.0)
+        self.assertFalse(self.step([(0, (72.0, 81.0))], speed=60.0))
+
+    def test_two_nodes_that_disagree_are_not_a_move(self):
+        # A scan turn changing over: each node steady where it puts the
+        # player, 40 cm apart from each other.
+        for i in range(12):
+            slot, point = (0, (60.0, 80.0)) if (i // 4) % 2 == 0 else (2, (100.0, 80.0))
+            self.assertFalse(self.step([(slot, point)]))
+
+    def test_points_too_far_apart_in_time_do_not_count(self):
+        self.step([(0, (70.0, 80.0))])
+        self.step([(0, (70.0, 80.0))])
+        self.assertFalse(self.step([(0, (90.0, 80.0))], ms=2500.0))
+
+    def test_the_track_going_fast_twice_is_a_move(self):
+        self.assertFalse(self.step(speed=45.0))
+        self.assertTrue(self.step(speed=45.0))
+        self.assertTrue(self.step(speed=10.0))
+
+    def test_still_again_after_700_ms_with_no_move(self):
+        self.step(speed=60.0)
+        self.assertTrue(self.step(speed=60.0))
+        held = [self.step(speed=0.0) for _ in range(7)]
+        self.assertEqual(held, [True] * 6 + [False])
+
+
 class CellDeciderRules(unittest.TestCase):
     """The cell decision (decideCell() in game.js). The default bounds give
     columns 50 cm wide and rows 50 cm deep from 10 cm out: the centre cell
@@ -584,6 +654,19 @@ class CellDeciderRules(unittest.TestCase):
         cells = [self.step(112.0, 85.0, points=[(0, (112.0, 80.0))]) for _ in range(5)]
         self.assertEqual(cells[-1], (2, 1), "the node of a player walking out says moved: no hold")
 
+    def test_tracking_a_moving_player_dwells_200_ms(self):
+        self.settle()
+        cells = [self.decider.decide(120.0, 85.0, True, [], self.now + 100.0 * (i + 1), self.area,
+                                     self.config, tracking=True) for i in range(2)]
+        self.assertEqual(cells, [(1, 1), (2, 1)])
+
+    def test_tracking_still_lets_a_node_hold_the_cell(self):
+        node = [(0, (70.0, 80.0))]
+        self.settle(points=node)
+        cells = [self.decider.decide(120.0, 85.0, True, node, self.now + 100.0 * (i + 1), self.area,
+                                     self.config, tracking=True) for i in range(5)]
+        self.assertEqual(set(cells), {(1, 1)})
+
     def test_the_pipeline_switch_picks_the_vote_or_the_decision(self):
         pipeline = CoordinatePipeline(TwoSensorGeometry())
         self.assertTrue(pipeline.config.cell_decision)
@@ -591,6 +674,11 @@ class CellDeciderRules(unittest.TestCase):
         self.assertFalse(pipeline.config.cell_decision)
         pipeline.set_cell_decision(True)
         self.assertTrue(pipeline.config.cell_decision)
+        self.assertFalse(pipeline.config.track_moving, "tracking is off by default")
+        pipeline.set_track_moving(True)
+        self.assertTrue(pipeline.config.track_moving)
+        pipeline.set_track_moving(False)
+        self.assertFalse(pipeline.config.track_moving)
 
 
 class HoldPolicies(unittest.TestCase):

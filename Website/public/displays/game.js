@@ -16,6 +16,7 @@
 //   window.setDeadZone(on) / window.getDeadZone()   - too close by depth, or by the raw reading
 //   window.setCellLock(on) / window.getCellLock()   - the drawn cursor and its hits keep to the voted cell
 //   window.setCellDecision(on) / window.getCellDecision() - the cell decision, or the older vote
+//   window.setTrackMoving(on) / window.getTrackMoving()   - tracking: the cell follows a moving player
 //   window.handleGameClick(canvas, x, y)        - register a hit attempt
 //   window.getGamePauseButtonAtPoint(canvas,x,y)- hit-test the pause icon
 //   window.getPauseMenuButtonAtPoint(canvas,x,y)- hit-test Resume / Restart / Main Menu
@@ -202,6 +203,30 @@
     cellStillCm: 25,
     cellStillHoldMs: 1500,
     cellAnchorRate: 0.1,
+    // Tracking (Aaron, 6 Oct; stepMotion()): while the player is moving, the
+    // cell decision dwells cellMovingDwellMs in place of cellDwellMs (the
+    // nodes still hold the cell against a scan turn changing over). Moving:
+    // moveConfirmReadings readings in a row with a move - a node's own point
+    // moveCm or more from where that same node put the player two readings
+    // before, or the line-of-sight track going at moveSpeedCmS or more - and
+    // still again after stillAfterMs with none. Standing still wins (Aaron,
+    // 6 Oct): a reading node that has put the player within stillCm of the
+    // middle of its last stillPoints points makes them still at once.
+    // OFF by default (Aaron, 6 Oct): on the 4 Oct recording it doubled the
+    // flips of a player standing still (2.4 to 4.8 a minute), while on the
+    // model rigs it showed half of the moves within 1 s instead of a fifth;
+    // switched on from the control panel to try on the rig. Python:
+    // FilterConfig track_moving, move_cm, move_speed_cm_s,
+    // move_confirm_readings, still_after_ms, still_points, still_cm,
+    // cell_moving_dwell_ms; MotionDetector.
+    trackMoving: false,
+    moveCm: 15,
+    moveSpeedCmS: 40,
+    moveConfirmReadings: 2,
+    stillAfterMs: 700,
+    stillPoints: 5,
+    stillCm: 10,
+    cellMovingDwellMs: 200,
     // Neither node has sent a new reading for this long (ms), or the server
     // says both are offline: the game says Sensors offline and the round
     // waits. Unusable readings are otherwise ridden out on the last good
@@ -1098,6 +1123,7 @@
         gy: hasCell ? sensor.gy : null,
         method: positioning.method,
         placedBy: sensor.placedBy || null,
+        moving: Boolean(sensor.moving),
         // Compare's rings, on the control panel's pad: only while Compare is
         // on and the browser places the player itself (the server's
         // coordinate carries no fixes).
@@ -1618,6 +1644,7 @@
     lastSeenFrameSeq = sensorFrameSeq;
     badReadingStreak = 0;
     resetCellFilter();
+    resetMotion();
     sensorHold.grid = null;
     sensorHold.world = null;
     // Drops the drawn position too, so a new round opens its cursor where the
@@ -2541,6 +2568,19 @@
     return tuning.kalman;
   };
 
+  // The tracking switch, OFF by default (Aaron, 6 Oct); see
+  // tuning.trackMoving. Takes effect from the next reading; the moving/still
+  // detector runs either way.
+  window.getTrackMoving = function getTrackMoving() {
+    return tuning.trackMoving;
+  };
+
+  window.setTrackMoving = function setTrackMoving(on) {
+    tuning.trackMoving = Boolean(on);
+    console.info(`[tracking] ${tuning.trackMoving ? "on" : "off"}`);
+    return tuning.trackMoving;
+  };
+
   // The cell decision switch, on by default; see tuning.cellDecision. Either
   // way the other one starts afresh, from the next reading.
   window.getCellDecision = function getCellDecision() {
@@ -3155,11 +3195,91 @@
     return out;
   }
 
+  // Whether an update carries a node's new reading: render frames and the
+  // turn broadcasts do not.
+  function isCountedReading(fix) {
+    return fix.isNewReading && fix.fresh.some((isFresh, slot) => isFresh && fix.raw[slot] !== null);
+  }
+
+  // --- Moving or still (tuning.trackMoving; Aaron, 6 Oct) ---------------------
+  // A node sees the player move when its own point (ownPoint()) is moveCm or
+  // more from where that same node put them MOTION_POINTS - 1 readings
+  // before, within MOTION_POINT_MAX_AGE_MS: each node is only compared with
+  // itself, so a scan turn changing over - the two nodes' biases differing -
+  // is not a move. The line-of-sight track going at moveSpeedCmS or more is a
+  // move too. moveConfirmReadings counted readings in a row with a move make
+  // the player moving; still again after stillAfterMs with none. Standing
+  // still wins: a reading node whose last stillPoints own points all lie
+  // within stillCm of their middle makes the player still at once. Python:
+  // MotionDetector in filterRules.py.
+  const MOTION_POINTS = 3;
+  const MOTION_POINT_MAX_AGE_MS = 2500;
+  const motion = { moving: false, evidenceAt: -Infinity, streak: 0, points: [[], [], []] };
+
+  function resetMotion() {
+    motion.moving = false;
+    motion.evidenceAt = -Infinity;
+    motion.streak = 0;
+    motion.points = [[], [], []];
+  }
+
+  // Whether a node's last stillPoints own points all lie within stillCm of
+  // their middle (all inside MOTION_POINT_MAX_AGE_MS).
+  function nodeHoldsStill(list, now) {
+    const n = tuning.stillPoints;
+    if (list.length < n) return false;
+    const last = list.slice(-n);
+    if (now - last[0].at > MOTION_POINT_MAX_AGE_MS) return false;
+    const mx = last.reduce((sum, p) => sum + p.x, 0) / n;
+    const my = last.reduce((sum, p) => sum + p.y, 0) / n;
+    return last.every((p) => Math.hypot(p.x - mx, p.y - my) <= tuning.stillCm);
+  }
+
+  // The line-of-sight track's speed, cm/s, or 0 with no live track.
+  function losSpeedCmS(now) {
+    if (losFix(now) === null) return 0;
+    return Math.hypot(losTrack.x[2], losTrack.x[3]);
+  }
+
+  // Once per counted reading with the position on the board: nodes are this
+  // reading's nodes and their own points (readingNodes()). Returns whether
+  // the player is moving.
+  function stepMotion(nodes, now) {
+    const keep = Math.max(MOTION_POINTS, tuning.stillPoints);
+    let seen = false;
+    let still = false;
+    nodes.forEach(([slot, point]) => {
+      const list = motion.points[slot];
+      list.push({ x: point.x, y: point.y, at: now });
+      while (list.length > keep) list.shift();
+      const first = list[list.length - MOTION_POINTS];
+      if (first && now - first.at <= MOTION_POINT_MAX_AGE_MS
+        && Math.hypot(point.x - first.x, point.y - first.y) >= tuning.moveCm) seen = true;
+      if (nodeHoldsStill(list, now)) still = true;
+    });
+    if (losSpeedCmS(now) >= tuning.moveSpeedCmS) seen = true;
+    if (still) {
+      motion.moving = false;
+      motion.streak = 0;
+      return false;
+    }
+    motion.streak = seen ? motion.streak + 1 : 0;
+    if (motion.streak >= tuning.moveConfirmReadings) {
+      motion.moving = true;
+      motion.evidenceAt = now;
+    } else if (motion.moving && now - motion.evidenceAt >= tuning.stillAfterMs) {
+      motion.moving = false;
+    }
+    return motion.moving;
+  }
+
   // The decided cell for a fix with status "ok" at (fix.xCm, fix.yCm). Only an
-  // update carrying a node's new reading counts: render frames and the turn
-  // broadcasts do not.
+  // update carrying a node's new reading counts (isCountedReading()). While
+  // tracking a moving player (tuning.trackMoving and motion.moving) the
+  // dwell is cellMovingDwellMs; the nodes still hold the cell.
   function decideCell(fix, now) {
-    const counted = fix.isNewReading && fix.fresh.some((isFresh, slot) => isFresh && fix.raw[slot] !== null);
+    const counted = isCountedReading(fix);
+    const tracking = tuning.trackMoving && motion.moving;
     const here = cellOfPosition(fix.xCm, fix.yCm);
     if (!counted) return cellDecision.cell || here;
 
@@ -3225,7 +3345,8 @@
     const challenger = cellDecision.challenger;
     if (challenger) {
       const nextTo = Math.abs(challenger.gx - current.gx) <= 1 && Math.abs(challenger.gy - current.gy) <= 1;
-      if (cellDecision.evidenceMs >= tuning.cellDwellMs * (nextTo ? 1 : 2)) {
+      const dwell = tracking ? tuning.cellMovingDwellMs : tuning.cellDwellMs;
+      if (cellDecision.evidenceMs >= dwell * (nextTo ? 1 : 2)) {
         cellDecision.cell = challenger;
         cellDecision.challenger = null;
         cellDecision.evidenceMs = 0;
@@ -3281,6 +3402,9 @@
 
     if (grid) {
       badReadingStreak = 0;
+      // Moving or still, from this reading's nodes (stepMotion()), before the
+      // cell is decided.
+      if (isCountedReading(fix)) stepMotion(readingNodes(fix), now);
       // The cell the reading suggests is only a candidate: the cell decision
       // (decideCell()), or with it off the vote over the recent window
       // (stabiliseCell()), says whether the cell moves.
@@ -3302,7 +3426,7 @@
         ...fix, gx: stable.gx, gy: stable.gy,
         rawGx: grid.gx, rawGy: grid.gy,
         calibrated: grid.calibrated, held: false, heldFor: 0,
-        xCm: world.x, yCm: world.y, resolved: world.resolved,
+        xCm: world.x, yCm: world.y, resolved: world.resolved, moving: motion.moving,
       };
       const point = moveCursor(canvas, world, cell.gx, dt, cell);
       if (point) hoverFromSensors(canvas, point, cell);
@@ -3336,7 +3460,7 @@
       gameState.sensor = {
         ...fix, status: "ok", gx: held.gx, gy: held.gy,
         calibrated: held.calibrated, held: true, heldFor: badReadingStreak,
-        xCm: world.x, yCm: world.y, resolved: world.resolved,
+        xCm: world.x, yCm: world.y, resolved: world.resolved, moving: motion.moving,
       };
       // The spring keeps running while held, so the cursor eases to a stop
       // instead of freezing mid-board the moment a frame is dropped.

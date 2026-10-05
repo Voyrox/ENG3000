@@ -293,6 +293,13 @@ class StageTwoSensorRig(unittest.TestCase):
         stage.set_cell_decision(True)
         self.assertTrue(stage.pipeline.config.cell_decision)
 
+    def test_the_tracking_switch_reaches_the_config(self):
+        stage = ServerFilterStage()
+        stage.set_track_moving(False)
+        self.assertFalse(stage.pipeline.config.track_moving)
+        stage.set_track_moving(True)
+        self.assertTrue(stage.pipeline.config.track_moving)
+
     def test_dynamic_rule_switches_reach_the_config(self):
         stage = ServerFilterStage()
         stage.set_dynamic_rules({"columnLock": False})

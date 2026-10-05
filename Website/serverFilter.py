@@ -157,6 +157,10 @@ class ServerFilterStage:
         """The game's dead zone switch (FilterConfig.dead_zone)."""
         self.pipeline.set_dead_zone(on)
 
+    def set_track_moving(self, on: bool) -> None:
+        """The game's tracking switch (FilterConfig.track_moving)."""
+        self.pipeline.set_track_moving(on)
+
     def set_cell_decision(self, on: bool) -> None:
         """The game's cell decision switch (FilterConfig.cell_decision)."""
         self.pipeline.set_cell_decision(on)
