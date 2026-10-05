@@ -1596,6 +1596,10 @@ class ControlPanelTests(BrokerTestCase):
         sent = self.relayed({"action": "angleLimit", "enabled": False})
         self.assertEqual(sent, [{"action": "angleLimit", "enabled": False, "type": "remote:command"}])
 
+    def test_the_tri_aim_tolerance_switch_is_relayed_to_the_game(self):
+        sent = self.relayed({"action": "triAimTolerance", "enabled": False})
+        self.assertEqual(sent, [{"action": "triAimTolerance", "enabled": False, "type": "remote:command"}])
+
     def test_the_dead_zone_switch_is_relayed_to_the_game(self):
         sent = self.relayed({"action": "deadZone", "enabled": False})
         self.assertEqual(sent, [{"action": "deadZone", "enabled": False, "type": "remote:command"}])

@@ -91,6 +91,8 @@ CONTROL_ENABLED = os.environ.get("CON") == "1"
 # "kalman" turns the game's Kalman filters on or off.
 # "angleLimit" turns the angle limit on or off (a node's reading further than
 # its servo line runs on the grid is dropped by every method but trilateration).
+# "triAimTolerance" turns trilateration's aim tolerance on or off (its beam
+# check lets a crossing be 20 degrees further off each servo's aim).
 # "dynamicRules" turns Dynamic's rules on or off (a node at the confidence
 # level, the far corners, the column lock, a lone node).
 # "confidenceLevel" sets the confidence, in percent, at which a node places the
@@ -102,8 +104,8 @@ CONTROL_ENABLED = os.environ.get("CON") == "1"
 # "tooCloseHold" is the hold button: the too-close screen while it is down,
 # re-sent every 250 ms while held.
 CONTROL_ACTIONS = {"point", "release", "start", "mode", "pause", "resume", "restart", "menu", "testMode",
-                   "position", "compare", "lostReadings", "kalman", "angleLimit", "dynamicRules",
-                   "confidenceLevel", "farHalf", "deadZone", "tooCloseHold"}
+                   "position", "compare", "lostReadings", "kalman", "angleLimit", "triAimTolerance",
+                   "dynamicRules", "confidenceLevel", "farHalf", "deadZone", "tooCloseHold"}
 # Sent many times a second while a finger is down, so not printed.
 QUIET_CONTROL_ACTIONS = {"point", "release", "tooCloseHold"}
 # Every raw node reading to logs/raw-*.csv, for the bench noise test
@@ -838,6 +840,9 @@ def apply_filter_event(event):
             elif event.get("type") == "filter:angleLimit":
                 # The control panel's angle limit switch, passed on by the game.
                 server_filter.set_angle_limit(bool(event["on"]))
+            elif event.get("type") == "filter:triAimTolerance":
+                # The control panel's tri aim tolerance switch, passed on by the game.
+                server_filter.set_tri_aim_tolerance(bool(event["on"]))
             elif event.get("type") == "filter:deadZone":
                 # The control panel's dead zone switch, passed on by the game.
                 server_filter.set_dead_zone(bool(event["on"]))

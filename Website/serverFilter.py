@@ -147,6 +147,11 @@ class ServerFilterStage:
         """The game's angle limit switch (FilterConfig.angle_limit)."""
         self.pipeline.set_angle_limit(on)
 
+    def set_tri_aim_tolerance(self, on: bool) -> None:
+        """The game's tri aim tolerance switch
+        (FilterConfig.tri_aim_tolerance)."""
+        self.pipeline.set_tri_aim_tolerance(on)
+
     def set_dead_zone(self, on: bool) -> None:
         """The game's dead zone switch (FilterConfig.dead_zone)."""
         self.pipeline.set_dead_zone(on)

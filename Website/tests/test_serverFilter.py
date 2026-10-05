@@ -272,6 +272,13 @@ class StageTwoSensorRig(unittest.TestCase):
         stage.set_angle_limit(True)
         self.assertTrue(stage.pipeline.config.angle_limit)
 
+    def test_the_tri_aim_tolerance_switch_reaches_the_config(self):
+        stage = ServerFilterStage()
+        stage.set_tri_aim_tolerance(False)
+        self.assertFalse(stage.pipeline.config.tri_aim_tolerance)
+        stage.set_tri_aim_tolerance(True)
+        self.assertTrue(stage.pipeline.config.tri_aim_tolerance)
+
     def test_the_dead_zone_switch_reaches_the_config(self):
         stage = ServerFilterStage()
         stage.set_dead_zone(False)
@@ -558,6 +565,14 @@ class AppWiring(unittest.TestCase):
         self.assertFalse(app.server_filter.pipeline.config.angle_limit)
         app.apply_filter_event({"type": "filter:angleLimit", "on": True})
         self.assertTrue(app.server_filter.pipeline.config.angle_limit)
+
+    def test_the_tri_aim_tolerance_switch_reaches_the_chain(self):
+        app.server_filter = ServerFilterStage()
+        app.apply_filter_event({"type": "filter:triAimTolerance", "on": False})
+        self.assertFalse(app.server_filter.pipeline.config.tri_aim_tolerance)
+        app.apply_filter_event({"type": "filter:triAimTolerance", "on": True})
+        self.assertTrue(app.server_filter.pipeline.config.tri_aim_tolerance)
+        self.assertIn("triAimTolerance", app.CONTROL_ACTIONS)
 
     def test_the_dead_zone_switch_reaches_the_chain(self):
         app.server_filter = ServerFilterStage()

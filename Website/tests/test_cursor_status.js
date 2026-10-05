@@ -614,6 +614,26 @@ const aimAt = (slot, x, y) => Math.round(90 + (Math.atan2(x - SENSOR_X[slot], y)
 const FURNITURE = { avg: 150, angle: 60, scanState: 1 };   // the right node half-finding something
 
 
+test("the tri aim tolerance is on until the control panel turns it off, and keeps a crossing 20 degrees off a servo", () => {
+  const w = loadWindow();
+  assert.strictEqual(w.getTriAimTolerance(), true);
+  assert.strictEqual(w.tuneSensor({}).triAimToleranceDeg, 20);
+  w.setGameInputMode("sensor");
+  w.resetGame();
+  // The centre test's C-120 spot (75, 120): the left servo faced 134 degrees
+  // where the spot needs about 113. On: the two distances' crossing.
+  const c120 = scanners({ avg: 117, angle: 134, scanState: 0 }, { avg: 115, angle: 55, scanState: 0 });
+  run(w, c120);
+  const on = w.getGameCursorStatus(CANVAS).sensor.fixes.tri;
+  assert.ok(Math.hypot(on.xCm - 75, on.yCm - 120) < 4, `on: ${on.xCm}, ${on.yCm}`);
+  // Off: the right node alone, along its own aim, 28 cm off.
+  assert.strictEqual(w.setTriAimTolerance(false), false);
+  run(w, c120, 2);
+  const off = w.getGameCursorStatus(CANVAS).sensor.fixes.tri;
+  assert.ok(Math.abs(off.xCm - 50.4) < 0.5 && Math.abs(off.yCm - 106.5) < 0.5, `off: ${off.xCm}, ${off.yCm}`);
+  assert.strictEqual(w.setTriAimTolerance(true), true);
+});
+
 test("Dynamic: both servo lines crossing in the centre column put the player there, ahead of a lone confident node", () => {
   const w = loadWindow();
   w.setGameInputMode("sensor");

@@ -309,7 +309,7 @@ function buildStream() {
 // --- Run the real JS -----------------------------------------------------------
 
 function runJs(stream, calibration, method, kalman = true, dynamicRules = null, angleLimit = true,
-  deadZone = true, farHalf = true) {
+  deadZone = true, farHalf = true, triAimTolerance = true) {
   let clock = 0;
   const context = {
     console,
@@ -348,6 +348,7 @@ function runJs(stream, calibration, method, kalman = true, dynamicRules = null, 
   w.setAngleLimit(angleLimit);
   w.setDeadZone(deadZone);
   w.setFarHalf(farHalf);
+  w.setTriAimTolerance(triAimTolerance);
   if (dynamicRules) w.setDynamicRules(dynamicRules);
   w.setGameInputMode("sensor");
   w.resetGame();
@@ -443,6 +444,16 @@ const trace = {
     deadZoneOffDynamic: { method: "dyn", deadZone: false, ...runJs(stream, null, "dyn", true, null, true, false) },
     // Dynamic with far half off: a half reading in the back row scores 0.
     farHalfOff: { method: "dyn", farHalf: false, ...runJs(stream, null, "dyn", true, null, true, true, false) },
+    // Trilateration and Dynamic with the aim tolerance off: the beam check
+    // holds a crossing to the beam alone.
+    triAimToleranceOff: {
+      method: "tri", triAimTolerance: false,
+      ...runJs(stream, null, "tri", true, null, true, true, true, false),
+    },
+    triAimToleranceOffDynamic: {
+      method: "dyn", triAimTolerance: false,
+      ...runJs(stream, null, "dyn", true, null, true, true, true, false),
+    },
   },
 };
 

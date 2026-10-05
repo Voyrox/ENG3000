@@ -406,6 +406,7 @@ let sentPositionMethod = null;
 let sentLostReadings = null;
 let sentKalman = null;
 let sentAngleLimit = null;
+let sentTriAimTolerance = null;
 let sentDeadZone = null;
 let sentDynamicRules = null;
 let sentConfidenceLevel = null;
@@ -467,6 +468,13 @@ function syncServerFilterSetup() {
   const angleLimit = window.getAngleLimit();
   if (angleLimit !== sentAngleLimit && sendToServer({ type: "filter:angleLimit", on: angleLimit })) {
     sentAngleLimit = angleLimit;
+  }
+
+  // The tri aim tolerance switch, so the server's chain trilaterates the same way.
+  const triAimTolerance = window.getTriAimTolerance();
+  if (triAimTolerance !== sentTriAimTolerance &&
+      sendToServer({ type: "filter:triAimTolerance", on: triAimTolerance })) {
+    sentTriAimTolerance = triAimTolerance;
   }
 
   // The dead zone switch, so the server's chain checks too close the same way.
@@ -629,6 +637,12 @@ function handleRemoteCommand(command) {
       window.setAngleLimit(command.enabled);
       syncServerFilterSetup();
       break;
+    case "triAimTolerance":
+      // Trilateration's aim tolerance: its beam check lets a crossing be 20
+      // degrees further off each servo's aim, or holds it to the beam.
+      window.setTriAimTolerance(command.enabled);
+      syncServerFilterSetup();
+      break;
     case "deadZone":
       // The dead zone: too close by each reading's depth along its servo
       // line, or by the reading itself.
@@ -693,6 +707,7 @@ function sendGameStatus() {
     lostScores: window.getLostScores(),
     kalman: window.getKalman(),
     angleLimit: window.getAngleLimit(),
+    triAimTolerance: window.getTriAimTolerance(),
     deadZone: window.getDeadZone(),
     alertHeld: window.isAlertHeld(),
     dynamicRules: window.getDynamicRules(),
@@ -757,12 +772,14 @@ function connectSocket() {
     // playing on a frozen one.
     if (serverFiltering) window.setServerCoordinate(null);
     // A restarted server has forgotten the position method, the lost
-    // readings, the Kalman, angle limit, dead zone and far half switches,
-    // Dynamic's rule switches and the confidence level; send them again.
+    // readings, the Kalman, angle limit, tri aim tolerance, dead zone and far
+    // half switches, Dynamic's rule switches and the confidence level; send
+    // them again.
     sentPositionMethod = null;
     sentLostReadings = null;
     sentKalman = null;
     sentAngleLimit = null;
+    sentTriAimTolerance = null;
     sentDeadZone = null;
     sentDynamicRules = null;
     sentConfidenceLevel = null;

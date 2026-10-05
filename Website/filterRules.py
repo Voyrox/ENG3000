@@ -159,6 +159,16 @@ class FilterConfig:
     # node's servo points, widened by body_half_width_cm either side. The
     # sensors' beam is under 15 degrees wide.
     tri_beam_half_deg: float = 7.5
+    # The aim tolerance (tuning.triAimTolerance, tuning.triAimToleranceDeg;
+    # 5 Oct). True: the beam check lets a crossing be tri_aim_tolerance_deg
+    # further off each servo's aim than the beam alone. In the centre test
+    # (4 Oct) the left servo reported about 20 degrees further in than the
+    # taped spots needed, so the beam check threw away crossings 3 cm from the
+    # spot for one node's own point 28 cm off. Only the beam check widens:
+    # _in_play_along() keeps the beam itself.
+    # CoordinatePipeline.set_tri_aim_tolerance() flips it live.
+    tri_aim_tolerance: bool = True
+    tri_aim_tolerance_deg: float = 20.0
 
     # The player is a body, not a point (tuning.bodyRadiusCm,
     # tuning.bodyHalfWidthCm). An echo comes back off the side of the player
@@ -1104,11 +1114,13 @@ class TwoSensorGeometry(Geometry):
       "tri" - trilateration of the two distances: each distance is a circle
               around its node, and where the two circles cross is the player,
               if the crossing lies inside both nodes' beams (in_beam(), within
-              tri_beam_half_deg of each servo's aim). When only one reading is
-              inside its own column's play area, the circles miss each other,
-              or the crossing is outside a beam, the nearer node places the
-              player by its distance along its servo angle (scanner_point()),
-              straight in front of itself if it sends no angle.
+              tri_beam_half_deg of each servo's aim, plus
+              tri_aim_tolerance_deg with tri_aim_tolerance on). When only one
+              reading is inside its own column's play area, the circles miss
+              each other, or the crossing is outside a beam, the nearer node
+              places the player by its distance along its servo angle
+              (scanner_point()), straight in front of itself if it sends no
+              angle.
       "avg" - the midpoint of the two.
 
     With no angle from either node (firmware from before the scanner) there is
@@ -1528,7 +1540,8 @@ class TwoSensorGeometry(Geometry):
             if h2 >= 0:
                 x = x_left + along
                 y = math.sqrt(h2)
-                half = config.tri_beam_half_deg
+                half = config.tri_beam_half_deg + (config.tri_aim_tolerance_deg
+                                                   if config.tri_aim_tolerance else 0)
                 body = config.body_half_width_cm
                 if (in_beam(x_left, self._angles[self.LEFT], x, y, half, body)
                         and in_beam(x_right, self._angles[self.RIGHT], x, y, half, body)):
@@ -1789,6 +1802,13 @@ class CoordinatePipeline:
         """The angle limit switch (setAngleLimit() in game.js), from the next
         reading; nothing else in the config changes."""
         self.config = replace(self.config, angle_limit=bool(on))
+        for channel in self._channels:
+            channel._cfg = self.config
+
+    def set_tri_aim_tolerance(self, on: bool) -> None:
+        """The tri aim tolerance switch (setTriAimTolerance() in game.js),
+        from the next update; nothing else in the config changes."""
+        self.config = replace(self.config, tri_aim_tolerance=bool(on))
         for channel in self._channels:
             channel._cfg = self.config
 

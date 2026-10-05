@@ -275,7 +275,8 @@ reporting whatever its beam hits while it sweeps. The position methods
   at something else (furniture, as a rule), so it is refused, and the nearer
   node places the player by its own distance along its servo angle, as it
   does when only one node has a reading. `tuneSensor({ triBeamHalfDeg: 10 })`
-  widens the beam live; Python: `FilterConfig(tri_beam_half_deg=...)`.
+  widens the beam live; Python: `FilterConfig(tri_beam_half_deg=...)`. With
+  the aim tolerance on (below) the check allows 20° more.
 - **Average** (`avg`): the midpoint of the two.
 
 The switch is on the phone control panel only (`/control`, server started
@@ -393,6 +394,24 @@ with it. The control panel's *Angle limit* button turns it off and on again:
 `tuning.angleLimit`, `setAngleLimit()`, `FilterConfig.angle_limit`,
 `filter:angleLimit` to the server. The parity trace has a run of line of sight
 and one of Dynamic with it off.
+
+**Tri aim tolerance.** In the centre test (4 Oct) the left servo reported
+about 20° further in than the taped spots needed (112° at L-80, 141° at C-80,
+134° at C-120). Trilateration's beam check then refused crossings that were
+3 cm from the spot, and the nearer node's own point it used instead was
+28 cm off, on the edge of the wrong column. With the aim tolerance on, the
+beam check lets a crossing be 20° further off each servo's aim than the beam
+(7.5 + 20 = 27.5°, plus the player's half-width to the side); whether a node
+is in play still follows the beam alone. Replaying the centre test's 1,441
+readings: at C-120 the crossing is used for 64 % of readings instead of 5 %
+and the median error falls from 35 to 15 cm, on the two walks from 7 % to
+39 %, and the empty room still gets no two-node fix. The control panel's
+*Tri aim tolerance* button turns it off and on again:
+`tuning.triAimTolerance` / `triAimToleranceDeg`, `setTriAimTolerance()`,
+`FilterConfig.tri_aim_tolerance` / `tri_aim_tolerance_deg`,
+`filter:triAimTolerance` to the server. The parity trace has a run of
+trilateration and one of Dynamic with it off. Reseating the left servo's
+horn would remove the offset itself; compare with the switch off then.
 
 The game steps a node's filters only on that node's new readings, not on
 every animation frame. On the server a no-echo reading (negative) is skipped

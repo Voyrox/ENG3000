@@ -222,6 +222,16 @@
     // The sensors' beam is under 15 degrees wide, 7.5 either side. Python:
     // FilterConfig tri_beam_half_deg.
     triBeamHalfDeg: 7.5,
+    // The aim tolerance (5 Oct): with it on, the beam check lets a crossing
+    // be triAimToleranceDeg further off each servo's aim than the beam
+    // alone. In the centre test (4 Oct) the left servo reported about 20
+    // degrees further in than the taped spots needed, so the beam check threw
+    // away crossings 3 cm from the spot for one node's own point 28 cm off.
+    // Only the beam check widens: isInPlayAlong() keeps the beam itself.
+    // Switched on the control panel. Python: FilterConfig tri_aim_tolerance,
+    // tri_aim_tolerance_deg.
+    triAimTolerance: true,
+    triAimToleranceDeg: 20,
     // The player is a body, not a point (see bodyCentreCm()). bodyRadiusCm:
     // an echo comes back off the side of the player nearest the node, so each
     // distance falls this far short of the middle of them; it is added back
@@ -1724,20 +1734,20 @@
   }
 
   // Whether the middle of the player can be at (x, y) when the node at nodeX,
-  // its servo at angle, sees them: inside its beam (within
-  // tuning.triBeamHalfDeg of where it points), or no more than
-  // tuning.bodyHalfWidthCm outside it - the beam may have found the edge of
-  // the player rather than their middle. Splits (x, y) into how far it is out
-  // along the aim and how far off to the side, with the same sin and cos as
-  // scannerPoint(), so in_beam() in filterRules.py agrees to the last bit. A
-  // node that sends no angle has no beam to check.
-  function inBeam(nodeX, angle, x, y) {
+  // its servo at angle, sees them: inside its beam (within halfBeamDeg of
+  // where it points), or no more than tuning.bodyHalfWidthCm outside it - the
+  // beam may have found the edge of the player rather than their middle.
+  // Splits (x, y) into how far it is out along the aim and how far off to the
+  // side, with the same sin and cos as scannerPoint(), so in_beam() in
+  // filterRules.py agrees to the last bit. A node that sends no angle has no
+  // beam to check.
+  function inBeam(nodeX, angle, x, y, halfBeamDeg) {
     if (angle === null) return true;
     const phi = (angle - 90) * Math.PI / 180;
     const dx = x - nodeX;
     const along = Math.sin(phi) * dx + Math.cos(phi) * y;
     const across = Math.cos(phi) * dx - Math.sin(phi) * y;
-    const halfBeam = tuning.triBeamHalfDeg * Math.PI / 180;
+    const halfBeam = halfBeamDeg * Math.PI / 180;
     return along >= 0 && Math.abs(across) <= along * Math.tan(halfBeam) + tuning.bodyHalfWidthCm;
   }
 
@@ -1751,9 +1761,10 @@
   // (bodyCentreCm()). A reading only counts toward the crossing if it is
   // inside its own column's play area. When only one does, the circles miss
   // each other, or the crossing is outside either node's beam (one sensor is
-  // seeing something else), the nearer sensor places the player by its
-  // distance along its servo angle - straight in front of itself if it sends
-  // none.
+  // seeing something else; the beam is tuning.triBeamHalfDeg, plus
+  // tuning.triAimToleranceDeg with the aim tolerance on), the nearer sensor
+  // places the player by its distance along its servo angle - straight in
+  // front of itself if it sends none.
   function trilaterate(filtered, angles = [null, null, null]) {
     const dL = inSensorRange(filtered[LEFT_SENSOR]) ? bodyCentreCm(filtered[LEFT_SENSOR]) : null;
     const dR = inSensorRange(filtered[RIGHT_SENSOR]) ? bodyCentreCm(filtered[RIGHT_SENSOR]) : null;
@@ -1769,7 +1780,8 @@
       if (h2 >= 0) {
         const x = xLeft + along;
         const y = Math.sqrt(h2);
-        if (inBeam(xLeft, angles[LEFT_SENSOR], x, y) && inBeam(xRight, angles[RIGHT_SENSOR], x, y)) {
+        const half = tuning.triBeamHalfDeg + (tuning.triAimTolerance ? tuning.triAimToleranceDeg : 0);
+        if (inBeam(xLeft, angles[LEFT_SENSOR], x, y, half) && inBeam(xRight, angles[RIGHT_SENSOR], x, y, half)) {
           return { x, y, source: "both" };
         }
       }
@@ -2422,6 +2434,18 @@
     tuning.angleLimit = Boolean(on);
     console.info(`[angle limit] ${tuning.angleLimit ? "on" : "off"}`);
     return tuning.angleLimit;
+  };
+
+  // The tri aim tolerance switch, on by default; see tuning.triAimTolerance.
+  // Takes effect from the next update.
+  window.getTriAimTolerance = function getTriAimTolerance() {
+    return tuning.triAimTolerance;
+  };
+
+  window.setTriAimTolerance = function setTriAimTolerance(on) {
+    tuning.triAimTolerance = Boolean(on);
+    console.info(`[tri aim tolerance] ${tuning.triAimTolerance ? "on" : "off"}`);
+    return tuning.triAimTolerance;
   };
 
   // The far half switch, on by default; see tuning.farHalf. Takes effect at

@@ -82,6 +82,7 @@ class ParityWithGameJs(unittest.TestCase):
                               angle_limit=run.get("angleLimit", True),
                               dead_zone=run.get("deadZone", True),
                               far_half=run.get("farHalf", True),
+                              tri_aim_tolerance=run.get("triAimTolerance", True),
                               **{DYNAMIC_RULE_SWITCHES[name]: on for name, on in switches.items()})
         pipeline = CoordinatePipeline(TwoSensorGeometry(method=run["method"]), area=area,
                                       config=config)
@@ -168,6 +169,12 @@ class ParityWithGameJs(unittest.TestCase):
 
     def test_dynamic_with_far_half_off(self):
         self.assertGreater(self._replay("farHalfOff"), 0)
+
+    def test_trilateration_with_the_aim_tolerance_off(self):
+        self.assertGreater(self._replay("triAimToleranceOff"), 0)
+
+    def test_dynamic_with_the_aim_tolerance_off(self):
+        self.assertGreater(self._replay("triAimToleranceOffDynamic"), 0)
 
     def test_far_half_keeps_a_back_row_player_in_play_on_the_recorded_stream(self):
         # Segment 28: half readings in the back row are Out of bounds only
@@ -1107,9 +1114,11 @@ class TwoSensorGeometryBehaviour(unittest.TestCase):
 
     def test_one_node_aimed_away_leaves_the_crossing_to_the_other(self):
         # The right node looks 25 degrees past the player (furniture, say),
-        # further than its beam and the player's width reach: the crossing is
-        # refused, and the left node - nearer, and aimed at the player - puts
-        # them where it sees them.
+        # further than its beam and the player's width reach: with the aim
+        # tolerance off the crossing is refused, and the left node - nearer,
+        # and aimed at the player - puts them where it sees them. (On, 25
+        # degrees is inside the tolerance; see TriAimTolerance.)
+        self.config = FilterConfig(tri_aim_tolerance=False)
         geometry = TwoSensorGeometry(method="tri")
         sample = scanner_sample(60.0, 80.0)
         sample[2] = (sample[2][0], sample[2][1] - 25.0, 0)
@@ -1127,7 +1136,8 @@ class TwoSensorGeometryBehaviour(unittest.TestCase):
     def test_the_half_beam_is_tunable(self):
         geometry = TwoSensorGeometry(method="tri")
         sample = scanner_sample(60.0, 80.0, aim_error_deg=5.0)
-        narrow = FilterConfig(tri_beam_half_deg=4.0, body_half_width_cm=0.0)
+        narrow = FilterConfig(tri_beam_half_deg=4.0, body_half_width_cm=0.0,
+                              tri_aim_tolerance=False)
         readings = geometry.channels(sample)
         geometry.track(readings, [True] * 3, 0.0, self.area, narrow)
         fix = geometry.locate(readings, self.area, narrow)
@@ -1579,6 +1589,105 @@ class AngleLimit(unittest.TestCase):
         changed = sum(1 for a, b in zip(runs["default"]["steps"], runs["angleLimitOff"]["steps"])
                       if a[at] != b[at])
         self.assertGreater(changed, 20, "line of sight should differ with the angle limit off")
+
+
+class TriAimTolerance(unittest.TestCase):
+    """The aim tolerance (5 Oct): with it on, trilateration's beam check lets a
+    crossing be tri_aim_tolerance_deg (20) further off each servo's aim than
+    the beam alone, so a servo that reports its angle about 20 degrees out, as
+    the left one did in the centre test (4 Oct), no longer throws the crossing
+    away; with it off, the beam alone, as before."""
+
+    # The centre test's C-120 spot, the player's middle at (75, 120): the
+    # median readings and servo angles. The left servo faced 134 degrees where
+    # the spot needs about 113.
+    C120 = [(117.0, 134, 0), None, (115.0, 55, 0)]
+
+    def placed(self, sample, config):
+        geometry = TwoSensorGeometry(method="tri")
+        area = PlayArea.default()
+        readings = geometry.channels(sample)
+        geometry.track(readings, [True] * 3, 0.0, area, config)
+        fix = geometry.locate(readings, area, config)
+        return fix.x_cm, fix.y_cm
+
+    def crossing(self, sample, config):
+        d_left = body_centre_cm(sample[0][0], config)
+        d_right = body_centre_cm(sample[2][0], config)
+        along = (d_left ** 2 - d_right ** 2 + 100.0 ** 2) / 200.0
+        return 25.0 + along, math.sqrt(d_left ** 2 - along ** 2)
+
+    def test_it_is_on_by_default_at_twenty_degrees(self):
+        config = FilterConfig()
+        self.assertTrue(config.tri_aim_tolerance)
+        self.assertEqual(config.tri_aim_tolerance_deg, 20.0)
+
+    def test_a_servo_twenty_degrees_off_keeps_the_crossing(self):
+        # On: the crossing, 3 cm from the spot. Off: the left servo is 21
+        # degrees off the crossing, past its beam and the player's width, so
+        # the nearer node (right, 130 cm to the player's middle) places them
+        # along its own aim - 28 cm off, on the edge of the left column.
+        on = FilterConfig()
+        x, y = self.placed(self.C120, on)
+        want = self.crossing(self.C120, on)
+        self.assertAlmostEqual(x, want[0], places=6)
+        self.assertAlmostEqual(y, want[1], places=6)
+        self.assertLess(math.hypot(x - 75.0, y - 120.0), 4.0)
+
+        off = FilterConfig(tri_aim_tolerance=False)
+        x, y = self.placed(self.C120, off)
+        own = scanner_point(125.0, body_centre_cm(115.0, off), 55)
+        self.assertAlmostEqual(x, own[0], places=6)
+        self.assertAlmostEqual(y, own[1], places=6)
+        self.assertGreater(math.hypot(x - 75.0, y - 120.0), 25.0)
+
+    def test_a_servo_forty_degrees_off_still_refuses_the_crossing(self):
+        # The left servo at 154: 41 degrees off the crossing, past the beam,
+        # the tolerance and the player's width. The right node places them.
+        sample = [(117.0, 154, 0), None, (115.0, 55, 0)]
+        config = FilterConfig()
+        x, y = self.placed(sample, config)
+        own = scanner_point(125.0, body_centre_cm(115.0, config), 55)
+        self.assertAlmostEqual(x, own[0], places=6)
+        self.assertAlmostEqual(y, own[1], places=6)
+
+    def test_the_tolerance_widens_only_the_beam_check(self):
+        # in_beam() with the beam plus the tolerance: 100 cm straight out, 27
+        # degrees off is in (with no body width), 28 is out.
+        half = FilterConfig().tri_beam_half_deg + FilterConfig().tri_aim_tolerance_deg
+        for off_deg, inside in ((27, True), (-27, True), (28, False), (-28, False)):
+            x = 25.0 - 100 * math.sin(math.radians(off_deg))
+            y = 100 * math.cos(math.radians(off_deg))
+            self.assertEqual(in_beam(25.0, 90, x, y, half), inside, off_deg)
+        # Whether a node is in play still follows its beam alone: the left
+        # servo at 50 hears nothing on the board (as in
+        # test_trilateration_prefers_a_node_whose_beam_reaches_the_board).
+        config = FilterConfig()
+        geometry = TwoSensorGeometry(method="tri")
+        area = PlayArea.default()
+        d_left = math.hypot(60 - 25, 80) - BODY_RADIUS_CM
+        d_right = math.hypot(60 - 125, 80) - BODY_RADIUS_CM
+        readings = geometry.channels([(d_left, 50, 0), None, (d_right, 50, 0)])
+        geometry.track(readings, [True] * 3, 0.0, area, config)
+        self.assertFalse(geometry._in_play_along(0, body_centre_cm(d_left, config), area, config))
+
+    def test_the_pipeline_switch_changes_only_the_aim_tolerance(self):
+        pipeline = CoordinatePipeline(TwoSensorGeometry(method="tri"))
+        pipeline.set_tri_aim_tolerance(False)
+        self.assertFalse(pipeline.config.tri_aim_tolerance)
+        self.assertEqual(pipeline.config, FilterConfig(tri_aim_tolerance=False))
+        pipeline.set_tri_aim_tolerance(True)
+        self.assertTrue(pipeline.config.tri_aim_tolerance)
+
+    def test_the_parity_runs_show_the_switch_doing_something(self):
+        with open(FIXTURE, encoding="utf-8") as fh:
+            trace = json.load(fh)
+        runs = trace["runs"]
+        at = trace["fields"].index("x")
+        changed = sum(1 for a, b in zip(runs["trilateration"]["steps"],
+                                        runs["triAimToleranceOff"]["steps"])
+                      if a[at] != b[at])
+        self.assertGreater(changed, 20, "trilateration should differ with the aim tolerance off")
 
 
 class DeadZone(unittest.TestCase):
