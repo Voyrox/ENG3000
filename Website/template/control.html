@@ -58,6 +58,7 @@
             <button data-action="restart">Restart</button>
             <button data-action="menu">Main menu</button>
             <button id="testBtn" data-action="testMode">Test mode: off</button>
+            <button id="alertBtn" data-action="alert" class="wide">Too close screen: off</button>
         </div>
     </section>
 
@@ -188,6 +189,7 @@
                 const action = btn.dataset.action;
                 if (action === "start") return send({ action, mode: btn.dataset.startMode });
                 if (action === "testMode") return send({ action, enabled: !(game && game.testMode) });
+                if (action === "alert") return send({ action, enabled: !(game && game.alertForced) });
                 if (action === "pause" && game && game.status === "paused") return send({ action: "resume" });
                 send({ action });
             });
@@ -237,6 +239,8 @@
             $("status").textContent = game.status;
             $("pauseBtn").textContent = game.status === "paused" ? "Resume" : "Pause";
             $("testBtn").textContent = `Test mode: ${game.testMode ? "on" : "off"}`;
+            $("alertBtn").textContent = `Too close screen: ${game.alertForced ? "on" : "off"}`;
+            $("alertBtn").classList.toggle("danger", Boolean(game.alertForced));
             document.querySelectorAll("[data-mode]").forEach((btn) => {
                 btn.classList.toggle("selected", btn.dataset.mode === game.mode);
             });
@@ -574,6 +578,8 @@
     button:active { background: #3a3a50; }
     button.primary { background: #1d4ed8; }
     button.selected { background: #facc15; color: #13131c; font-weight: 600; }
+    button.wide { grid-column: 1 / -1; }
+    button.danger { background: #dc2626; font-weight: 600; }
 
     table { width: 100%; border-collapse: collapse; font-size: 14px; }
     th { text-align: left; color: #9298aa; font-weight: normal; font-size: 12px; }

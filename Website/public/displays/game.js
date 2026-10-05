@@ -434,6 +434,7 @@
   }
 
   window.resetGame = function resetGame() {
+    remoteAlert = false;
     gameState.status = "playing";
     gameState.score = 0;
     // Always starts at level 1; players climb further levels by scoring, not by picking a start.
@@ -481,10 +482,24 @@
     return gameState.inputMode;
   };
 
+  // Raised from the phone control panel, in any input mode. Cleared by the
+  // panel or by the next round; real sensor alerts still fire while it is off.
+  let remoteAlert = false;
+
+  window.setRemoteAlert = function setRemoteAlert(on) {
+    remoteAlert = Boolean(on);
+  };
+
+  window.isRemoteAlertOn = function isRemoteAlertOn() {
+    return remoteAlert;
+  };
+
   // The full-screen alert is driven purely by the raw distance, and only in
   // sensor mode mid-round - the mouse has no notion of standing too close, and
-  // a paused or finished round should not be hijacked.
+  // a paused or finished round should not be hijacked. The control panel can
+  // also raise it by hand.
   window.isGameAlertActive = function isGameAlertActive() {
+    if (remoteAlert) return true;
     return (
       gameState.inputMode === "sensor" &&
       gameState.status === "playing" &&
@@ -545,9 +560,10 @@
     roundStats()?.onTick(elapsed, statsFrame(canvas));
 
     // Hold the round while the player is too close, out of bounds, or invisible
-    // to the sensors. Advancing lastTickTime above keeps the clock from jumping
-    // when play resumes; shifting the mole timers keeps the current mole alive.
-    if (isSensorBlocked()) {
+    // to the sensors, or while the control panel holds the alert up. Advancing
+    // lastTickTime above keeps the clock from jumping when play resumes;
+    // shifting the mole timers keeps the current mole alive.
+    if (isSensorBlocked() || remoteAlert) {
       gameState.moleSpawnedAt += elapsed;
       gameState.nextSpawnAt += elapsed;
       return;

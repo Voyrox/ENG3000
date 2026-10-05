@@ -513,6 +513,10 @@ function handleRemoteCommand(command) {
     case "testMode":
       window.setGameSettings({ testMode: Boolean(command.enabled) });
       break;
+    case "alert":
+      // The game loop raises or clears the alert screen on its next frame.
+      window.setRemoteAlert(command.enabled);
+      break;
     case "position":
       // The position switch, as the buttons above the sensor panel do it: line
       // of sight, trilateration or their average. An unknown method is ignored.
@@ -547,6 +551,7 @@ function sendGameStatus() {
     remoteHole: state.remoteHole,
     cursor: loopRunning ? window.getGameCursorStatus(c) : null,
     testMode: window.getGameSettings().testMode,
+    alertForced: window.isRemoteAlertOn(),
     positionMethod: window.getPositionMethod(),
     positionMethods: window.getPositionMethods(),
   }));
