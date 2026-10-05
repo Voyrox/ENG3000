@@ -50,7 +50,7 @@ import math
 from collections import deque
 from dataclasses import dataclass
 from statistics import median
-from typing import Dict, List, Optional, Tuple
+from typing import Collection, Dict, List, Optional, Tuple
 
 from filterRules import PlayArea, scanner_point
 
@@ -246,12 +246,15 @@ class Handover:
         return node.last_angle
 
     def commands(self, roles: Dict[int, str], has_turn: Dict[int, bool],
-                 now_s: float, held: bool = False) -> List[Look]:
+                 now_s: float, held: bool = False,
+                 busy: Collection[int] = ()) -> List[Look]:
         """The LOOKs to send now.
 
         roles maps node id -> "LEFT" | "RIGHT" (calibration's assignment);
         has_turn maps node id -> whether it holds the scan turn. held is true
-        while the calibration screen holds every servo at 90.
+        while the calibration screen holds every servo at 90. busy holds the
+        nodes something else is aiming (search.py, which goes first): they
+        are sent nothing, and are not following anyone meanwhile.
         """
         by_role = {role: node_id for node_id, role in roles.items() if role in ROLE_SLOTS}
         if held or len(by_role) < 2:
@@ -266,10 +269,11 @@ class Handover:
             follower = self._nodes.setdefault(target, _Node())
             src = conf[source]
             if (not src.confident or conf[target].confident
-                    or follower.room == ROOM_LEARNING
+                    or follower.room == ROOM_LEARNING or target in busy
                     or self._agrees(target, roles[target], src.point, now_s)):
                 # Nothing to hand over, it has its own fix, it is busy learning
-                # the room, or it has just found the player itself.
+                # the room or being aimed by the search, or it has just found
+                # the player itself.
                 follower.following = follower.look_deg = None
                 continue
             follower.following = source

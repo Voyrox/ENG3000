@@ -525,7 +525,7 @@ class AppWiring(unittest.TestCase):
         # confidence is handover.py's, sent whatever the flag.
         self.assertEqual(list(message["nodes"][0]), [
             "id", "address", "latest", "filtered_distance", "online",
-            "last_seen", "rps", "synced", "has_turn", "confidence"])
+            "last_seen", "rps", "synced", "has_turn", "confidence", "search"])
 
     def test_flag_on_adds_coordinate_once_per_reading(self):
         pipeline = RecordingPipeline()

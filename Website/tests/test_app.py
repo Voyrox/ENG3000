@@ -154,8 +154,9 @@ class BrokerTestCase(unittest.TestCase):
 
     def setUp(self):
         self._saved = (dict(app.nodes), app.next_node_id, app.sync_tick,
-                       set(app.BROWSER_CONNECTIONS), app.WS_LOOP, app.handover)
+                       set(app.BROWSER_CONNECTIONS), app.WS_LOOP, app.handover, app.search)
         app.handover = app.Handover()
+        app.search = app.Search()
         app.nodes.clear()
         app.next_node_id = 1
         app.sync_tick = 0
@@ -166,8 +167,9 @@ class BrokerTestCase(unittest.TestCase):
 
     def tearDown(self):
         self._quiet.__exit__(None, None, None)
-        nodes, next_id, tick, browsers, loop, handover = self._saved
+        nodes, next_id, tick, browsers, loop, handover, search = self._saved
         app.handover = handover
+        app.search = search
         app.nodes.clear()
         app.nodes.update(nodes)
         app.next_node_id = next_id
@@ -406,7 +408,7 @@ class NodeRegistryTests(BrokerTestCase):
         fields = set(app.serialize_node(app.nodes[node_id]))
         self.assertEqual(fields, {"id", "address", "latest", "filtered_distance",
                                   "online", "last_seen", "rps", "synced", "has_turn",
-                                  "confidence"})
+                                  "confidence", "search"})
 
 
 class HandshakeTests(BrokerTestCase):

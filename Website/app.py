@@ -11,6 +11,7 @@ import numpy as np
 
 from filterRules import FilterConfig
 from handover import Handover
+from search import CHECK_READINGS, Search, cell_name
 from serverFilter import ServerFilterStage, server_filtering_enabled
 from sessionRecorder import SessionRecorder
 from tracking import ConstantVelocityTracker
@@ -124,6 +125,11 @@ recorder = SessionRecorder.from_env(os.environ)
 # compare with and without. The control panel's Handover switch does the same
 # while running (set_handover).
 handover = Handover(steer=os.environ.get("HANDOVER") != "0")
+# A node that loses the player is first aimed back at the cell the player most
+# likely is in, for a few readings, before it sweeps (search.py; Aaron, 6 Oct).
+# Its LOOKs go before the handover's. SEARCH=0 starts with it off; the control
+# panel's Search switch turns it off and on while running (set_search).
+search = Search(enabled=os.environ.get("SEARCH") != "0")
 
 state_lock = threading.Lock()
 next_node_id = 1
@@ -182,6 +188,9 @@ def serialize_node(node):
         # being aimed by (handover.py); None before calibration gives it a role
         # and after it goes offline.
         "confidence": handover.status(node["id"], node_roles.get(node["id"]), time.monotonic()),
+        # Whether it is checking a cell before it sweeps, or sweeping after
+        # one (search.py); None otherwise.
+        "search": search.status(node["id"]),
     }
 
 
@@ -338,6 +347,25 @@ def parse_distance_cm(payload):
     return distance if distance is None or np.isfinite(distance) else None
 
 
+def parse_nearest_echo_cm(payload):
+    """The nearer of a node's two sensors' echoes ("left", "right"), which is
+    what the firmware's far hold goes by; the distance as sent from firmware
+    that does not send them. None or negative means no echo."""
+    echoes = []
+    for side in ("left", "right"):
+        try:
+            echo = float(payload.get(side))
+        except (TypeError, ValueError):
+            continue
+        if np.isfinite(echo) and echo > 0:
+            echoes.append(echo)
+    if echoes:
+        return min(echoes)
+    if "left" in payload or "right" in payload:
+        return None
+    return parse_distance_cm(payload)
+
+
 def new_distance_tracker():
     return ConstantVelocityTracker(sigma_a_cm_s2=_DISTANCE_CHAIN.kalman_sigma_a_cm_s2,
                                    sigma_r_cm=_DISTANCE_CHAIN.kalman_sigma_r_cm)
@@ -426,11 +454,18 @@ def update_node(node_id, message):
         update_rate(node, now)
         update_distance(node, payload, now)
         room = payload.get("room")
+        room = room if isinstance(room, int) else None
         handover.record(node_id, parse_distance_cm(payload), parse_angle_deg(payload), now,
-                        room=room if isinstance(room, int) else None)
+                        room=room)
+        search_look = search.record(node_id, node_roles.get(node_id), parse_scan_state(payload),
+                                    parse_nearest_echo_cm(payload), parse_angle_deg(payload), now,
+                                    room=room, far_hold=nodes_far["hold"], held=nodes_aim_held)
         looks = handover.commands(dict(node_roles),
                                   {other_id: other["has_turn"] for other_id, other in nodes.items()},
-                                  now, held=nodes_aim_held)
+                                  now, held=nodes_aim_held,
+                                  busy={other_id for other_id in nodes if search.checking(other_id)})
+        for look in looks:
+            search.looked(look.node_id)
         if recorder is not None:
             recorder.record(node_id, payload, role=node_roles.get(node_id),
                             has_turn=node["has_turn"], ms_since_turn=ms_since_turn(node, now),
@@ -448,6 +483,10 @@ def update_node(node_id, message):
     schedule_broadcast_nodes()
 
     # Sent once state_lock is released, because send_command takes it too.
+    if search_look is not None:
+        print(f"Search: node {search_look.node_id} {search_look.command}, checking the "
+              f"{cell_name(search_look.cell)} cell ({search_look.checks}/{CHECK_READINGS} read)")
+        send_command(search_look.node_id, search_look.command)
     for look in looks:
         print(f"Handover: node {look.node_id} {look.command}, towards node {look.source_id}'s "
               f"fix at ({look.point[0]:.0f}, {look.point[1]:.0f}) cm +/-{look.spread_cm:.0f}")
@@ -477,6 +516,7 @@ def mark_node_offline(node_id, conn=None):
         node["has_turn"] = False
         node["conn"] = None
         handover.forget(node_id)
+        search.forget(node_id)
         if server_filter is not None:
             server_filter.on_missing(node_id)
     schedule_broadcast_nodes()
@@ -933,9 +973,20 @@ async def browser_handler(websocket):
                 status = json.dumps({"type": "menu:status", "message": f"Selected: {option}"})
                 broadcast(BROWSER_CONNECTIONS.copy(), status)
             elif event.get("type") == "game:status":
-                # The game's state for the phone control panel; never a filter event.
+                # The game's state for the phone control panel; never a filter
+                # event. Its cursor tells the search which cell the game shows.
+                await asyncio.to_thread(note_game_status, event.get("cursor"))
                 if CONTROL_CONNECTIONS:
                     broadcast(CONTROL_CONNECTIONS.copy(), message)
+            elif event.get("type") in ("cells:confidence", "round:start"):
+                # The game's cell confidence map, and a new round, for the search.
+                await asyncio.to_thread(apply_search_event, event)
+            elif event.get("type") == "calibration:update":
+                # The cells' depths, for the search; and the chain's, with
+                # server-side filtering on.
+                await asyncio.to_thread(apply_search_event, event)
+                if server_filter is not None:
+                    apply_filter_event(event)
             elif event.get("type") == "sensors:assign":
                 # Always: the scanner nodes need their roles whether or not the
                 # server filters. With SERVER_FILTERING on, the chain uses it too.
@@ -960,6 +1011,41 @@ async def browser_handler(websocket):
         await asyncio.to_thread(request_nodes_aim, websocket, False)
 
 
+def note_game_status(cursor):
+    """game:status's cursor (None with no round on screen), for the search."""
+    with state_lock:
+        search.game_status(cursor, time.monotonic())
+
+
+def apply_search_event(event):
+    """The game's cell confidence map (cells:confidence, nine scores, index
+    gx * 3 + gy), a new round (round:start) or the corner calibration
+    (calibration:update), for the search."""
+    try:
+        with state_lock:
+            if event.get("type") == "cells:confidence":
+                search.set_scores(event["scores"])
+            elif event.get("type") == "round:start":
+                search.reset()
+            elif event.get("type") == "calibration:update":
+                search.set_calibration([(c["near"], c["far"]) for c in event["perColumn"]])
+    except (KeyError, TypeError, ValueError) as exc:
+        print(f"Ignored bad {event.get('type')} message for the search: {exc}")
+
+
+def set_search(enabled):
+    """The control panel's Search switch. Off, a lost node sweeps at once, as
+    SEARCH=0 has it from the start."""
+    with state_lock:
+        search.enabled = enabled is True
+    print(f"Search: {'on' if search.enabled else 'off'} (control panel)")
+
+
+def search_message():
+    """What the control panel's Search switch shows."""
+    return {"type": "search:status", "on": search.enabled}
+
+
 def set_handover(enabled):
     """The control panel's Handover switch. Off keeps every node's confidence
     but sends no LOOK, as HANDOVER=0 does from the start."""
@@ -976,12 +1062,14 @@ async def control_handler(websocket):
     """Phone control panel: relays commands to every game browser. The empty
     room ("room": learn or forget) and the Far hold and Far steer switches
     ("farHold", "farSteer") go straight to the nodes instead, so they work with
-    no game page open, and the Handover switch ("handover") to the server."""
+    no game page open, and the Handover and Search switches ("handover",
+    "search") to the server."""
     CONTROL_CONNECTIONS.add(websocket)
     print(f"Control panel connected from {websocket.remote_address}")
     try:
         await websocket.send(json.dumps({"type": "nodes:update", "nodes": snapshot_nodes()}))
         await websocket.send(json.dumps(handover_message()))
+        await websocket.send(json.dumps(search_message()))
         await websocket.send(json.dumps(far_message()))
         async for message in websocket:
             try:
@@ -995,6 +1083,10 @@ async def control_handler(websocket):
             if event.get("action") == "handover":
                 set_handover(event.get("enabled"))
                 broadcast(CONTROL_CONNECTIONS.copy(), json.dumps(handover_message()))
+                continue
+            if event.get("action") == "search":
+                await asyncio.to_thread(set_search, event.get("enabled"))
+                broadcast(CONTROL_CONNECTIONS.copy(), json.dumps(search_message()))
                 continue
             if event.get("action") in ("farHold", "farSteer"):
                 print(f"Control panel: {event}")
