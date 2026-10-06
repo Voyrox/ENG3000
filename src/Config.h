@@ -55,11 +55,17 @@ constexpr int32_t SERVER_ATTEMPT_TIMEOUT_MS = 1000;
 constexpr uint32_t SOCKET_READ_TIMEOUT_SECONDS = 1;
 
 // --- Pins -----------------------------------------------------------------
+// Every signal is on one header of the 30-pin ESP32 board (Aaron, 6 Oct): the
+// one with VIN, D13 ... D34, VN, VP and EN, on the right with the USB port up
+// and the chip facing you. The echoes are on the input-only pins 34 and 35.
+// D12 is left free (a strapping pin: high at power-up and the board does not
+// boot), and so is D14 (it sends a PWM burst at boot). 3V3 is only on the
+// other header, so the sensors' power stays there.
 // Two ultrasonic sensors side by side on the servo horn.
-constexpr uint8_t LEFT_TRIG_PIN = 5;
-constexpr uint8_t LEFT_ECHO_PIN = 18;
-constexpr uint8_t RIGHT_TRIG_PIN = 16;
-constexpr uint8_t RIGHT_ECHO_PIN = 17;
+constexpr uint8_t LEFT_TRIG_PIN = 26;
+constexpr uint8_t LEFT_ECHO_PIN = 34;
+constexpr uint8_t RIGHT_TRIG_PIN = 27;
+constexpr uint8_t RIGHT_ECHO_PIN = 35;
 constexpr uint8_t SERVO_PIN = 32;
 // The dead-zone buzzer (D13 on the board).
 constexpr uint8_t BUZZER_PIN = 13;
