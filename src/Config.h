@@ -21,7 +21,7 @@
 #define NODE_WIFI_PASSWORD "bruh12345"
 #endif
 #ifndef NODE_SERVER_IP
-#define NODE_SERVER_IP "192.168.1.108"
+#define NODE_SERVER_IP "192.168.59.99"
 #endif
 
 namespace config {
@@ -56,11 +56,11 @@ constexpr uint32_t SOCKET_READ_TIMEOUT_SECONDS = 1;
 
 // --- Pins -----------------------------------------------------------------
 // Two ultrasonic sensors side by side on the servo horn.
-constexpr uint8_t LEFT_TRIG_PIN = 5;
-constexpr uint8_t LEFT_ECHO_PIN = 18;
-constexpr uint8_t RIGHT_TRIG_PIN = 16;
-constexpr uint8_t RIGHT_ECHO_PIN = 17;
-constexpr uint8_t SERVO_PIN = 32;
+constexpr uint8_t LEFT_TRIG_PIN = 13;
+constexpr uint8_t LEFT_ECHO_PIN = 12;
+constexpr uint8_t RIGHT_TRIG_PIN = 26;
+constexpr uint8_t RIGHT_ECHO_PIN = 27;
+constexpr uint8_t SERVO_PIN = 33;
 
 // --- Ultrasonic sensors ---------------------------------------------------
 // Returned when no echo came back. Distinct from a reading of 0 cm, which is
