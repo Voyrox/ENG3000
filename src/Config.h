@@ -57,18 +57,22 @@ constexpr uint32_t SOCKET_READ_TIMEOUT_SECONDS = 1;
 // --- Pins -----------------------------------------------------------------
 // Every signal is on one header of the 30-pin ESP32 board (Aaron, 6 Oct): the
 // one with VIN, D13 ... D34, VN, VP and EN, on the right with the USB port up
-// and the chip facing you. The echoes are on the input-only pins 34 and 35.
-// D12 is left free (a strapping pin: high at power-up and the board does not
-// boot), and so is D14 (it sends a PWM burst at boot). 3V3 is only on the
-// other header, so the sensors' power stays there.
+// and the chip facing you. Each sensor's two pins sit side by side, with a free
+// pin between groups:
+//   D13 left echo, D12 left trigger | D14 free |
+//   D27 right echo, D26 right trigger | D25 free | D33 servo, D32 buzzer
+// D12 is a strapping pin: if the sensor holds it high at power-up the board
+// does not boot. D35, D34, VN and VP are input-only, so nothing that drives a
+// pin can go there. 3V3 is only on the other header, so the sensors' power
+// stays there.
 // Two ultrasonic sensors side by side on the servo horn.
-constexpr uint8_t LEFT_TRIG_PIN = 26;
-constexpr uint8_t LEFT_ECHO_PIN = 34;
-constexpr uint8_t RIGHT_TRIG_PIN = 27;
-constexpr uint8_t RIGHT_ECHO_PIN = 35;
-constexpr uint8_t SERVO_PIN = 32;
-// The dead-zone buzzer (D13 on the board).
-constexpr uint8_t BUZZER_PIN = 13;
+constexpr uint8_t LEFT_TRIG_PIN = 12;
+constexpr uint8_t LEFT_ECHO_PIN = 13;
+constexpr uint8_t RIGHT_TRIG_PIN = 26;
+constexpr uint8_t RIGHT_ECHO_PIN = 27;
+constexpr uint8_t SERVO_PIN = 33;
+// The dead-zone buzzer.
+constexpr uint8_t BUZZER_PIN = 32;
 
 // --- Ultrasonic sensors ---------------------------------------------------
 // Returned when no echo came back. Distinct from a reading of 0 cm, which is
