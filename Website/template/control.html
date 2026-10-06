@@ -157,6 +157,7 @@
             <button data-action="restart">Restart</button>
             <button data-action="menu">Main menu</button>
             <button id="testBtn" data-action="testMode">Test mode: off</button>
+            <button id="alertBtn" data-action="alert" class="wide">Too close screen: off</button>
         </div>
     </section>
 
@@ -421,6 +422,7 @@
                 if (action === "cellConfidence") return send({ action, enabled: Boolean(game) && game.cellConfidence === false });
                 if (action === "farHalf") return send({ action, enabled: Boolean(game) && game.farHalf === false });
                 if (action === "compare") return send({ action, enabled: Boolean(game) && game.compare === false });
+                if (action === "alert") return send({ action, enabled: !(game && game.alertForced) });
                 if (action === "pause" && game && game.status === "paused") return send({ action: "resume" });
                 send({ action });
             });
@@ -574,6 +576,8 @@
                 btn.textContent = `${RULE_LABELS[btn.dataset.rule]}: ${on ? "on" : "off"}`;
                 btn.classList.toggle("selected", on);
             });
+            $("alertBtn").textContent = `Too close screen: ${game.alertForced ? "on" : "off"}`;
+            $("alertBtn").classList.toggle("danger", Boolean(game.alertForced));
             document.querySelectorAll("[data-mode]").forEach((btn) => {
                 btn.classList.toggle("selected", btn.dataset.mode === game.mode);
             });
@@ -969,6 +973,8 @@
     button.selected { background: #facc15; color: #13131c; font-weight: 600; }
     button.hold { touch-action: none; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
     button.hold.selected { background: #b21b1b; color: #ffffff; }
+    button.wide { grid-column: 1 / -1; }
+    button.danger { background: #dc2626; font-weight: 600; }
 
     table { width: 100%; border-collapse: collapse; font-size: 14px; }
     th { text-align: left; color: #9298aa; font-weight: normal; font-size: 12px; }

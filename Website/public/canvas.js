@@ -82,25 +82,18 @@ function draw() {
   syncNodesAim();
   syncNodesPulses();
 
-  if (screen === "calibrate") {
-    renderCalibrate(ctx, c, getSortedNodes());
+  // The menu and setup screens are HTML pages over the canvas (see ui.js). Each
+  // is filled before it is shown, so its default control exists to take focus.
+  const page = HTML_SCREENS[screen];
+  if (page) {
+    page();
+    window.showScreen(screen);
     return;
   }
+  window.showScreen(null);
 
   if (screen === "game") {
     window.renderGame(ctx, c);
-    return;
-  }
-
-  if (screen === "select_node") {
-    renderNodeSelect(ctx, c, getSortedNodes());
-    return;
-  }
-
-  if (screen === "logs" && selectedNodeId !== null) {
-    const node = nodes.get(selectedNodeId) || { id: selectedNodeId, address: "unknown" };
-    const entries = logsBuffer.get(selectedNodeId) || [];
-    renderLogs(ctx, c, node, entries);
     return;
   }
 
@@ -112,20 +105,20 @@ function draw() {
       showBack: !fromGame && heldAlertFrom === null,
       footer: fromGame ? "The game resumes automatically" : null,
     });
-    return;
   }
-
-  if (screen === "options") {
-    window.renderOptions(ctx, c);
-    return;
-  }
-
-  const statusText = nodes.size > 0
-    ? `Node count: ${nodes.size} | Total RPS: ${Array.from(nodes.values()).reduce((sum, node) => sum + (node.rps || 0), 0).toFixed(1)}`
-    : "Waiting for ESP32 data...";
-
-  renderMenu(ctx, c, statusText, getSortedNodes());
 }
+
+// Fills in each HTML screen from live state; called by draw().
+const HTML_SCREENS = {
+  menu: () => window.updateMenu(getSortedNodes()),
+  options: () => window.updateOptionsScreen(),
+  select_node: () => window.updateNodeSelectScreen(getSortedNodes()),
+  logs: () => {
+    const node = nodes.get(selectedNodeId) || { id: selectedNodeId ?? "?", address: "unknown address" };
+    window.updateLogsScreen(node, logsBuffer.get(selectedNodeId) || []);
+  },
+  calibrate: () => window.updateCalibrateScreen(getSortedNodes()),
+};
 
 function getSortedNodes() {
   return Array.from(nodes.values()).sort((a, b) => a.id - b.id);
@@ -637,6 +630,10 @@ function handleRemoteCommand(command) {
     case "testMode":
       window.setGameSettings({ testMode: Boolean(command.enabled) });
       break;
+    case "alert":
+      // The game loop raises or clears the alert screen on its next frame.
+      window.setRemoteAlert(command.enabled);
+      break;
     case "position":
       // The position switch, which is on the control panel only: Dynamic,
       // line of sight, trilateration or their average. An unknown method is
@@ -750,6 +747,7 @@ function sendGameStatus() {
     remoteHole: state.remoteHole,
     cursor: roundOnScreen() ? window.getGameCursorStatus(c) : null,
     testMode: window.getGameSettings().testMode,
+    alertForced: window.isRemoteAlertOn(),
     positionMethod: window.getPositionMethod(),
     positionMethods: window.getPositionMethods(),
     dynamicFollowing: window.getDynamicFollowing(),
@@ -899,37 +897,6 @@ c.addEventListener("mousemove", (event) => {
 c.addEventListener("click", (event) => {
   const point = getCanvasPoint(event);
 
-  if (screen === "select_node") {
-    const hit = window.getNodeSelectButtonAtPoint(c, getSortedNodes(), point.x, point.y);
-    if (hit) {
-      if (hit.type === "back") {
-        screen = "menu";
-      } else if (hit.type === "node") {
-        selectedNodeId = hit.nodeId;
-        screen = "logs";
-      }
-      draw();
-    }
-    return;
-  }
-
-  if (screen === "calibrate") {
-    const hit = window.getCalibrateButtonAtPoint(c, point.x, point.y);
-    if (hit) {
-      if (hit.type === "back") {
-        screen = "menu";
-      } else if (hit.type === "reset") {
-        window.resetSensorAssignment();
-      } else if (hit.type === "skip") {
-        startGameWithMode("mouse");
-      } else if (hit.type === "start") {
-        startGameWithMode("sensor");
-      }
-      draw();
-    }
-    return;
-  }
-
   if (screen === "game") {
     const pauseMenuHit = window.getPauseMenuButtonAtPoint(c, point.x, point.y);
     if (pauseMenuHit) {
@@ -972,6 +939,12 @@ c.addEventListener("click", (event) => {
       return;
     }
 
+    if (window.getStatsToggleAtPoint(c, point.x, point.y)) {
+      window.toggleGameStats();
+      draw();
+      return;
+    }
+
     const overButton = window.getGameOverButtonAtPoint(c, point.x, point.y);
     if (overButton) {
       if (overButton.type === "restart") {
@@ -993,16 +966,6 @@ c.addEventListener("click", (event) => {
     return;
   }
 
-  if (screen === "logs") {
-    const hit = window.getLogsButtonAtPoint(c, point.x, point.y);
-    if (hit && hit.type === "back") {
-      screen = "menu";
-      selectedNodeId = null;
-      draw();
-    }
-    return;
-  }
-
   if (screen === "alert") {
     // A game-driven alert has no Back button; it clears when the player steps
     // back. Nor has the control panel's held one: it clears when let go.
@@ -1016,56 +979,83 @@ c.addEventListener("click", (event) => {
     return;
   }
 
-  if (screen === "options") {
-    const hit = window.getOptionsButtonAtPoint(c, point.x, point.y);
-    if (hit) {
-      if (hit.type === "back") {
-        screen = "menu";
-      } else if (hit.type === "duration") {
-        window.setGameSettings({ durationMs: hit.value });
-      } else if (hit.type === "lives") {
-        window.setGameSettings({ startingLives: hit.value });
-      } else if (hit.type === "sound") {
-        const current = window.getGameSettings();
-        window.setGameSettings({ soundEnabled: !current.soundEnabled });
-      } else if (hit.type === "testMode") {
-        const current = window.getGameSettings();
-        window.setGameSettings({ testMode: !current.testMode });
-      }
-      draw();
-    }
-    return;
-  }
-
-  const choice = window.getMenuButtonAtPoint(c, point.x, point.y);
-  if (choice === "Play") {
-    window.resetSensorAssignment();
-    screen = "calibrate";
-    draw();
-    return;
-  }
-
-  if (choice === "Options") {
-    screen = "options";
-    draw();
-    return;
-  }
-
-  if (choice === "Logs") {
-    if (nodes.size === 1) {
-      selectedNodeId = getSortedNodes()[0]?.id ?? null;
-      screen = "logs";
-    } else {
-      screen = "select_node";
-    }
-    draw();
-    return;
-  }
-
-  if (choice && socket && socket.readyState === WebSocket.OPEN) {
-    socket.send(JSON.stringify({ type: "menu:select", option: choice }));
-  }
 });
+
+// Buttons on the HTML screens (index.html), routed here by ui.js. Keyed by
+// screen, then by the button's data-action; `data` is the button's dataset.
+const screenActions = {
+  menu: {
+    play() {
+      window.resetSensorAssignment();
+      screen = "calibrate";
+    },
+    options() {
+      screen = "options";
+    },
+    logs() {
+      if (nodes.size === 1) {
+        selectedNodeId = getSortedNodes()[0]?.id ?? null;
+        screen = "logs";
+      } else {
+        screen = "select_node";
+      }
+    },
+  },
+  options: {
+    back() {
+      screen = "menu";
+    },
+    duration(data) {
+      window.setGameSettings({ durationMs: Number(data.value) });
+    },
+    lives(data) {
+      window.setGameSettings({ startingLives: Number(data.value) });
+    },
+    sound() {
+      window.setGameSettings({ soundEnabled: !window.getGameSettings().soundEnabled });
+    },
+    testMode() {
+      window.setGameSettings({ testMode: !window.getGameSettings().testMode });
+    },
+  },
+  select_node: {
+    back() {
+      screen = "menu";
+    },
+    node(data) {
+      selectedNodeId = Number(data.node);
+      screen = "logs";
+    },
+  },
+  logs: {
+    back() {
+      screen = "menu";
+      selectedNodeId = null;
+    },
+  },
+  calibrate: {
+    back() {
+      screen = "menu";
+    },
+    reset() {
+      window.resetSensorAssignment();
+    },
+    skip() {
+      startGameWithMode("mouse");
+    },
+    // Live once both nodes are identified: calibration ends here.
+    start() {
+      if (window.isSensorAssignmentComplete()) startGameWithMode("sensor");
+    },
+  },
+};
+
+window.onScreenAction = function onScreenAction(action, data) {
+  const handler = screenActions[screen] && screenActions[screen][action];
+  if (!handler) return;
+  handler(data);
+  draw();
+};
 
 window.addEventListener("resize", resizeCanvas);
 resizeCanvas();
