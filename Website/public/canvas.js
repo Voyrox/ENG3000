@@ -18,6 +18,9 @@ let gameLoopId = null;
 // Which screen the alert returns to. A game-driven alert clears itself, so it
 // has no Back button; the calibrate-driven one does.
 let alertReturnScreen = "calibrate";
+// The screen the control panel's held alert went up over, outside a round
+// (holdAlert()); null when it is not up there.
+let heldAlertFrom = null;
 const audioContext = new (window.AudioContext || window.webkitAudioContext)();
 let alertOscillator = null;
 
@@ -79,25 +82,18 @@ function draw() {
   syncNodesAim();
   syncNodesPulses();
 
-  if (screen === "calibrate") {
-    renderCalibrate(ctx, c, getSortedNodes());
+  // The menu and setup screens are HTML pages over the canvas (see ui.js). Each
+  // is filled before it is shown, so its default control exists to take focus.
+  const page = HTML_SCREENS[screen];
+  if (page) {
+    page();
+    window.showScreen(screen);
     return;
   }
+  window.showScreen(null);
 
   if (screen === "game") {
     window.renderGame(ctx, c);
-    return;
-  }
-
-  if (screen === "select_node") {
-    renderNodeSelect(ctx, c, getSortedNodes());
-    return;
-  }
-
-  if (screen === "logs" && selectedNodeId !== null) {
-    const node = nodes.get(selectedNodeId) || { id: selectedNodeId, address: "unknown" };
-    const entries = logsBuffer.get(selectedNodeId) || [];
-    renderLogs(ctx, c, node, entries);
     return;
   }
 
@@ -106,22 +102,23 @@ function draw() {
     window.renderAlert(ctx, c, {
       active: true,
       distanceCm: fromGame ? window.getGameAlertInfo().distanceCm : null,
-      showBack: !fromGame,
+      showBack: !fromGame && heldAlertFrom === null,
+      footer: fromGame ? "The game resumes automatically" : null,
     });
-    return;
   }
-
-  if (screen === "options") {
-    window.renderOptions(ctx, c);
-    return;
-  }
-
-  const statusText = nodes.size > 0
-    ? `Node count: ${nodes.size} | Total RPS: ${Array.from(nodes.values()).reduce((sum, node) => sum + (node.rps || 0), 0).toFixed(1)}`
-    : "Waiting for ESP32 data...";
-
-  renderMenu(ctx, c, statusText, getSortedNodes());
 }
+
+// Fills in each HTML screen from live state; called by draw().
+const HTML_SCREENS = {
+  menu: () => window.updateMenu(getSortedNodes()),
+  options: () => window.updateOptionsScreen(),
+  select_node: () => window.updateNodeSelectScreen(getSortedNodes()),
+  logs: () => {
+    const node = nodes.get(selectedNodeId) || { id: selectedNodeId ?? "?", address: "unknown address" };
+    window.updateLogsScreen(node, logsBuffer.get(selectedNodeId) || []);
+  },
+  calibrate: () => window.updateCalibrateScreen(getSortedNodes()),
+};
 
 function getSortedNodes() {
   return Array.from(nodes.values()).sort((a, b) => a.id - b.id);
@@ -231,14 +228,12 @@ function logSensorStatus() {
   const where = debug.grid ? `grid(${debug.grid.gx},${debug.grid.gy})` : "no coordinate";
   const distance = debug.distanceCm === null ? "--" : `${debug.distanceCm.toFixed(1)}cm`;
 
-  // Out-of-bounds is the state people most often need explained, so show the
-  // window the reading actually failed against.
+  // Out of bounds and Sensors offline each have one cause: say which.
   let why = "";
-  if (debug.status === "out-of-bounds" && debug.bounds) {
-    const { nearCm, farCm } = debug.bounds;
-    why =
-      `  (play area ${nearCm.toFixed(0)}-${farCm.toFixed(0)}cm` +
-      `, limit ${debug.limits.maxCm.toFixed(0)}cm)`;
+  if (debug.status === "out-of-bounds") {
+    why = `  (both nodes lost over their last ${debug.tuning.lostReadings} readings)`;
+  } else if (debug.status === "offline") {
+    why = `  (no reading from either node for ${(debug.tuning.offlineMs / 1000).toFixed(1)} s)`;
   }
 
   console.info(
@@ -342,12 +337,16 @@ function learnRoom() {
   }
 }
 
+// A round is on screen: the game, or the alert it raised.
+function roundOnScreen() {
+  return screen === "game" || (screen === "alert" && alertReturnScreen === "game");
+}
+
 // The loop keeps running across the game <-> alert boundary so the sensors are
 // still read while the alert is up - that is what lets it clear itself once the
 // player steps back past the threshold.
 function gameLoopTick(timestamp) {
-  const runningScreen = screen === "game" || (screen === "alert" && alertReturnScreen === "game");
-  if (!runningScreen) {
+  if (!roundOnScreen()) {
     gameLoopId = null;
     return;
   }
@@ -397,6 +396,17 @@ let serverFiltering = false;
 let sentAssignmentKey = null;
 let sentCalibrationKey = null;
 let sentPositionMethod = null;
+let sentLostReadings = null;
+let sentKalman = null;
+let sentAngleLimit = null;
+let sentTriAimTolerance = null;
+let sentDeadZone = null;
+let sentCellDecision = null;
+let sentTrackMoving = null;
+let sentCellConfidence = null;
+let sentDynamicRules = null;
+let sentConfidenceLevel = null;
+let sentFarHalf = null;
 
 function sendToServer(message) {
   if (!socket || socket.readyState !== WebSocket.OPEN) return false;
@@ -421,12 +431,22 @@ function applyServerFilteringFlag(payload) {
 //
 // The assignment goes whatever the filtering flag: the server passes each
 // scanner node its role (ROLE LEFT / ROLE RIGHT), which sets its servo limits.
+// So does the calibration: the server's search aims a lost node at a cell's
+// centre, which needs the calibrated rows (search.py, heading.py).
 function syncServerFilterSetup() {
   if (window.isSensorAssignmentComplete()) {
     const slots = window.getSensorAssignment();
     const key = JSON.stringify(slots);
     if (key !== sentAssignmentKey && sendToServer({ type: "sensors:assign", slots })) {
       sentAssignmentKey = key;
+    }
+  }
+
+  const perColumn = window.getCapturedCalibration();
+  if (perColumn) {
+    const key = JSON.stringify(perColumn);
+    if (key !== sentCalibrationKey && sendToServer({ type: "calibration:update", perColumn })) {
+      sentCalibrationKey = key;
     }
   }
 
@@ -438,12 +458,76 @@ function syncServerFilterSetup() {
     sentPositionMethod = method;
   }
 
-  const perColumn = window.getCapturedCalibration();
-  if (perColumn) {
-    const key = JSON.stringify(perColumn);
-    if (key !== sentCalibrationKey && sendToServer({ type: "calibration:update", perColumn })) {
-      sentCalibrationKey = key;
-    }
+  // And the readings each node's lost score is taken over (Out of bounds).
+  const lostReadings = window.getLostReadings();
+  if (lostReadings !== sentLostReadings && sendToServer({ type: "sensor:lostReadings", count: lostReadings })) {
+    sentLostReadings = lostReadings;
+  }
+
+  // The Kalman switch, so the server's chain smooths the same way.
+  const kalman = window.getKalman();
+  if (kalman !== sentKalman && sendToServer({ type: "filter:kalman", on: kalman })) {
+    sentKalman = kalman;
+  }
+
+  // The angle limit switch, so the server's chain drops the same readings.
+  const angleLimit = window.getAngleLimit();
+  if (angleLimit !== sentAngleLimit && sendToServer({ type: "filter:angleLimit", on: angleLimit })) {
+    sentAngleLimit = angleLimit;
+  }
+
+  // The tri aim tolerance switch, so the server's chain trilaterates the same way.
+  const triAimTolerance = window.getTriAimTolerance();
+  if (triAimTolerance !== sentTriAimTolerance &&
+      sendToServer({ type: "filter:triAimTolerance", on: triAimTolerance })) {
+    sentTriAimTolerance = triAimTolerance;
+  }
+
+  // The dead zone switch, so the server's chain checks too close the same way.
+  const deadZone = window.getDeadZone();
+  if (deadZone !== sentDeadZone && sendToServer({ type: "filter:deadZone", on: deadZone })) {
+    sentDeadZone = deadZone;
+  }
+
+  // The cell decision switch, so the server's chain decides the cell the same way.
+  const cellDecision = window.getCellDecision();
+  if (cellDecision !== sentCellDecision &&
+      sendToServer({ type: "filter:cellDecision", on: cellDecision })) {
+    sentCellDecision = cellDecision;
+  }
+
+  // The tracking switch, so the server's chain follows a moving player the same way.
+  const trackMoving = window.getTrackMoving();
+  if (trackMoving !== sentTrackMoving &&
+      sendToServer({ type: "filter:trackMoving", on: trackMoving })) {
+    sentTrackMoving = trackMoving;
+  }
+
+  // The cell confidence switch, so the server's chain decides cells the same way.
+  const cellConfidence = window.getCellConfidenceSwitch();
+  if (cellConfidence !== sentCellConfidence &&
+      sendToServer({ type: "filter:cellConfidence", on: cellConfidence })) {
+    sentCellConfidence = cellConfidence;
+  }
+
+  // Dynamic's rule switches, so the server's chain places the player the same way.
+  const rules = window.getDynamicRules();
+  const rulesKey = JSON.stringify(rules);
+  if (rulesKey !== sentDynamicRules && sendToServer({ type: "sensor:dynamicRules", rules })) {
+    sentDynamicRules = rulesKey;
+  }
+
+  // The confidence level Dynamic's first rule places a node alone at.
+  const confidenceLevel = window.getConfidenceLevel();
+  if (confidenceLevel !== sentConfidenceLevel &&
+    sendToServer({ type: "sensor:confidenceLevel", pct: confidenceLevel })) {
+    sentConfidenceLevel = confidenceLevel;
+  }
+
+  // The far half switch, so the server's chain scores readings the same way.
+  const farHalf = window.getFarHalf();
+  if (farHalf !== sentFarHalf && sendToServer({ type: "sensor:farHalf", on: farHalf })) {
+    sentFarHalf = farHalf;
   }
 }
 
@@ -453,24 +537,57 @@ function startGameWithMode(mode) {
   stopAlertNoise();
   window.setGameInputMode(mode);
   window.resetGame();
+  // A new round: the server's search and filter start again (app.py).
+  sendToServer({ type: "round:start" });
   alertReturnScreen = "game";
   screen = "game";
   startGameLoop();
 }
 
-// Touching the phone pad takes the cursor over from the sensors; lifting the
-// finger hands it straight back. The phone re-sends its position while a
-// finger is held, so if it goes quiet (lost release, phone locked) the
-// sensors take over again after REMOTE_IDLE_MS.
+// Touching the phone pad takes the cursor over from whichever mode is
+// running (sensors or mouse), and nothing else on the screen changes; lifting
+// the finger hands it straight back. The phone re-sends its position while a
+// finger is held, so if it goes quiet (lost release, phone locked) the mode
+// takes over again after REMOTE_IDLE_MS.
 const REMOTE_IDLE_MS = 1000;
 let remoteIdleTimer = null;
 
 function releaseRemote() {
   window.clearTimeout(remoteIdleTimer);
   remoteIdleTimer = null;
-  if (screen === "game" && window.getGameInputMode() === "remote") {
-    window.setGameInputMode("sensor");
+  window.releaseRemotePoint();
+}
+
+// The control panel's "Hold: too close" button (Aaron, 5 Oct): the too-close
+// alert is up while a finger is on it, from any screen, and lifting the
+// finger goes back. In a round the game loop puts it up and takes it down, as
+// for a real one, and the round waits (isSensorBlocked() in game.js); on any
+// other screen it goes up here, over that screen. The phone re-sends the hold
+// while the finger is down, so if it goes quiet the alert drops after
+// REMOTE_IDLE_MS.
+let alertHoldTimer = null;
+
+function holdAlert(on) {
+  window.clearTimeout(alertHoldTimer);
+  alertHoldTimer = null;
+  window.setAlertHeld(on);
+  if (on) {
+    alertHoldTimer = window.setTimeout(() => holdAlert(false), REMOTE_IDLE_MS);
+    if (!roundOnScreen() && screen !== "alert") {
+      heldAlertFrom = screen;
+      alertReturnScreen = screen;
+      screen = "alert";
+      if (soundEnabled()) playAlertNoise();
+    }
+  } else {
+    // Back to the screen it went up over, unless a round has started since.
+    if (heldAlertFrom !== null && screen === "alert" && alertReturnScreen !== "game") {
+      screen = heldAlertFrom;
+      stopAlertNoise();
+    }
+    heldAlertFrom = null;
   }
+  draw();
 }
 
 // Commands relayed from the phone control panel (/control). The server only
@@ -478,8 +595,8 @@ function releaseRemote() {
 function handleRemoteCommand(command) {
   switch (command.action) {
     case "point":
-      if (screen !== "game") break;
-      if (window.getGameInputMode() !== "remote") window.setGameInputMode("remote");
+      // Also over the too-close alert: the phone placing the player clears it.
+      if (!roundOnScreen()) break;
       window.setRemotePoint(command.x, command.y);
       window.clearTimeout(remoteIdleTimer);
       remoteIdleTimer = window.setTimeout(() => {
@@ -491,7 +608,7 @@ function handleRemoteCommand(command) {
       releaseRemote();
       break;
     case "start":
-      startGameWithMode(command.mode || "remote");
+      startGameWithMode(command.mode || "sensor");
       break;
     case "mode":
       if (screen === "game") window.setGameInputMode(command.mode);
@@ -513,10 +630,93 @@ function handleRemoteCommand(command) {
     case "testMode":
       window.setGameSettings({ testMode: Boolean(command.enabled) });
       break;
+    case "alert":
+      // The game loop raises or clears the alert screen on its next frame.
+      window.setRemoteAlert(command.enabled);
+      break;
     case "position":
-      // The position switch, as the buttons above the sensor panel do it: line
-      // of sight, trilateration or their average. An unknown method is ignored.
+      // The position switch, which is on the control panel only: Dynamic,
+      // line of sight, trilateration or their average. An unknown method is
+      // ignored.
       window.setPositionMethod(command.method);
+      syncServerFilterSetup();
+      break;
+    case "compare":
+      // Compare: each method's ring on the control panel's pad.
+      window.setPositionCompare(command.enabled);
+      break;
+    case "lostReadings":
+      // How many readings each node's lost score is taken over (Out of
+      // bounds when both nodes are lost). Clamped by the game.
+      window.setLostReadings(command.count);
+      syncServerFilterSetup();
+      break;
+    case "kalman":
+      // The Kalman switch: both of the game's Kalman filters on or off.
+      window.setKalman(command.enabled);
+      syncServerFilterSetup();
+      break;
+    case "angleLimit":
+      // The angle limit: line of sight and Dynamic's node rules drop a reading
+      // further than its servo line runs on the grid, or take every one.
+      window.setAngleLimit(command.enabled);
+      syncServerFilterSetup();
+      break;
+    case "triAimTolerance":
+      // Trilateration's aim tolerance: its beam check lets a crossing be 20
+      // degrees further off each servo's aim, or holds it to the beam.
+      window.setTriAimTolerance(command.enabled);
+      syncServerFilterSetup();
+      break;
+    case "deadZone":
+      // The dead zone: too close by each reading's depth along its servo
+      // line, or by the reading itself.
+      window.setDeadZone(command.enabled);
+      syncServerFilterSetup();
+      break;
+    case "cellDecision":
+      // The cell decision: the margin, the dwell and each node against
+      // itself, or the older vote.
+      window.setCellDecision(command.enabled);
+      syncServerFilterSetup();
+      break;
+    case "trackMoving":
+      // Tracking: while the player moves, the cell decision follows them.
+      // Off by default (Aaron, 6 Oct).
+      window.setTrackMoving(command.enabled);
+      syncServerFilterSetup();
+      break;
+    case "cellConfidence":
+      // Cell confidence: the cell decision uses how sure the game is that
+      // the player has stood in each cell.
+      window.setCellConfidence(command.enabled);
+      syncServerFilterSetup();
+      break;
+    case "cellLock":
+      // The cell lock: the drawn cursor, and the hole it scores in, keep to
+      // the voted cell. Drawing only, so the server's chain is not told.
+      window.setCellLock(command.enabled);
+      break;
+    case "tooCloseHold":
+      // The hold button, down (and re-sent while held) or up.
+      holdAlert(Boolean(command.on));
+      break;
+    case "dynamicRules":
+      // Dynamic's rules on or off: { farPriority, confidenceNode, columnLock,
+      // loneNode, cornerNode }, only the switches named.
+      window.setDynamicRules(command.rules);
+      syncServerFilterSetup();
+      break;
+    case "confidenceLevel":
+      // The confidence level, in percent, at which a node places the player
+      // on its own (Dynamic's first rule). Clamped by the game.
+      window.setConfidenceLevel(command.pct);
+      syncServerFilterSetup();
+      break;
+    case "farHalf":
+      // Far half: a half reading in the back row counts as found towards
+      // Out of bounds, or as half.
+      window.setFarHalf(command.enabled);
       syncServerFilterSetup();
       break;
     default:
@@ -532,12 +732,12 @@ function handleRemoteCommand(command) {
 function sendGameStatus() {
   if (!socket || socket.readyState !== WebSocket.OPEN) return;
   const state = window.getGameState();
-  const loopRunning = screen === "game" || (screen === "alert" && alertReturnScreen === "game");
   socket.send(JSON.stringify({
     type: "game:status",
     screen,
     status: state.status,
     mode: state.inputMode,
+    remote: window.isRemoteActive(),
     score: state.score,
     lives: state.lives,
     level: state.level,
@@ -545,15 +745,61 @@ function sendGameStatus() {
     activeHole: state.activeHole,
     moleType: state.moleType,
     remoteHole: state.remoteHole,
-    cursor: loopRunning ? window.getGameCursorStatus(c) : null,
+    cursor: roundOnScreen() ? window.getGameCursorStatus(c) : null,
     testMode: window.getGameSettings().testMode,
+    alertForced: window.isRemoteAlertOn(),
     positionMethod: window.getPositionMethod(),
     positionMethods: window.getPositionMethods(),
+    dynamicFollowing: window.getDynamicFollowing(),
+    compare: window.getPositionCompare(),
+    lostReadings: window.getLostReadings(),
+    lostScores: window.getLostScores(),
+    kalman: window.getKalman(),
+    angleLimit: window.getAngleLimit(),
+    triAimTolerance: window.getTriAimTolerance(),
+    deadZone: window.getDeadZone(),
+    cellLock: window.getCellLock(),
+    cellDecision: window.getCellDecision(),
+    trackMoving: window.getTrackMoving(),
+    cellConfidence: window.getCellConfidenceSwitch(),
+    alertHeld: window.isAlertHeld(),
+    dynamicRules: window.getDynamicRules(),
+    confidenceLevel: window.getConfidenceLevel(),
+    farHalf: window.getFarHalf(),
   }));
 }
 
 // 10 Hz, so the cursor mirrored on the phone glides rather than steps.
 window.setInterval(sendGameStatus, 100);
+
+// The player's track for the server's search (Aaron, 6 Oct): when a node
+// loses a moving player it is aimed at the cell they were walking into
+// (heading.py). Moving or still, where they are (cm), the line-of-sight
+// track's velocity (cm/s) and how long ago the track last took a reading,
+// from getSensorMotion(); only during a sensor round, and only while the
+// position is the game's own - not held on the last cell through bad
+// readings, Out of bounds or no signal. Then the server's last track ages
+// out instead of a stale position, still "moving", looking new: a search
+// that has given up on a cell takes only tracks newer than that (search.py).
+function sendTrackUpdate() {
+  if (!roundOnScreen() || window.getGameInputMode() !== "sensor") return;
+  const sensor = window.getGameState().sensor || {};
+  if (sensor.status !== "ok" || sensor.held) return;
+  const motion = window.getSensorMotion();
+  if (motion.x === null || motion.y === null) return;
+  sendToServer({
+    type: "track:update",
+    moving: Boolean(motion.moving),
+    x: motion.x,
+    y: motion.y,
+    vx: motion.vx,
+    vy: motion.vy,
+    ageMs: Math.max(0, performance.now() - motion.at),
+  });
+}
+
+// 10 Hz, like the game status: the search reads the latest one.
+window.setInterval(sendTrackUpdate, 100);
 
 function connectSocket() {
   socket = new WebSocket(wsUrl);
@@ -607,8 +853,22 @@ function connectSocket() {
     // No server, no coordinate: the round pauses on "no signal" rather than
     // playing on a frozen one.
     if (serverFiltering) window.setServerCoordinate(null);
-    // A restarted server has forgotten the position method; send it again.
+    // A restarted server has forgotten the position method, the lost
+    // readings, the Kalman, angle limit, tri aim tolerance, dead zone and far
+    // half switches, Dynamic's rule switches and the confidence level; send
+    // them again.
     sentPositionMethod = null;
+    sentLostReadings = null;
+    sentKalman = null;
+    sentAngleLimit = null;
+    sentTriAimTolerance = null;
+    sentDeadZone = null;
+    sentCellDecision = null;
+    sentTrackMoving = null;
+    sentCellConfidence = null;
+    sentDynamicRules = null;
+    sentConfidenceLevel = null;
+    sentFarHalf = null;
     if (reconnectTimer === null) {
       reconnectTimer = window.setTimeout(() => {
         reconnectTimer = null;
@@ -636,37 +896,6 @@ c.addEventListener("mousemove", (event) => {
 
 c.addEventListener("click", (event) => {
   const point = getCanvasPoint(event);
-
-  if (screen === "select_node") {
-    const hit = window.getNodeSelectButtonAtPoint(c, getSortedNodes(), point.x, point.y);
-    if (hit) {
-      if (hit.type === "back") {
-        screen = "menu";
-      } else if (hit.type === "node") {
-        selectedNodeId = hit.nodeId;
-        screen = "logs";
-      }
-      draw();
-    }
-    return;
-  }
-
-  if (screen === "calibrate") {
-    const hit = window.getCalibrateButtonAtPoint(c, point.x, point.y);
-    if (hit) {
-      if (hit.type === "back") {
-        screen = "menu";
-      } else if (hit.type === "reset") {
-        window.resetSensorAssignment();
-      } else if (hit.type === "skip") {
-        startGameWithMode("mouse");
-      } else if (hit.type === "start") {
-        startGameWithMode("sensor");
-      }
-      draw();
-    }
-    return;
-  }
 
   if (screen === "game") {
     const pauseMenuHit = window.getPauseMenuButtonAtPoint(c, point.x, point.y);
@@ -710,6 +939,12 @@ c.addEventListener("click", (event) => {
       return;
     }
 
+    if (window.getStatsToggleAtPoint(c, point.x, point.y)) {
+      window.toggleGameStats();
+      draw();
+      return;
+    }
+
     const overButton = window.getGameOverButtonAtPoint(c, point.x, point.y);
     if (overButton) {
       if (overButton.type === "restart") {
@@ -722,36 +957,19 @@ c.addEventListener("click", (event) => {
       return;
     }
 
-    // The position switch above the sensor panel: line of sight,
-    // trilateration or their average, and Compare (sensor mode only).
-    const positionHit = window.getPositionSwitchAtPoint(c, point.x, point.y);
-    if (positionHit) {
-      window.applyPositionSwitch(positionHit);
-      syncServerFilterSetup();
-      draw();
-      return;
-    }
-
-    // Clicking to whack is a mouse-mode affordance only.
-    if (window.getGameInputMode() === "mouse" && window.handleGameClick(c, point.x, point.y)) {
-      draw();
-    }
-    return;
-  }
-
-  if (screen === "logs") {
-    const hit = window.getLogsButtonAtPoint(c, point.x, point.y);
-    if (hit && hit.type === "back") {
-      screen = "menu";
-      selectedNodeId = null;
+    // Clicking to whack is a mouse-mode affordance only, and not while the
+    // phone pad has the cursor.
+    if (window.getGameInputMode() === "mouse" && !window.isRemoteActive() &&
+        window.handleGameClick(c, point.x, point.y)) {
       draw();
     }
     return;
   }
 
   if (screen === "alert") {
-    // A game-driven alert has no Back button; it clears when the player steps back.
-    const showBack = alertReturnScreen !== "game";
+    // A game-driven alert has no Back button; it clears when the player steps
+    // back. Nor has the control panel's held one: it clears when let go.
+    const showBack = alertReturnScreen !== "game" && heldAlertFrom === null;
     const hit = window.getAlertButtonAtPoint(c, point.x, point.y, showBack);
     if (hit && hit.type === "back") {
       screen = alertReturnScreen;
@@ -761,58 +979,83 @@ c.addEventListener("click", (event) => {
     return;
   }
 
-  if (screen === "options") {
-    const hit = window.getOptionsButtonAtPoint(c, point.x, point.y);
-    if (hit) {
-      if (hit.type === "back") {
-        screen = "menu";
-      } else if (hit.type === "duration") {
-        window.setGameSettings({ durationMs: hit.value });
-      } else if (hit.type === "lives") {
-        window.setGameSettings({ startingLives: hit.value });
-      } else if (hit.type === "sound") {
-        const current = window.getGameSettings();
-        window.setGameSettings({ soundEnabled: !current.soundEnabled });
-      } else if (hit.type === "testMode") {
-        const current = window.getGameSettings();
-        window.setGameSettings({ testMode: !current.testMode });
-      } else if (hit.type === "position") {
-        window.setPositionMethod(hit.value);
-      }
-      draw();
-    }
-    return;
-  }
-
-  const choice = window.getMenuButtonAtPoint(c, point.x, point.y);
-  if (choice === "Play") {
-    window.resetSensorAssignment();
-    screen = "calibrate";
-    draw();
-    return;
-  }
-
-  if (choice === "Options") {
-    screen = "options";
-    draw();
-    return;
-  }
-
-  if (choice === "Logs") {
-    if (nodes.size === 1) {
-      selectedNodeId = getSortedNodes()[0]?.id ?? null;
-      screen = "logs";
-    } else {
-      screen = "select_node";
-    }
-    draw();
-    return;
-  }
-
-  if (choice && socket && socket.readyState === WebSocket.OPEN) {
-    socket.send(JSON.stringify({ type: "menu:select", option: choice }));
-  }
 });
+
+// Buttons on the HTML screens (index.html), routed here by ui.js. Keyed by
+// screen, then by the button's data-action; `data` is the button's dataset.
+const screenActions = {
+  menu: {
+    play() {
+      window.resetSensorAssignment();
+      screen = "calibrate";
+    },
+    options() {
+      screen = "options";
+    },
+    logs() {
+      if (nodes.size === 1) {
+        selectedNodeId = getSortedNodes()[0]?.id ?? null;
+        screen = "logs";
+      } else {
+        screen = "select_node";
+      }
+    },
+  },
+  options: {
+    back() {
+      screen = "menu";
+    },
+    duration(data) {
+      window.setGameSettings({ durationMs: Number(data.value) });
+    },
+    lives(data) {
+      window.setGameSettings({ startingLives: Number(data.value) });
+    },
+    sound() {
+      window.setGameSettings({ soundEnabled: !window.getGameSettings().soundEnabled });
+    },
+    testMode() {
+      window.setGameSettings({ testMode: !window.getGameSettings().testMode });
+    },
+  },
+  select_node: {
+    back() {
+      screen = "menu";
+    },
+    node(data) {
+      selectedNodeId = Number(data.node);
+      screen = "logs";
+    },
+  },
+  logs: {
+    back() {
+      screen = "menu";
+      selectedNodeId = null;
+    },
+  },
+  calibrate: {
+    back() {
+      screen = "menu";
+    },
+    reset() {
+      window.resetSensorAssignment();
+    },
+    skip() {
+      startGameWithMode("mouse");
+    },
+    // Live once both nodes are identified: calibration ends here.
+    start() {
+      if (window.isSensorAssignmentComplete()) startGameWithMode("sensor");
+    },
+  },
+};
+
+window.onScreenAction = function onScreenAction(action, data) {
+  const handler = screenActions[screen] && screenActions[screen][action];
+  if (!handler) return;
+  handler(data);
+  draw();
+};
 
 window.addEventListener("resize", resizeCanvas);
 resizeCanvas();

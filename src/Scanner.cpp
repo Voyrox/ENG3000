@@ -35,8 +35,8 @@ ScanState ScanReading::classify(float leftCm, float rightCm) {
 
 // --- Scanner ----------------------------------------------------------------
 
-Scanner::Scanner(UltrasonicSensor& left, UltrasonicSensor& right, ScannerServo& servo)
-    : leftSensor_(left), rightSensor_(right), servo_(servo) {}
+Scanner::Scanner(UltrasonicSensor& left, UltrasonicSensor& right, ScannerServo& servo, DeadZoneAlarm& deadZone)
+    : leftSensor_(left), rightSensor_(right), servo_(servo), deadZone_(deadZone) {}
 
 void Scanner::begin() {
     leftSensor_.begin();
@@ -57,6 +57,7 @@ bool Scanner::update() {
     // From here on an echo from the room is no echo: it is not the player.
     PulsePair pair = {withoutRoom(Side::Left, heard.leftCm), withoutRoom(Side::Right, heard.rightCm)};
     logPair(heard, pair);
+    deadZone_.hear(pair.leftCm, pair.rightCm, servo_.angleDeg());
 
     if (pulseCount_ < config::MAX_PULSES_PER_ANGLE) {
         pulses_[pulseCount_++] = pair;
@@ -75,6 +76,7 @@ void Scanner::setRole(NodeRole role) {
     int minDeg = servo_.minDeg();
     int maxDeg = servo_.maxDeg();
     servo_.setRole(role);
+    forgetLastHeard();
     // A learn sweeping the old range would not cover the new one. The same role
     // sent again (the game page reconnecting, say) leaves it running.
     if (room_.status() == RoomStatus::Learning && (servo_.minDeg() != minDeg || servo_.maxDeg() != maxDeg)) {
@@ -91,6 +93,7 @@ void Scanner::holdAt(int degrees) {
         Serial.println("Room learning stopped: servo held for calibration");
     }
     servo_.holdAt(degrees);
+    forgetLastHeard();
     restart();
 }
 
@@ -99,8 +102,37 @@ void Scanner::resumeScanning() {
     restart();
 }
 
+void Scanner::lookAt(int degrees) {
+    // A held servo stays put, and a LOOK mid-learning would skew the room map.
+    if (servo_.isHeld() || room_.status() == RoomStatus::Learning) {
+        return;
+    }
+    int before = servo_.angleDeg();
+    servo_.stepBy(degrees - before);
+    lookStartMs_ = millis();
+    lookSettleMs_ = abs(servo_.angleDeg() - before) * config::LOOK_SETTLE_MS_PER_DEG;
+    // A new bearing: the echo from the old one says nothing about this one.
+    forgetLastHeard();
+    restart();
+}
+
 void Scanner::setPulsesPerAngle(int count) {
     pulsesPerAngle_ = constrain(count, 1, config::MAX_PULSES_PER_ANGLE);
+}
+
+void Scanner::setFarHold(bool on) {
+    farHold_ = on;
+    forgetLastHeard();
+}
+
+void Scanner::setFarSteer(bool on) {
+    farSteer_ = on;
+}
+
+// Nothing to hold on to: the next lost pair sweeps.
+void Scanner::forgetLastHeard() {
+    lastHeardCm_ = config::NO_ECHO;
+    farLostPairs_ = 0;
 }
 
 void Scanner::restart() {
@@ -199,6 +231,10 @@ bool Scanner::readPair(PulsePair& pair) {
     // rig was never at, so it cannot be compared with - or triangulated against -
     // a reading from a settled horn. Wait the horn out first.
     if (!servo_.isSettled()) {
+        return false;
+    }
+    // A LOOK swing is longer than a scan step, so it is waited out in full.
+    if (millis() - lookStartMs_ < lookSettleMs_) {
         return false;
     }
 
@@ -318,9 +354,14 @@ void Scanner::move(const ScanReading& reading) {
         return;
     }
 
+    bool leftIsTarget = UltrasonicSensor::isTarget(reading.leftCm);
+    bool rightIsTarget = UltrasonicSensor::isTarget(reading.rightCm);
+
     switch (reading.state) {
     case ScanState::Found:
         steerDir_ = 1;
+        lastHeardCm_ = min(reading.leftCm, reading.rightCm);
+        farLostPairs_ = 0;
         break;
 
     case ScanState::HalfFound: {
@@ -332,21 +373,44 @@ void Scanner::move(const ScanReading& reading) {
         // anything - it is grinding against the limit. steerDir_ reverses the
         // next step, so the rig backs off the stop, and the step after that
         // steers towards the player again.
-        bool leftIsTarget = UltrasonicSensor::isTarget(reading.leftCm);
-        bool rightIsTarget = UltrasonicSensor::isTarget(reading.rightCm);
+        //
+        // Far steer: an echo far out takes the smaller step (see Config.h).
         bool towardsLeft = leftIsTarget && (!rightIsTarget || reading.leftCm <= reading.rightCm);
-        int step = (towardsLeft ? config::STEER_STEP_DEG : -config::STEER_STEP_DEG) * steerDir_;
+        float echoCm = towardsLeft ? reading.leftCm : reading.rightCm;
+        int size = (farSteer_ && echoCm >= config::FAR_RANGE_CM) ? config::FAR_STEER_STEP_DEG
+                                                                  : config::STEER_STEP_DEG;
+        int step = (towardsLeft ? size : -size) * steerDir_;
         bool hitLimit = servo_.stepBy(step);
         steerDir_ = hitLimit ? -steerDir_ : 1;
+        lastHeardCm_ = echoCm;
+        farLostPairs_ = 0;
         break;
     }
 
-    case ScanState::Lost:
+    case ScanState::Lost: {
         steerDir_ = 1;
+        // Far hold: the last echo was far out, where a player is a small target
+        // and a pair often misses them; stay put for a few lost pairs before
+        // sweeping off. Not against either stop: an echo there is more likely
+        // the room's edge than the player (6 Oct logs: the left node held 113 cm
+        // at its limit), and the sweep turns back from a stop anyway.
+        int angle = servo_.angleDeg();
+        bool atStop = angle <= servo_.minDeg() || angle >= servo_.maxDeg();
+        if (farHold_ && lastHeardCm_ >= config::FAR_RANGE_CM && !atStop &&
+            farLostPairs_ < config::FAR_HOLD_PAIRS) {
+            farLostPairs_++;
+            if (config::LOG_EVERY_PAIR) {
+                Serial.printf("  far hold %d/%d after %.0f cm\n", farLostPairs_, config::FAR_HOLD_PAIRS,
+                              lastHeardCm_);
+            }
+            break;
+        }
+        forgetLastHeard();
         if (servo_.stepBy(config::SWEEP_STEP_DEG * sweepDir_)) {
             sweepDir_ = -sweepDir_;
         }
         break;
+    }
     }
 }
 

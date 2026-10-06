@@ -1,8 +1,11 @@
 // alert.js - Full-screen "too close to the screen" alert.
 //
-// This screen covers one condition only: the raw distance reading has dropped
-// below ALERT_DISTANCE_CM. It owns that threshold so the game and the
-// calibration screens all agree on what "too close" means.
+// This screen covers one condition only: a raw reading has dropped below
+// ALERT_DISTANCE_CM - with the dead zone on (tuning.deadZone in game.js), its
+// depth along the node's servo line, so the 10 cm strip across the front of
+// the grid. It owns that threshold so the game and the calibration screens
+// all agree on what "too close" means. The control panel's hold button puts
+// the same screen up on demand (setAlertHeld() in game.js).
 //
 // renderAlert() takes a boolean `active`; when false it draws nothing and
 // returns false, so the caller can fall through to the normal frame.
@@ -41,11 +44,14 @@ window.getAlertLayout = function getAlertLayout(canvas) {
 
 // options:
 //   active      - boolean; when false nothing is drawn and false is returned
-//   distanceCm  - latest raw reading, shown to the player when available
+//   distanceCm  - latest raw reading (its depth, with the dead zone on),
+//                 shown to the player when available
 //   showBack    - draw the manual Back button (the calibrate entry point).
 //                 Sensor-driven alerts clear themselves, so they hide it.
+//   footer      - the line in its place without it; null draws none
 window.renderAlert = function renderAlert(ctx, canvas, options = {}) {
-  const { active = true, distanceCm = null, showBack = true } = options;
+  const { active = true, distanceCm = null, showBack = true,
+    footer = "The game resumes automatically" } = options;
   if (!active) return false;
 
   const layout = window.getAlertLayout(canvas);
@@ -76,10 +82,10 @@ window.renderAlert = function renderAlert(ctx, canvas, options = {}) {
     ctx.fillStyle = "#b21b1b";
     ctx.font = `bold ${Math.max(18, Math.min(24, buttonHeight * 0.5))}px monospace`;
     ctx.fillText("Back", centerX, y + buttonHeight * 0.68);
-  } else {
+  } else if (footer) {
     ctx.fillStyle = "rgba(255, 255, 255, 0.75)";
     ctx.font = `${Math.max(14, Math.min(20, width * 0.016))}px monospace`;
-    ctx.fillText("The game resumes automatically", centerX, y + buttonHeight * 0.68);
+    ctx.fillText(footer, centerX, y + buttonHeight * 0.68);
   }
 
   ctx.textAlign = "start";

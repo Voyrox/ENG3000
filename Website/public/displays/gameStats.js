@@ -154,7 +154,7 @@
       const status = frame.sensorStatus || "ok";
       if (status !== state.lastSensorStatus) {
         if (status === "too-close") state.tooCloseEvents += 1;
-        if (status === "out-of-bounds" || status === "no-signal") state.lostEvents += 1;
+        if (status === "out-of-bounds" || status === "no-signal" || status === "offline") state.lostEvents += 1;
         state.lastSensorStatus = status;
       }
 

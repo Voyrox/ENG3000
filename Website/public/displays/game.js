@@ -12,6 +12,14 @@
 //   window.readSensorCoordinate(orderedNodes)   - raw fix, also used by calibration
 //   window.isGameAlertActive()                  - drive the full-screen alert
 //   window.getGameAlertInfo()                   - { active, distanceCm }
+//   window.setAlertHeld(on) / window.isAlertHeld() - the control panel's held alert
+//   window.setDeadZone(on) / window.getDeadZone()   - too close by depth, or by the raw reading
+//   window.setCellLock(on) / window.getCellLock()   - the drawn cursor and its hits keep to the voted cell
+//   window.setCellDecision(on) / window.getCellDecision() - the cell decision, or the older vote
+//   window.setTrackMoving(on) / window.getTrackMoving()   - tracking: the cell follows a moving player
+//   window.setCellConfidence(on) / window.getCellConfidenceSwitch() - the cell decision uses cell confidence
+//   window.getCellConfidence()                  - each cell's confidence, 0-1, index gx * 3 + gy
+//   window.getSensorMotion()                    - { moving, x, y, vx, vy, at }: the player, their velocity and its time
 //   window.handleGameClick(canvas, x, y)        - register a hit attempt
 //   window.getGamePauseButtonAtPoint(canvas,x,y)- hit-test the pause icon
 //   window.getPauseMenuButtonAtPoint(canvas,x,y)- hit-test Resume / Restart / Main Menu
@@ -21,8 +29,9 @@
 //   window.getGameCursorStatus(canvas)          - the cursor and sensor (x, y) for the phone panel
 //   window.setServerFilteringActive(active)     - the server has SERVER_FILTERING on
 //   window.setServerCoordinate(coordinate)      - latest filtered coordinate from the server
+//   window.setRemotePoint(nx, ny) / window.releaseRemotePoint() - the phone pad's override
 //
-// Three input modes share all of the game logic. Only the cursor source differs:
+// Two input modes share all of the game logic. Only the cursor source differs:
 //   "mouse"  - canvas.js feeds raw canvas pixels straight from mousemove.
 //              Reached via Skip on the calibration screen.
 //   "sensor" - readSensorCoordinate() places the player from the LEFT and
@@ -39,11 +48,14 @@
 //              When the server runs filterRules.py (SERVER_FILTERING on), its
 //              coordinate replaces readSensorCoordinate() for the cursor and
 //              alert; with the flag off (the default) nothing here changes.
-//   "remote" - the phone control panel (/control, only served when the server
-//              runs with CON=1) acts as a touchpad: the finger's position on
-//              the pad maps onto the grid and the cursor eases towards it.
-//              canvas.js switches into this mode while a finger is on the
-//              pad and back to "sensor" when it lifts.
+//
+// The phone pad is not a mode but an override on top of either: while a
+// finger is on the control panel's pad (/control, only served when the server
+// runs with CON=1) the cursor eases towards the finger and scores, and lifting
+// it hands the cursor straight back. Nothing else changes (Aaron, 5 Oct): the
+// sensors keep running underneath, so the sensor panel, the live stats and
+// charts carry on, but they cannot hold the round or raise an alert while the
+// phone places the player.
 
 (function () {
   const GAME_DURATION_MS = 60000; // overall round length shown as the countdown
@@ -76,10 +88,19 @@
   const LEFT_SENSOR = 0;
   const RIGHT_SENSOR = 2;
   const PLAY_WIDTH_CM = 150; // matches PlayArea.width_cm in filterRules.py
-  const MAX_COORD_CM = 150; // hard ceiling before any calibration exists
+  // How long the grid is, from the nodes' edge (Aaron, 5 Oct): the angle
+  // limit's far edge. filterRules.py GRID_LENGTH_CM.
+  const GRID_LENGTH_CM = 160;
+  // Hard ceiling before any calibration exists, and the deepest a calibration
+  // corner can be captured at (SENSOR_LIMITS.maxCm). The nodes hear out to
+  // src/Config.h's MAX_TARGET_CM, 190 cm, and a capture is the depth to the
+  // middle of the player, tuning.bodyRadiusCm (15) further out. At 150 a
+  // player standing on a far edge 160 cm out could not be captured, so the far
+  // edge could never be set past 150. filterRules.py PlayArea.ABSOLUTE_MAX_CM.
+  const MAX_COORD_CM = 205;
 
-  // Once the play area is calibrated, the far edge decides what counts as out
-  // of bounds rather than this blanket 1.5 m limit.
+  // Once the play area is calibrated, the far edge sets the depth limit
+  // reported by getSensorDebug() rather than this blanket one.
   function maxCoordCm() {
     const bounds = window.getCalibrationBounds ? window.getCalibrationBounds() : null;
     if (bounds && bounds.calibrated && Number.isFinite(bounds.maxCm)) {
@@ -137,26 +158,130 @@
   const FFT_MIN_SAMPLES = 8;          // fewer and the Kalman output passes straight through
 
   // --- Live-tunable smoothing -----------------------------------------------
-  // The server broadcasts on every node message, so with two sensors at 20Hz
-  // roughly 40 readings arrive each second. The window sizes below are counted
-  // in readings (not render frames), so 100 readings is about 2.5 seconds.
+  // The server broadcasts on every node message, and twice at each scan turn
+  // (app.py set_turn()). The nodes take 1 s turns and the one with the turn
+  // reads about 11 times a second, so about 13 broadcasts arrive each second.
+  // The vote's window below is counted in those, not in render frames.
   //
   // Adjust at runtime from the console with tuneSensor({ ... }) - no reload.
   const tuning = {
     // Votes held in the cell window. Bigger = steadier cursor, slower to follow
-    // a real move. At ~40 readings/sec, 25 is roughly 0.6s of history.
+    // a real move. At ~13 broadcasts a second, 25 is about 2 s of history and
+    // a rival needs about 1 s of them to take over. Only used with the cell
+    // decision (below) off.
     cellWindow: 25,
     // Votes a rival cell needs to take over. Must stay above half of
     // cellWindow, otherwise two cells can trade the lead and the cursor flips.
     cellVotes: 13,
-    // Consecutive unusable readings ridden out on the last good cell before the
-    // come-closer / out-of-bounds screen appears.
-    holdReadings: 100,
-    // Backstop for when data stops arriving altogether, so a disconnected rig
-    // cannot leave a stale cursor on screen forever. Must comfortably exceed
-    // holdReadings at the current data rate, or it fires first and the reading
-    // budget never gets a chance to matter.
-    holdTimeoutMs: 5000,
+    // The cell lock (Aaron, 5 Oct): the drawn cursor, and the hole it scores
+    // in, keep to the voted cell above. The cursor still follows the player
+    // inside that cell's hole, held CELL_LOCK_INSET of a hole in from its
+    // edges, but cannot cross into a neighbour until the vote moves; and only
+    // the voted cell's hole scores, so a cursor on its way between two holes
+    // cannot whack a mole in a third. Off, the cursor is drawn from the
+    // position alone and scores whichever hole it is over, as before. Only
+    // the drawing and the hover change: the cell, the position and the
+    // server's copy (filterRules.py) do not. Switched on the control panel.
+    cellLock: true,
+    // The cell decision (Aaron, 5 Oct; decideCell()), in place of the vote
+    // above. The cell moves only when the position has gone cellMarginCm past
+    // its edges, and stayed past them for cellDwellMs of readings (twice that
+    // to a cell that is not next to it); and a reading whose node still sees
+    // the player within cellStillCm of where it saw them while the position
+    // was in the cell (its anchor, which eases cellAnchorRate of the way to
+    // each reading taken with the position in the cell: it settles where a
+    // still player stands, and trails one who walks) counts for staying, wherever the two nodes together put them: one node
+    // taking over from the other, each with its own bias, is not a move - for
+    // up to cellStillHoldMs, longer than a scan turn, after which a position
+    // that has stayed out of the cell all that time wins anyway. Off, the
+    // vote decides, as before. Switched on the control panel. The margin
+    // must stay under COLUMN_MARGIN_CM (8): Dynamic's centre lock keeps x
+    // that far inside the centre column, and a bigger margin would never let
+    // it out of a side cell. Python: FilterConfig cell_decision,
+    // cell_margin_cm, cell_dwell_ms, cell_still_cm, cell_still_hold_ms,
+    // cell_anchor_rate.
+    cellDecision: true,
+    cellMarginCm: 6,
+    cellDwellMs: 500,
+    cellStillCm: 25,
+    cellStillHoldMs: 1500,
+    cellAnchorRate: 0.1,
+    // Tracking (Aaron, 6 Oct; stepMotion()): while the player is moving, the
+    // cell decision dwells cellMovingDwellMs in place of cellDwellMs (the
+    // nodes still hold the cell against a scan turn changing over). Moving:
+    // moveConfirmReadings readings in a row with a move - a node's own point
+    // moveCm or more from where that same node put the player two readings
+    // before, or the line-of-sight track going at moveSpeedCmS or more - and
+    // still again after stillAfterMs with none. Standing still wins (Aaron,
+    // 6 Oct): a reading node that has put the player within stillCm of the
+    // middle of its last stillPoints points makes them still at once.
+    // OFF by default (Aaron, 6 Oct): on the 4 Oct recording it doubled the
+    // flips of a player standing still (2.4 to 4.8 a minute), while on the
+    // model rigs it showed half of the moves within 1 s instead of a fifth;
+    // switched on from the control panel to try on the rig. Python:
+    // FilterConfig track_moving, move_cm, move_speed_cm_s,
+    // move_confirm_readings, still_after_ms, still_points, still_cm,
+    // cell_moving_dwell_ms; MotionDetector.
+    trackMoving: false,
+    moveCm: 15,
+    moveSpeedCmS: 40,
+    moveConfirmReadings: 2,
+    stillAfterMs: 700,
+    stillPoints: 5,
+    stillCm: 10,
+    cellMovingDwellMs: 200,
+    // Cell confidence (Aaron, 6 Oct; stepCellConfidence()): how sure the game
+    // is that the player has been standing in each cell. On each counted
+    // reading with the player still (stepMotion()) and a reading node FOUND
+    // with its own point in the decided cell, that cell rises to 1 over
+    // cellConfidenceRiseMs while every other cell fades with a
+    // cellConfidenceOtherHalfLifeS half-life; on other counted readings every
+    // cell fades with a cellConfidenceHalfLifeS half-life. Nothing changes
+    // while the cell is held or nobody is found, so it outlasts a loss. It
+    // starts again with each round. With the switch on, the cell decision
+    // uses it: a cell's dwell is shortened by half its confidence, and the
+    // first cell after Out of bounds or no signal is a cell with confidence
+    // cellConfidenceFirstCell or more within cellMarginCm of the position, if
+    // there is one. Off, it is still kept and shown, and the decision
+    // ignores it. (The server's search finds its own cell from the last 3 s
+    // of readings, Aaron's definition; it does not use these.) Switched on the control panel. Python:
+    // FilterConfig cell_confidence, cell_confidence_*; CellConfidence.
+    cellConfidence: true,
+    cellConfidenceRiseMs: 3000,
+    cellConfidenceHalfLifeS: 30,
+    cellConfidenceOtherHalfLifeS: 5,
+    cellConfidenceFirstCell: 0.5,
+    // Neither node has sent a new reading for this long (ms), or the server
+    // says both are offline: the game says Sensors offline and the round
+    // waits. Unusable readings are otherwise ridden out on the last good
+    // square for as long as they last (updateSensorCursor()).
+    offlineMs: 5000,
+    // The Kalman switch (the control panel's Kalman button, setKalman();
+    // Aaron, 5 Oct). false turns off both Kalman filters: each sensor's
+    // distance goes median -> FFT (conditionSensor()), and line of sight
+    // places the player at each new reading's own point, with no gate and
+    // nothing kept from the readings before (stepLosTrack()). The servos never
+    // see it: the nodes steer on their own readings. Python: FilterConfig
+    // kalman.
+    kalman: true,
+    // The angle limit (Aaron, 5 Oct): a node's filtered distance further than
+    // its servo line runs on the grid (angleLimitCm()), plus farLeeway of it,
+    // is not a player on it. Line of sight and Dynamic's node rules drop such
+    // a reading; trilateration ignores the limit. Switched on the control
+    // panel. Python: FilterConfig angle_limit.
+    angleLimit: true,
+    // The leeway at great distances (Aaron, 5 Oct: +20 percent), as a share:
+    // the angle limit, and the far edge a confident node's own point may
+    // reach (ownPoint()), are both this much further out. Python: FilterConfig
+    // far_leeway.
+    farLeeway: 0.2,
+    // The dead zone (Aaron, 5 Oct): the strip across the front of the grid,
+    // the alert threshold (10 cm) deep, where the nodes sit. On, a node's raw
+    // reading is too close when its point along the servo line is in it
+    // (closeDepthCm()): 10 cm straight out, 29 cm with the servo turned 70
+    // degrees. Off, the raw reading itself is checked, whatever the angle.
+    // Switched on the control panel. Python: FilterConfig dead_zone.
+    deadZone: true,
     // The smoothing after each sensor's median (see conditionSensor()).
     // kalmanSigmaA: the player's acceleration noise, cm/s^2 - higher follows a
     // lunge faster, lower smooths more. kalmanSigmaR: one reading's noise, cm.
@@ -180,10 +305,196 @@
     losBearingUnknownDeg: 7,
     // Trilateration's beam check (see inBeam()): a crossing of the two
     // distance circles counts only if it lies within this many degrees of
-    // where each node's servo points. The sensors' beam is under 15 degrees
-    // wide, 7.5 either side. Python: FilterConfig tri_beam_half_deg.
+    // where each node's servo points, widened by bodyHalfWidthCm either side.
+    // The sensors' beam is under 15 degrees wide, 7.5 either side. Python:
+    // FilterConfig tri_beam_half_deg.
     triBeamHalfDeg: 7.5,
+    // The aim tolerance (5 Oct): with it on, the beam check lets a crossing
+    // be triAimToleranceDeg further off each servo's aim than the beam
+    // alone. In the centre test (4 Oct) the left servo reported about 20
+    // degrees further in than the taped spots needed, so the beam check threw
+    // away crossings 3 cm from the spot for one node's own point 28 cm off.
+    // Only the beam check widens: isInPlayAlong() keeps the beam itself.
+    // Switched on the control panel. Python: FilterConfig tri_aim_tolerance,
+    // tri_aim_tolerance_deg.
+    triAimTolerance: true,
+    triAimToleranceDeg: 20,
+    // The player is a body, not a point (see bodyCentreCm()). bodyRadiusCm:
+    // an echo comes back off the side of the player nearest the node, so each
+    // distance falls this far short of the middle of them; it is added back
+    // before the player is placed. bodyHalfWidthCm: a node's servo stops
+    // wherever its beam finds the player, anywhere across their body, so its
+    // aim can be this far either side of their middle whatever the distance;
+    // the line of sight and the beam check allow for it. Measured on the rig
+    // (centre test, 4 Oct): the readings fell 13-37 cm short of the taped
+    // spots. Python: FilterConfig body_radius_cm, body_half_width_cm.
+    bodyRadiusCm: 15,
+    bodyHalfWidthCm: 20,
+    // Dynamic, the default position method (see dynamicLeader()): a method
+    // that has kept the player in one square this long counts as fully
+    // steady, and past that line of sight wins, then trilateration, then the
+    // average. Python: FilterConfig dynamic_steady_ms.
+    dynamicSteadyMs: 1000,
+    // Dynamic's two rules, checked before the steadiest method (see
+    // dynamicRule(); Aaron, 5 Oct). centreSeenMs: the centre rule crosses each
+    // node's servo line from its last reading that found or half-found the
+    // player, if both are this recent (ms). centreHoldMs: once the lines have
+    // crossed in the centre column, the player stays in it this long (ms)
+    // while both lines are recent, even if the crossing strays outside.
+    // confidentReadings, confidentMs: a node is confident when this many of
+    // its readings in a row found the player (both heads), the latest this
+    // recent, and its own reading is inside the play area; a lone confident
+    // node places the player by itself. Python: FilterConfig centre_seen_ms,
+    // centre_hold_ms, confident_readings, confident_ms.
+    centreSeenMs: 1500,
+    centreHoldMs: 1000,
+    confidentReadings: 2,
+    confidentMs: 1500,
+    // Far priority (Dynamic's first rule; Aaron, 6 Oct; see farFix()). A
+    // node's reading past farPriorityCm (its own distance, before the body
+    // radius) counts for farSeenMs - long enough to cover the other node's
+    // turn - however few of its readings are that far. Python: FilterConfig
+    // far_priority_cm, far_seen_ms.
+    farPriorityCm: 110,
+    farSeenMs: 1500,
+    // sideLockDepthCm: the side-column lock needs the servo lines to cross at
+    // least this far inside the left or right column. farPriority,
+    // confidenceNode, columnLock, loneNode, cornerNode: Dynamic's rules on or
+    // off - far priority, a node at the confidence level, the column lock
+    // (centre and sides), a lone confident node, and the near node alone in
+    // its far corner (A1, A3) - set from the control panel
+    // (setDynamicRules()) and kept in this browser. Python: FilterConfig
+    // side_lock_depth_cm, far_priority, confidence_node, column_lock,
+    // lone_node, corner_node.
+    sideLockDepthCm: 20,
+    farPriority: true,
+    confidenceNode: true,
+    columnLock: true,
+    loneNode: true,
+    cornerNode: true,
+    // The confidence level (Aaron, 5 Oct), in percent: a node whose
+    // confidence (the server's, handover.py - the Confidence column on the
+    // control panel) is at least this places the player on its own (see
+    // dynamicRule(), rule 0). Set from the control panel
+    // (setConfidenceLevel()), kept in this browser. Python: FilterConfig
+    // confidence_level_pct.
+    confidenceLevelPct: 80,
+    // Out of bounds, the only time the game says it (Aaron, 5 Oct): both
+    // nodes are lost. A node is lost when its last lostReadings readings,
+    // scored found +1, half 0, lost -1 (as the control panel shows each
+    // reading), add up to 0 or less, so the odd found reading among lost ones
+    // does not stop it. Until a node has had lostReadings readings in the
+    // round it is not lost, so it is always sustained. Set from the control
+    // panel (setLostReadings()), kept in this browser. See bothNodesLost().
+    // 21 readings (Aaron, 5 Oct: "the sweet spot"); it was 8. Python:
+    // FilterConfig lost_readings.
+    lostReadings: 21,
+    // Far half (Aaron, 5 Oct): a half reading - one of a node's two sensors
+    // has the player - whose own point is in the back row counts +1 towards
+    // the node seeing the player, as found does (lostScore()). Past 100 cm
+    // the nodes see a player with one sensor far more often than with both
+    // (5 Oct, 22:25-22:48: 86 % of the right node's readings 130-160 cm out
+    // were half), and at 0 for half such a node kept being lost. Nearer,
+    // half stays 0: there the floor and furniture give half readings in an
+    // empty room. Switched on the control panel. Python: FilterConfig
+    // far_half.
+    farHalf: true,
   };
+
+  // The most readings a node's lost score can be taken over (setLostReadings()).
+  const LOST_READINGS_MAX = 50;
+  // ".21": the default went from 8 to 21, and a browser that kept the old
+  // setting would never see it.
+  const LOST_READINGS_KEY = "eng3000.lostReadings.21";
+
+  // How many readings a node's lost score is taken over: from the control
+  // panel (canvas.js, "lostReadings"), clamped to 1..LOST_READINGS_MAX and
+  // kept in this browser, so a reload keeps it. Returns the value in use.
+  window.setLostReadings = function setLostReadings(count) {
+    const n = Math.round(Number(count));
+    if (Number.isFinite(n)) {
+      tuning.lostReadings = Math.max(1, Math.min(LOST_READINGS_MAX, n));
+      try {
+        window.localStorage.setItem(LOST_READINGS_KEY, String(tuning.lostReadings));
+      } catch (err) {
+        // No storage (a private window, the tests): it lasts until a reload.
+      }
+    }
+    return tuning.lostReadings;
+  };
+
+  window.getLostReadings = function getLostReadings() {
+    return tuning.lostReadings;
+  };
+
+  try {
+    const saved = window.localStorage && window.localStorage.getItem(LOST_READINGS_KEY);
+    if (saved !== null && saved !== undefined) window.setLostReadings(saved);
+  } catch (err) {
+    // As above: the default stands.
+  }
+
+  // The confidence level, in percent (tuning.confidenceLevelPct): from the
+  // control panel (canvas.js, "confidenceLevel"), rounded to a whole percent,
+  // clamped to 1..100 and kept in this browser like lostReadings. Returns the
+  // value in use.
+  const CONFIDENCE_LEVEL_KEY = "eng3000.confidenceLevelPct";
+
+  window.setConfidenceLevel = function setConfidenceLevel(pct) {
+    const level = Math.round(Number(pct));
+    if (Number.isFinite(level)) {
+      tuning.confidenceLevelPct = Math.max(1, Math.min(100, level));
+      try {
+        window.localStorage.setItem(CONFIDENCE_LEVEL_KEY, String(tuning.confidenceLevelPct));
+      } catch (err) {
+        // No storage (a private window, the tests): it lasts until a reload.
+      }
+    }
+    return tuning.confidenceLevelPct;
+  };
+
+  window.getConfidenceLevel = function getConfidenceLevel() {
+    return tuning.confidenceLevelPct;
+  };
+
+  try {
+    const saved = window.localStorage && window.localStorage.getItem(CONFIDENCE_LEVEL_KEY);
+    if (saved !== null && saved !== undefined) window.setConfidenceLevel(saved);
+  } catch (err) {
+    // As above: the default stands.
+  }
+
+  // Dynamic's rules on or off, { farPriority, confidenceNode, columnLock,
+  // loneNode, cornerNode } (see dynamicRule()). From the control panel
+  // (canvas.js, "dynamicRules"); only the switches named change. Kept in this
+  // browser like lostReadings.
+  const DYNAMIC_RULE_SWITCHES = ["farPriority", "confidenceNode", "columnLock", "loneNode", "cornerNode"];
+  const DYNAMIC_RULES_KEY = "eng3000.dynamicRules";
+
+  window.getDynamicRules = function getDynamicRules() {
+    return Object.fromEntries(DYNAMIC_RULE_SWITCHES.map((name) => [name, tuning[name]]));
+  };
+
+  window.setDynamicRules = function setDynamicRules(rules) {
+    if (rules && typeof rules === "object") {
+      DYNAMIC_RULE_SWITCHES.forEach((name) => {
+        if (typeof rules[name] === "boolean") tuning[name] = rules[name];
+      });
+      try {
+        window.localStorage.setItem(DYNAMIC_RULES_KEY, JSON.stringify(window.getDynamicRules()));
+      } catch (err) {
+        // No storage (private window, tests): the switches hold until reload.
+      }
+    }
+    return window.getDynamicRules();
+  };
+
+  try {
+    const saved = window.localStorage && window.localStorage.getItem(DYNAMIC_RULES_KEY);
+    if (saved) window.setDynamicRules(JSON.parse(saved));
+  } catch (err) {
+    // A missing or unreadable setting: every rule stays on.
+  }
 
   window.tuneSensor = function tuneSensor(partial) {
     if (partial && typeof partial === "object") Object.assign(tuning, partial);
@@ -198,14 +509,15 @@
   const TOO_CLOSE_FRAMES = 2;     // consecutive raw frames needed to raise the alert
 
   // --- Continuous position ---------------------------------------------------
-  // The grid CELL is still what gets whacked, and it is still decided with the
-  // hysteresis and majority vote that stop a single bad frame changing which
-  // mole is live - the part ported to filterRules.py and pinned by
-  // fixtures/js_parity_trace.json. But the cursor no longer has to sit on that
-  // cell's centre: it is drawn from the continuous position in centimetres
-  // (readSensorCoordinate()), so it glides across the board instead of jumping
-  // between nine fixed points. The cursor is a presentation concern; the cell
-  // is the game rule.
+  // The grid CELL is decided with the hysteresis and majority vote that stop a
+  // single bad frame changing which mole is live - the part ported to
+  // filterRules.py and pinned by fixtures/js_parity_trace.json. The cursor is
+  // drawn from the continuous position in centimetres
+  // (readSensorCoordinate()), so it glides across the board instead of
+  // jumping between nine fixed points. With the cell lock on (tuning.cellLock)
+  // the cursor glides only inside the voted cell's hole and only that hole
+  // scores, so the cell is what gets whacked; with it off, the cursor goes
+  // wherever the position does and scores whichever hole it is over.
   //
   // The position is the same one the column and row are derived from, so the
   // cursor cannot drift somewhere the grid mapping does not also believe the
@@ -216,6 +528,10 @@
   // position, took that check's place.)
   const CURSOR_SMOOTH_TIME = 0.14; // s to close most of the gap to a new position
   const CURSOR_MAX_SPEED = 900;     // px/s ceiling, so one bad frame cannot fling it
+  // With the cell lock on, how far in from each edge of the voted cell's hole
+  // the cursor is held, as a share of the hole: 0.2 keeps the 10 px ring well
+  // inside a 135 px hole at 1280 x 720, and leaves it 60 % of the hole to move in.
+  const CELL_LOCK_INSET = 0.2;
 
   // HUD layout (see renderHud()). Bottom-left: the sensor panel (sensor mode
   // only), with LIVE STATS above it.
@@ -223,7 +539,6 @@
   const HUD_GAP = 10;             // px between stacked panels
   const SENSOR_PANEL_W = 380;     // px
   const SENSOR_PANEL_H = 150;     // px
-  const POSITION_SWITCH_H = 28;   // px; the method buttons above the sensor panel
   const STATS_PANEL_W = 270;      // px; LIVE STATS, left gutter
   const STATS_PANEL_MIN_W = 190;  // px; narrower and the values collide with the labels
   const CHARTS_PANEL_MAX_H = 300; // px; LIVE DATA, under the legend
@@ -303,7 +618,7 @@
   }
 
   const emptySensorState = () => ({
-    status: "no-signal", // "ok" | "too-close" | "no-signal" | "out-of-bounds"
+    status: "no-signal", // "ok" | "too-close" | "no-signal" | "out-of-bounds" | "offline"
     column: null, // which sensor saw the player: 0 left, 1 centre, 2 right
     distanceCm: null, // that sensor's raw reading
     gx: null,
@@ -316,7 +631,8 @@
 
   const gameState = {
     status: "idle", // "idle" | "playing" | "paused" | "gameover"
-    inputMode: "mouse", // "mouse" | "sensor" | "remote"
+    inputMode: "mouse", // "mouse" | "sensor"
+    remoteActive: false, // a finger on the phone pad has the cursor, in either mode
     remoteTarget: null, // { nx, ny } 0-1 across the grid, straight from the phone pad
     remotePos: null, // smoothed copy of remoteTarget, eased every frame
     remoteLastFrame: null,
@@ -338,6 +654,11 @@
     hitFlash: { hole: -1, until: 0, type: null },
     cursor: { x: null, y: null, inBounds: true },
   };
+
+  // The cursor each mode would draw without the phone pad: the sensors'
+  // (updateGame()) and the mouse's, kept while a finger has the drawn one.
+  let sensorCursor = { x: null, y: null, inBounds: true };
+  let mouseCursor = { x: null, y: null, inBounds: true };
 
   function randomBetween(min, max) {
     return min + Math.random() * (max - min);
@@ -434,6 +755,7 @@
   }
 
   window.resetGame = function resetGame() {
+    remoteAlert = false;
     gameState.status = "playing";
     gameState.score = 0;
     // Always starts at level 1; players climb further levels by scoring, not by picking a start.
@@ -450,6 +772,7 @@
     gameState.nextSpawnAt = 0;
     gameState.hitFlash = { hole: -1, until: 0, type: null };
     gameState.cursor = { x: null, y: null, inBounds: true };
+    sensorCursor = { x: null, y: null, inBounds: true };
     gameState.sensor = emptySensorState();
     resetSensorFilters();
     roundStats()?.reset(gameState.inputMode);
@@ -466,13 +789,14 @@
   };
 
   window.setGameInputMode = function setGameInputMode(mode) {
-    gameState.inputMode = mode === "sensor" || mode === "remote" ? mode : "mouse";
+    // "remote" was a mode before the pad became an override; a /control page
+    // from then still asks for it, and gets the sensors with the pad on top.
+    gameState.inputMode = mode === "sensor" || mode === "remote" ? "sensor" : "mouse";
     // Drop any stale cursor so the modes never inherit each other's position.
     gameState.cursor = { x: null, y: null, inBounds: true };
-    gameState.remoteTarget = null;
-    gameState.remotePos = null;
-    gameState.remoteLastFrame = null;
-    gameState.remoteHole = -1;
+    sensorCursor = { x: null, y: null, inBounds: true };
+    mouseCursor = { x: null, y: null, inBounds: true };
+    clearRemote();
     gameState.sensor = emptySensorState();
     resetSensorFilters();
   };
@@ -481,15 +805,47 @@
     return gameState.inputMode;
   };
 
-  // The full-screen alert is driven purely by the raw distance, and only in
+  // Raised from the phone control panel's Too close toggle, in any input mode.
+  // Cleared by the panel or by the next round; real sensor alerts and the hold
+  // button still work while it is off.
+  let remoteAlert = false;
+
+  window.setRemoteAlert = function setRemoteAlert(on) {
+    remoteAlert = Boolean(on);
+  };
+
+  window.isRemoteAlertOn = function isRemoteAlertOn() {
+    return remoteAlert;
+  };
+
+  // The full-screen alert is driven purely by the raw readings, and only in
   // sensor mode mid-round - the mouse has no notion of standing too close, and
-  // a paused or finished round should not be hijacked.
+  // a paused or finished round should not be hijacked. Nor while the phone pad
+  // places the player. Or while the control panel's hold button is down
+  // (setAlertHeld()) or its Too close toggle is on (setRemoteAlert()), in any
+  // mode.
   window.isGameAlertActive = function isGameAlertActive() {
-    return (
+    return alertHeld || remoteAlert || (
       gameState.inputMode === "sensor" &&
+      !gameState.remoteActive &&
       gameState.status === "playing" &&
       gameState.sensor.status === "too-close"
     );
+  };
+
+  // The control panel's "Hold: too close" button (Aaron, 5 Oct): while a
+  // finger is on it, the too-close alert is up and a round waits, as for the
+  // real thing; lifting the finger hands back to the sensors. canvas.js
+  // shows it over the other screens too.
+  let alertHeld = false;
+
+  window.setAlertHeld = function setAlertHeld(on) {
+    alertHeld = Boolean(on);
+    return alertHeld;
+  };
+
+  window.isAlertHeld = function isAlertHeld() {
+    return alertHeld;
   };
 
   window.getGameAlertInfo = function getGameAlertInfo() {
@@ -523,13 +879,19 @@
   window.updateGame = function updateGame(now, canvas, orderedNodes) {
     updateRoomStatus(orderedNodes);
     if (gameState.inputMode === "sensor" && canvas) {
+      // The sensors move their own cursor, even while the phone pad has the
+      // one drawn, so lifting the finger hands back a cursor that kept up.
+      gameState.cursor = { ...sensorCursor };
       if (serverCoordinateActive) {
         applyServerCoordinate(canvas, orderedNodes);
       } else {
         updateSensorCursor(canvas, orderedNodes);
       }
+      sensorCursor = { ...gameState.cursor };
       recordSensorReading(now, orderedNodes);
-    } else if (gameState.inputMode === "remote" && canvas) {
+    }
+    // The phone pad, on top of either mode: its cursor replaces the one above.
+    if (gameState.remoteActive && canvas) {
       updateRemoteCursor(canvas, now);
     }
 
@@ -545,8 +907,9 @@
     roundStats()?.onTick(elapsed, statsFrame(canvas));
 
     // Hold the round while the player is too close, out of bounds, or invisible
-    // to the sensors. Advancing lastTickTime above keeps the clock from jumping
-    // when play resumes; shifting the mole timers keeps the current mole alive.
+    // to the sensors, or while the control panel holds the alert up. Advancing
+    // lastTickTime above keeps the clock from jumping when play resumes;
+    // shifting the mole timers keeps the current mole alive.
     if (isSensorBlocked()) {
       gameState.moleSpawnedAt += elapsed;
       gameState.nextSpawnAt += elapsed;
@@ -675,31 +1038,52 @@
   }
 
   // Mouse-mode coordinate input. Ignored in sensor mode so a stray mouse
-  // movement cannot fight the sensors for control of the cursor.
+  // movement cannot fight the sensors for control of the cursor, and only
+  // remembered while the phone pad has it.
   window.setGameCursor = function setGameCursor(canvas, x, y) {
     if (gameState.inputMode !== "mouse") return;
     const width = canvas.clientWidth || canvas.width;
     const height = canvas.clientHeight || canvas.height;
-    gameState.cursor.x = x;
-    gameState.cursor.y = y;
-    gameState.cursor.inBounds = x >= 0 && x <= width && y >= 0 && y <= height;
+    mouseCursor = { x, y, inBounds: x >= 0 && x <= width && y >= 0 && y <= height };
+    if (!gameState.remoteActive) gameState.cursor = { ...mouseCursor };
   };
 
-  // Remote-mode input: the finger's position on the phone pad, normalised to
-  // 0-1 with (0,0) at the top-left, same orientation as the on-screen grid.
-  // Anything non-numeric lifts the cursor off the board.
+  // The phone pad: the finger's position, normalised to 0-1 with (0,0) at the
+  // top-left, same orientation as the on-screen grid. The first point takes
+  // the cursor over from whichever mode is running; anything non-numeric
+  // lets go of it, as lifting the finger does.
   window.setRemotePoint = function setRemotePoint(nx, ny) {
-    if (gameState.inputMode !== "remote") return;
     if (!Number.isFinite(nx) || !Number.isFinite(ny)) {
-      gameState.remoteTarget = null;
+      window.releaseRemotePoint();
       return;
     }
     const clamp = (v) => Math.min(1, Math.max(0, v));
+    gameState.remoteActive = true;
     gameState.remoteTarget = { nx: clamp(nx), ny: clamp(ny) };
   };
 
+  // The finger lifted: the mode's own cursor is drawn again straight away.
+  window.releaseRemotePoint = function releaseRemotePoint() {
+    if (!gameState.remoteActive) return;
+    clearRemote();
+    gameState.cursor = { ...(gameState.inputMode === "sensor" ? sensorCursor : mouseCursor) };
+  };
+
+  window.isRemoteActive = function isRemoteActive() {
+    return gameState.remoteActive;
+  };
+
+  function clearRemote() {
+    gameState.remoteActive = false;
+    gameState.remoteTarget = null;
+    gameState.remotePos = null;
+    gameState.remoteLastFrame = null;
+    gameState.remoteHole = -1;
+  }
+
   // Stored normalised rather than as pixels, so a resize keeps the cursor on
-  // the same spot of the grid. Hovering scores, exactly as in sensor mode.
+  // the same spot of the grid. Hovering scores, exactly as in sensor mode (and
+  // the sensors' own cursor does not, see hoverFromSensors()).
   function updateRemoteCursor(canvas, now) {
     const target = gameState.remoteTarget;
     if (!target) {
@@ -733,34 +1117,42 @@
     window.handleGameHover(canvas, x, y);
   }
 
-  // The cursor as the phone control panel mirrors it, in any input mode.
-  // board is the drawn cursor as a fraction of the board - 0-1 with (0,0) at
-  // the top-left, the pad's own orientation - and hole is the hole under it,
-  // which is the one that scores. sensor is only filled in sensor mode: the
-  // player's position in play-area cm (x across from screen-left, y the depth
-  // from the screen), the cell, and the state the sensors are in.
-  window.getGameCursorStatus = function getGameCursorStatus(canvas) {
-    const cursor = gameState.cursor;
-    let board = null;
-    let hole = -1;
-    if (canvas && cursor.x !== null) {
-      const layout = window.getGameGridLayout(canvas);
-      board = {
+  // A cursor as a fraction of the board - 0-1 with (0,0) at the top-left, the
+  // pad's own orientation - and the hole under it, or null and -1.
+  function cursorOnBoard(canvas, cursor) {
+    if (!canvas || cursor.x === null) return { board: null, hole: -1 };
+    const layout = window.getGameGridLayout(canvas);
+    const over = holeAtPoint(layout, cursor.x, cursor.y);
+    return {
+      board: {
         nx: (cursor.x - layout.gridLeft) / layout.gridSize,
         ny: (cursor.y - layout.gridTop) / layout.gridSize,
-      };
-      const over = holeAtPoint(layout, cursor.x, cursor.y);
-      hole = over ? over.index : -1;
-    }
+      },
+      hole: over ? over.index : -1,
+    };
+  }
 
-    if (gameState.inputMode !== "sensor") return { board, hole, sensor: null };
+  // The cursor as the phone control panel mirrors it, in any input mode.
+  // board is the drawn cursor (cursorOnBoard()) and hole the hole under it,
+  // which is the one that scores; remote says the phone pad has it. sensor is
+  // only filled in sensor mode, and carries on while the pad has the cursor:
+  // the player's position in play-area cm (x across from screen-left, y the
+  // depth from the screen), the cell, the state the sensors are in, and board,
+  // the sensors' own cursor.
+  window.getGameCursorStatus = function getGameCursorStatus(canvas) {
+    const { board, hole } = cursorOnBoard(canvas, gameState.cursor);
+    const remote = gameState.remoteActive;
+
+    if (gameState.inputMode !== "sensor") return { board, hole, remote, sensor: null };
 
     const sensor = gameState.sensor;
     const hasCell = Number.isInteger(sensor.gx) && Number.isInteger(sensor.gy);
     return {
       board,
       hole,
+      remote,
       sensor: {
+        board: cursorOnBoard(canvas, sensorCursor).board,
         status: sensor.status,
         held: Boolean(sensor.held),
         source: sensor.source || null,
@@ -770,15 +1162,21 @@
         gx: hasCell ? sensor.gx : null,
         gy: hasCell ? sensor.gy : null,
         method: positioning.method,
-        // Compare's rings: drawn on the board only while Compare is on and
-        // the browser places the player itself (renderPositionMarkers()).
+        placedBy: sensor.placedBy || null,
+        moving: Boolean(sensor.moving),
+        // Each hole's cell confidence, in hole order (holeForCell()), for the
+        // control panel's pad.
+        holeConfidence: holeConfidence(),
+        // Compare's rings, on the control panel's pad: only while Compare is
+        // on and the browser places the player itself (the server's
+        // coordinate carries no fixes).
         compare: positioning.compare && !serverCoordinateActive,
         fixes: compareFixes(canvas, sensor.fixes),
       },
     };
   };
 
-  // Every method's position as Compare draws it: { los, tri, avg }, each
+  // Every method's position as Compare's rings show it: { dyn, los, tri, avg }, each
   // { xCm, yCm, nx, ny } or null. xCm and yCm are as the method placed the
   // player; nx and ny are its ring on the board, as fractions like board above
   // (x clamped to the board first, as the ring is).
@@ -920,7 +1318,7 @@
   }
 
   // The scanner fields of a node's latest payload (src/scanning.cpp): the servo
-  // angle the reading was taken at (90 = straight out, more = screen-left),
+  // angle the reading was taken at (90 = straight out, more = screen-right),
   // the scan state (0 found, 1 half-found, 2 lost), both ultrasonics
   // (-1 = no echo) and the empty room (0 not learnt, 1 learning, 2 learnt; see
   // src/RoomMap.h). Each is null when the node's firmware does not send it.
@@ -1233,7 +1631,8 @@
   // low-pass. The median rejects single-sample spikes far better than a mean;
   // the Kalman follows the median without an average's lag; the FFT stage cuts
   // what is left above tuning.fftCutoffHz. The hold coasts through a dropped
-  // echo instead of reporting the player gone.
+  // echo instead of reporting the player gone. With tuning.kalman off, the
+  // median goes straight to the FFT stage.
   function conditionSensor(filter, raw, now, angle = null) {
     // Back after a silence - the other node's scanning turn, as a rule. What
     // the channel remembers is where the player was a turn ago, so it starts
@@ -1252,7 +1651,7 @@
       filter.samples.push(raw);
       if (filter.samples.length > SENSOR_HISTORY) filter.samples.shift();
       const middle = median(filter.samples);
-      const tracked = kalmanUpdate(filter.kalman, middle, now / 1000);
+      const tracked = tuning.kalman ? kalmanUpdate(filter.kalman, middle, now / 1000) : middle;
       filter.value = smoothWindow(filter, tracked, now);
       filter.lastGoodAt = now;
       // The slew gate judges readings against the median, as it always has:
@@ -1277,16 +1676,21 @@
       filter.angle = null;
     });
     resetLosTrack();
+    resetDynamic();
+    resetDynamicRules();
     lastSeenStamp.fill(null);
     heardAt.fill(-Infinity);
+    foundAt.fill(-Infinity);
+    stateLog.forEach((log) => { log.length = 0; });
     closeStreak = 0;
     lastColumn = null;
     lastSeenFrameSeq = sensorFrameSeq;
     badReadingStreak = 0;
     resetCellFilter();
+    resetMotion();
+    resetCellConfidence();
     sensorHold.grid = null;
     sensorHold.world = null;
-    sensorHold.lastOkAt = -Infinity;
     // Drops the drawn position too, so a new round opens its cursor where the
     // player is standing instead of springing across the board from wherever
     // the last one ended.
@@ -1304,14 +1708,20 @@
   // --- Placing the player ----------------------------------------------------
   // The two nodes sit on the screen line at the centres of the outer columns.
   // Each is a servo scanner that reports its distance to the player and the
-  // servo angle it read at. Three ways to turn that into a position, switched
-  // with the buttons above the sensor panel (positioning.method):
+  // servo angle it read at. Three ways to turn that into a position, and a
+  // fourth that picks between them, switched on the phone control panel
+  // (positioning.method):
   //
-  //   "los" - line of sight, the default. Each node's reading is a point along
+  //   "dyn" - Dynamic, the default: whichever of the other three has kept the
+  //           player in one square of the board the longest (dynamicLeader()).
+  //   "los" - line of sight. Each node's reading is a point along
   //           its line of sight (its distance along its servo angle), with an
   //           uncertainty that is small along the line - the distance is good
-  //           - and grows across it with the distance and with how sure the
-  //           node is of its aim (found / half-found). Those points feed a 2D
+  //           - and grows across it with the distance, with how sure the node
+  //           is of its aim (found / half-found) and with the width of the
+  //           player, anywhere across whom the aim may stop. In the centre
+  //           column the two nodes look in from either side, so the distances
+  //           cross and fix the player there. Those points feed a 2D
   //           constant-velocity Kalman filter (losTrack) one reading at a time,
   //           as they arrive. The nodes take turns to scan, so they are never
   //           read at the same moment: each reading is used once, when it
@@ -1327,10 +1737,18 @@
   //           by its own distance along its servo angle.
   //   "avg" - the midpoint of the two.
   //
-  // All three are worked out on every update, so the board can show them side
-  // by side (Compare). x picks the column (the centre one included) and y, the
-  // depth from the screen, picks the row. filterRules.py (TwoSensorGeometry)
-  // is the parity-tested Python port.
+  // All of them are worked out on every update, so the sensor panel and the
+  // control panel's pad can show them side by side (Compare). Every method places the middle of the player: each
+  // distance has tuning.bodyRadiusCm added first (bodyCentreCm()). x picks the
+  // column (the centre one included) and y, the depth from the screen, picks
+  // the row. filterRules.py (TwoSensorGeometry) is the parity-tested Python
+  // port.
+  //
+  // The servo angle: 90 points straight out into the play area, and a larger
+  // angle turns towards screen-right (larger x). That is the way the rig's
+  // servos turn (the centre test on 4 Oct: read the other way, the two nodes
+  // put a player standing still 160-250 cm apart) and the way the firmware's
+  // limits are set (src/Config.h: LEFT turns in to 160, RIGHT to 30).
 
   function columnCentreCm(column) {
     return ((column + 0.5) * PLAY_WIDTH_CM) / 3;
@@ -1340,8 +1758,86 @@
     return Math.max(0, Math.min(2, Math.floor(x / (PLAY_WIDTH_CM / 3))));
   }
 
-  function isInPlay(column, distance) {
-    return window.isWithinPlayArea ? window.isWithinPlayArea(column, distance) : true;
+  // How far inside the board's edges a position is kept, as a share of a
+  // square: off the board, the player is placed this far in from the edge,
+  // inside the edge square's hole (the holes fill all but the gaps between
+  // them, under a tenth of a square). Python: EDGE_INSET in filterRules.py.
+  const EDGE_INSET = 0.1;
+  const EDGE_INSET_X_CM = (PLAY_WIDTH_CM / 3) * EDGE_INSET;
+
+  // A column's calibrated depth, { near, far } in cm (the defaults before
+  // calibration), as rawToGrid() and the cursor use it.
+  function columnSpan(column) {
+    const bounds = window.getCalibrationBounds ? window.getCalibrationBounds() : null;
+    return bounds ? bounds.perColumn[column] : { near: 10, far: 160 };
+  }
+
+  // Whether a node's distance can put the player on the board. Not the
+  // distance itself: across the board it is the long side of the triangle -
+  // 168 cm from the left node to the middle of the far right square, 135 cm
+  // out - and against the rows' depth it threw the player out. The echo came
+  // from somewhere in the sensor's beam, tuning.triBeamHalfDeg either side of
+  // where the servo points (a 15-degree cone), at that distance: the player
+  // is in play if any of that arc is on the board. A node that sends no angle
+  // points straight out and has no beam to check (as in inBeam()): its
+  // distance is the depth. filterRules.py TwoSensorGeometry._in_play_along().
+  const BEAM_ARC_STEPS = 15;   // the arc is checked at this many steps, both ends included
+  function isInPlayAlong(slot, distance, angle) {
+    if (!window.isPointInPlayArea) return true;
+    const nodeX = columnCentreCm(slot);
+    if (angle === null) {
+      const point = scannerPoint(nodeX, distance, null);
+      return window.isPointInPlayArea(point.x, point.y);
+    }
+    const half = tuning.triBeamHalfDeg;
+    for (let i = 0; i <= BEAM_ARC_STEPS; i++) {
+      const point = scannerPoint(nodeX, distance, angle - half + (2 * half * i) / BEAM_ARC_STEPS);
+      if (window.isPointInPlayArea(point.x, point.y)) return true;
+    }
+    return false;
+  }
+
+  // What the too-close check compares with the alert threshold: the nearest
+  // RAW reading (the front of the body), or null with none. With
+  // tuning.deadZone on, each reading counts as its depth, its point along the
+  // node's servo line: the dead zone is a strip across the front of the grid,
+  // so turned phi off straight out, a reading is in it under
+  // threshold / cos(phi) - 10 cm straight out, 15.6 at 40 or 140 degrees, 29.2
+  // at 160. Off, the reading itself, whatever the angle. filterRules.py
+  // Geometry.nearest_depth_cm().
+  function closeDepthCm(raw, angles) {
+    let closest = null;
+    for (const slot of [LEFT_SENSOR, RIGHT_SENSOR]) {
+      if (raw[slot] === null) continue;
+      const cm = tuning.deadZone ? scannerPoint(columnCentreCm(slot), raw[slot], angles[slot]).y : raw[slot];
+      if (closest === null || cm < closest) closest = cm;
+    }
+    return closest;
+  }
+
+  // How far the servo line of the node at nodeX runs before it leaves the
+  // grid, PLAY_WIDTH_CM across and GRID_LENGTH_CM long, with the nodes on its
+  // near edge (Aaron, 5 Oct). 90 degrees is straight down the grid and a larger
+  // angle turns towards screen-right, as in scannerPoint(); no angle is
+  // straight down. filterRules.py angle_limit_cm().
+  function angleLimitCm(nodeX, angle) {
+    const phi = ((angle === null ? 90 : angle) - 90) * Math.PI / 180;
+    const across = Math.sin(phi);
+    const down = Math.cos(phi);
+    let limit = Infinity;
+    if (across > 0) limit = Math.min(limit, (PLAY_WIDTH_CM - nodeX) / across);
+    if (across < 0) limit = Math.min(limit, nodeX / -across);
+    if (down > 0) limit = Math.min(limit, GRID_LENGTH_CM / down);
+    return limit;
+  }
+
+  // Whether a node's filtered distance at its servo angle can be a player on
+  // the grid: no further than angleLimitCm() plus tuning.farLeeway of it
+  // (192 cm straight out). Always, with tuning.angleLimit off.
+  // filterRules.py within_angle_limit().
+  function withinAngleLimit(slot, distance, angle) {
+    return !tuning.angleLimit ||
+      distance <= angleLimitCm(columnCentreCm(slot), angle) * (1 + tuning.farLeeway);
   }
 
   // The sensors' datasheet range (HC-SR04; the RCWL-1601 is a pin-compatible
@@ -1353,19 +1849,29 @@
     return distance !== null && distance >= SENSOR_MIN_CM && distance <= SENSOR_MAX_CM;
   }
 
-  // Whether the point (x, y) lies inside the beam of the node at nodeX whose
-  // servo is at angle: within tuning.triBeamHalfDeg of where it points.
-  // Compares cosines (the aim dotted with the point) rather than angles, with
-  // the same sin and cos as scannerPoint(), so in_beam() in filterRules.py
-  // agrees to the last bit. A node that sends no angle has no beam to check.
-  function inBeam(nodeX, angle, x, y) {
+  // A node's distance to the middle of the player: what it measured, to the
+  // side of them nearest it, plus tuning.bodyRadiusCm. filterRules.py
+  // body_centre_cm().
+  function bodyCentreCm(distance) {
+    return distance + tuning.bodyRadiusCm;
+  }
+
+  // Whether the middle of the player can be at (x, y) when the node at nodeX,
+  // its servo at angle, sees them: inside its beam (within halfBeamDeg of
+  // where it points), or no more than tuning.bodyHalfWidthCm outside it - the
+  // beam may have found the edge of the player rather than their middle.
+  // Splits (x, y) into how far it is out along the aim and how far off to the
+  // side, with the same sin and cos as scannerPoint(), so in_beam() in
+  // filterRules.py agrees to the last bit. A node that sends no angle has no
+  // beam to check.
+  function inBeam(nodeX, angle, x, y, halfBeamDeg) {
     if (angle === null) return true;
     const phi = (angle - 90) * Math.PI / 180;
     const dx = x - nodeX;
-    const reach = Math.sqrt(dx * dx + y * y);
-    if (reach === 0) return true;
-    const halfBeam = tuning.triBeamHalfDeg * Math.PI / 180;
-    return -Math.sin(phi) * dx + Math.cos(phi) * y >= reach * Math.cos(halfBeam);
+    const along = Math.sin(phi) * dx + Math.cos(phi) * y;
+    const across = Math.cos(phi) * dx - Math.sin(phi) * y;
+    const halfBeam = halfBeamDeg * Math.PI / 180;
+    return along >= 0 && Math.abs(across) <= along * Math.tan(halfBeam) + tuning.bodyHalfWidthCm;
   }
 
   // Where the player is, from the filtered [left, centre, right] distances and
@@ -1374,16 +1880,19 @@
   // source is "both" for a trilaterated fix, else the one sensor used. Pure:
   // no hysteresis state is touched, and x is not yet clamped to the board.
   //
-  // A reading only counts toward the crossing if it is inside its own
-  // column's play area. When only one does, the circles miss each other, or
-  // the crossing is outside either node's beam (one sensor is seeing
-  // something else), the nearer sensor places the player by its distance
-  // along its servo angle - straight in front of itself if it sends none.
+  // The circles are the distances to the middle of the player
+  // (bodyCentreCm()). A reading only counts toward the crossing if it is
+  // inside its own column's play area. When only one does, the circles miss
+  // each other, or the crossing is outside either node's beam (one sensor is
+  // seeing something else; the beam is tuning.triBeamHalfDeg, plus
+  // tuning.triAimToleranceDeg with the aim tolerance on), the nearer sensor
+  // places the player by its distance along its servo angle - straight in
+  // front of itself if it sends none.
   function trilaterate(filtered, angles = [null, null, null]) {
-    const dL = inSensorRange(filtered[LEFT_SENSOR]) ? filtered[LEFT_SENSOR] : null;
-    const dR = inSensorRange(filtered[RIGHT_SENSOR]) ? filtered[RIGHT_SENSOR] : null;
-    const inL = dL !== null && isInPlay(LEFT_SENSOR, dL);
-    const inR = dR !== null && isInPlay(RIGHT_SENSOR, dR);
+    const dL = inSensorRange(filtered[LEFT_SENSOR]) ? bodyCentreCm(filtered[LEFT_SENSOR]) : null;
+    const dR = inSensorRange(filtered[RIGHT_SENSOR]) ? bodyCentreCm(filtered[RIGHT_SENSOR]) : null;
+    const inL = dL !== null && isInPlayAlong(LEFT_SENSOR, dL, angles[LEFT_SENSOR]);
+    const inR = dR !== null && isInPlayAlong(RIGHT_SENSOR, dR, angles[RIGHT_SENSOR]);
 
     if (inL && inR) {
       const xLeft = columnCentreCm(LEFT_SENSOR);
@@ -1394,7 +1903,8 @@
       if (h2 >= 0) {
         const x = xLeft + along;
         const y = Math.sqrt(h2);
-        if (inBeam(xLeft, angles[LEFT_SENSOR], x, y) && inBeam(xRight, angles[RIGHT_SENSOR], x, y)) {
+        const half = tuning.triBeamHalfDeg + (tuning.triAimTolerance ? tuning.triAimToleranceDeg : 0);
+        if (inBeam(xLeft, angles[LEFT_SENSOR], x, y, half) && inBeam(xRight, angles[RIGHT_SENSOR], x, y, half)) {
           return { x, y, source: "both" };
         }
       }
@@ -1417,13 +1927,13 @@
     return { x: point.x, y: point.y, source: best.column === LEFT_SENSOR ? "left" : "right" };
   }
 
-  // Where one scanner node's reading puts the player. angle is the servo angle:
-  // 90 points straight out, larger turns towards screen-left (smaller x); null
+  // The point distance out from the node at nodeX along its servo angle: 90
+  // points straight out, larger turns towards screen-right (larger x); null
   // means straight out. Same arithmetic as scanner_point() in filterRules.py,
   // operation for operation, so the two agree to the last bit.
   function scannerPoint(nodeX, distance, angle) {
     const phi = ((angle === null ? 90 : angle) - 90) * Math.PI / 180;
-    return { x: nodeX - distance * Math.sin(phi), y: distance * Math.cos(phi) };
+    return { x: nodeX + distance * Math.sin(phi), y: distance * Math.cos(phi) };
   }
 
   // --- Line of sight: a 2D Kalman filter ---------------------------------------
@@ -1434,9 +1944,11 @@
   const LOS_RANGE_SIGMA_CM = 3;           // a filtered distance, along the line of sight
   const LOS_V0_SIGMA_CM_S = 100;          // a new track's velocity uncertainty
   const LOS_GATE_NIS = 13.8;              // chi-square, 2 dof, 99.9 %: further off is an outlier
-  const LOS_RELOCK_READINGS = 6;          // outliers in a row that move the track instead
+  const LOS_RELOCK_READINGS = 6;          // one node's outliers in a row that move the track instead
   const LOS_TRACK_TIMEOUT_MS = 1500;      // no usable reading for this long: no position
   const LOS_BOTH_WINDOW_MS = 2500;        // both nodes fed the track within this: source "both"
+  const SCAN_FOUND = 0;                   // scanState: both heads hear the player
+  const SCAN_HALF = 1;                    // scanState: one head hears the player
   const SCAN_LOST = 2;                    // scanState: sweeping, the player is not in sight
 
   // Small dense matrices as arrays of rows, multiplied in a fixed order so the
@@ -1463,30 +1975,36 @@
     return a.map((row, i) => row.map((value, j) => value + b[i][j]));
   }
 
-  // One node's reading as a measurement: the point along its line of sight,
-  // and that point's covariance (2x2, cm^2) - LOS_RANGE_SIGMA_CM along the
-  // line, the distance times the bearing uncertainty across it. `repeats` is
-  // how many readings in a row have already used this same aim: a servo that
-  // holds still repeats the same small aim error on every reading, so the k-th
-  // repeat counts 1/(k+1)^2 as much across the line - a held aim adds up to
-  // about one and a half readings' worth, however long it is held - while the
-  // distance along the line counts in full every time.
+  // One node's reading as a measurement: the point along its line of sight
+  // (distance is to the middle of the player, bodyCentreCm()), and that
+  // point's covariance (2x2, cm^2) - LOS_RANGE_SIGMA_CM along the line; across
+  // it, the distance times the bearing uncertainty and tuning.bodyHalfWidthCm
+  // (the aim can stop anywhere across the player) added in quadrature. So
+  // where the two nodes look in from either side, as in the centre column,
+  // each one's distance fixes the player across the other's line. `repeats`
+  // is how many readings in a row have already used this same aim: a servo
+  // that holds still repeats the same aim error, on the same part of the
+  // player, on every reading, so the k-th repeat counts 1/(k+1)^2 as much
+  // across the line - a held aim adds up to about one and a half readings'
+  // worth, however long it is held - while the distance along the line
+  // counts in full every time.
   function lineOfSight(nodeX, distance, angle, state, repeats) {
     const phi = (angle - 90) * Math.PI / 180;
-    const along = [-Math.sin(phi), Math.cos(phi)];
-    const across = [Math.cos(phi), Math.sin(phi)];
+    const along = [Math.sin(phi), Math.cos(phi)];
+    const across = [Math.cos(phi), -Math.sin(phi)];
     const bearingDeg = state === 0 ? tuning.losBearingFoundDeg
       : state === 1 ? tuning.losBearingHalfDeg : tuning.losBearingUnknownDeg;
     const radial = LOS_RANGE_SIGMA_CM * LOS_RANGE_SIGMA_CM;
-    const sideways = distance * bearingDeg * Math.PI / 180 * (repeats + 1);
-    const tangential = sideways * sideways;
+    const aim = distance * bearingDeg * Math.PI / 180;
+    const body = tuning.bodyHalfWidthCm;
+    const tangential = (aim * aim + body * body) * (repeats + 1) * (repeats + 1);
     const cov = [[0, 0], [0, 0]];
     for (let i = 0; i < 2; i++) {
       for (let j = 0; j < 2; j++) {
         cov[i][j] = radial * along[i] * along[j] + tangential * across[i] * across[j];
       }
     }
-    return { x: nodeX - distance * Math.sin(phi), y: distance * Math.cos(phi), cov };
+    return { x: nodeX + distance * Math.sin(phi), y: distance * Math.cos(phi), cov };
   }
 
   function makeLosTrack() {
@@ -1499,7 +2017,7 @@
       aimedAt: [null, null, null],          // the servo angle each slot's aim was last taken at
       aimRepeats: [0, 0, 0],                // readings in a row that have used that aim since
       lastSlot: null,
-      outliers: 0,                          // readings in a row that failed the gate
+      outliers: [0, 0, 0],                  // each slot's readings in a row that failed the gate
     };
   }
 
@@ -1526,7 +2044,7 @@
       [0, 0, 0, v0],
     ];
     losTrack.t = now / 1000;
-    losTrack.outliers = 0;
+    losTrack.outliers = [0, 0, 0];
     losTook(slot, now);
   }
 
@@ -1547,12 +2065,15 @@
     losTrack.t = t;
   }
 
-  // A reading the gate turned away. LOS_RELOCK_READINGS of those in a row mean
-  // the player is somewhere else, and the track restarts at this reading.
+  // A reading the gate turned away. LOS_RELOCK_READINGS of those in a row from
+  // one node mean the player is somewhere else, and the track restarts at this
+  // reading. Counted per node: the other node's readings can pass the gate on
+  // the slack across its line (the player's width) while this node's distance
+  // keeps saying the track is wrong, and must not keep it from moving.
   // Returns whether it did.
   function losOutlier(m, slot, now) {
-    losTrack.outliers += 1;
-    if (losTrack.outliers < LOS_RELOCK_READINGS) return false;
+    losTrack.outliers[slot] += 1;
+    if (losTrack.outliers[slot] < LOS_RELOCK_READINGS) return false;
     losStart(m, slot, now);
     return true;
   }
@@ -1566,7 +2087,7 @@
     const KH = matMul(K, H);
     const A = KH.map((row, i) => row.map((value, j) => (i === j ? 1 : 0) - value));
     losTrack.P = matAdd(matMul(matMul(A, P), matTranspose(A)), matMul(matMul(K, R), matTranspose(K)));
-    losTrack.outliers = 0;
+    losTrack.outliers[slot] = 0;
     losTook(slot, now);
   }
 
@@ -1604,16 +2125,22 @@
   // a distance and a servo angle, from a node that is not sweeping. An aim is
   // new when the servo has moved, or the node has just come back for its turn;
   // after that each reading at the same aim counts for less across the line
-  // (lineOfSight()).
+  // (lineOfSight()). With tuning.kalman off, each reading starts the track
+  // again at its own point: no gate, nothing kept from before. A reading past
+  // the angle limit (withinAngleLimit()) is not used at all.
   function stepLosTrack(filtered, scans, fresh, now) {
     [LEFT_SENSOR, RIGHT_SENSOR].forEach((slot) => {
       const scan = scans[slot];
       if (!fresh[slot] || filtered[slot] === null || scan.angle === null || scan.state === SCAN_LOST) return;
+      if (!withinAngleLimit(slot, filtered[slot], scan.angle)) return;
       const newAim = losTrack.x === null || scan.angle !== losTrack.aimedAt[slot] ||
         now - losTrack.fedAt[slot] > SENSOR_HOLD_MS;
       const repeats = newAim ? 0 : losTrack.aimRepeats[slot] + 1;
-      const m = lineOfSight(columnCentreCm(slot), filtered[slot], scan.angle, scan.state, repeats);
-      if (losObserve(m, slot, now)) {
+      const m = lineOfSight(columnCentreCm(slot), bodyCentreCm(filtered[slot]), scan.angle, scan.state, repeats);
+      let took = true;
+      if (tuning.kalman) took = losObserve(m, slot, now);
+      else losStart(m, slot, now);
+      if (took) {
         losTrack.aimedAt[slot] = scan.angle;
         losTrack.aimRepeats[slot] = repeats;
       }
@@ -1651,11 +2178,389 @@
     return { los, tri, avg };
   }
 
+  // --- Dynamic: the steadiest method ------------------------------------------
+  // "dyn" places the player by whichever of line of sight, trilateration and
+  // the average has kept them in one square of the board the longest. A
+  // method whose square keeps changing - bouncing between columns, say -
+  // never builds up any time, so it is passed over while another holds still.
+  //
+  // Time in a square counts up to tuning.dynamicSteadyMs (1 s). Past that a
+  // method is fully steady, and of two fully steady methods the first in
+  // DYNAMIC_METHODS wins: line of sight, then trilateration, then the average.
+  // So a method stuck on something that never moves (furniture, say) can lead
+  // only until line of sight has held its own square for that long.
+  //
+  // A square is a cell of the board, or off it: out of bounds is a square too.
+  // A method with no position has no square and is out of the running until
+  // it has one again. Python: DynamicPicker in filterRules.py.
+  const DYNAMIC_METHODS = ["los", "tri", "avg"];
+  const OFF_BOARD = -1;
+  const dynamic = {
+    square: { los: null, tri: null, avg: null },   // gx * 3 + gy, OFF_BOARD, or null
+    since: { los: null, tri: null, avg: null },    // ms: when it entered that square
+  };
+
+  function resetDynamic() {
+    DYNAMIC_METHODS.forEach((method) => {
+      dynamic.square[method] = null;
+      dynamic.since[method] = null;
+    });
+  }
+
+  // The square a method's position is in, as above. No hysteresis: a position
+  // that flicks back and forth across a boundary changes square every time.
+  function squareOf(fix) {
+    if (!fix) return null;
+    if (fix.x < 0 || fix.x > PLAY_WIDTH_CM) return OFF_BOARD;
+    const column = columnAtCm(fix.x);
+    const grid = window.rawToGrid(column, fix.y, null);
+    if (!grid || !grid.inside) return OFF_BOARD;
+    return column * 3 + grid.gy;
+  }
+
+  // Once per new reading: each method's square, and since when it has been in
+  // it.
+  function stepDynamic(fixes, now) {
+    DYNAMIC_METHODS.forEach((method) => {
+      const square = squareOf(fixes[method]);
+      if (square === null) {
+        dynamic.square[method] = null;
+        dynamic.since[method] = null;
+      } else if (square !== dynamic.square[method]) {
+        dynamic.square[method] = square;
+        dynamic.since[method] = now;
+      }
+    });
+  }
+
+  // The method Dynamic follows right now, or null when none has a position. A
+  // position not yet stepped (just after a reset) has been held for no time.
+  function dynamicLeader(fixes, now) {
+    let leader = null;
+    let best = -Infinity;
+    DYNAMIC_METHODS.forEach((method) => {
+      if (!fixes[method]) return;
+      const since = dynamic.since[method];
+      const held = since === null ? 0 : Math.min(now - since, tuning.dynamicSteadyMs);
+      if (held > best) {
+        best = held;
+        leader = method;
+      }
+    });
+    return leader;
+  }
+
+  // --- Dynamic's rules: far priority, confidence, the far corners, the column lock, a lone node
+  // Checked before the steadiest method (Aaron, 5 Oct), in this order. Each
+  // can be switched off from the control panel (setDynamicRules()).
+  //
+  // F. Far priority (tuning.farPriority; Aaron, 6 Oct). Past 110 cm a node's
+  //    readings are few and far between: mostly one head hears the player
+  //    (half) or neither does, so a far reading turned up for a reading or
+  //    two and the no-echo and nearer stray readings in between took the
+  //    player back (on the rig on 6 Oct, two thirds of the readings past
+  //    110 cm were half, and most runs of them were one reading long). When both
+  //    nodes have read past tuning.farPriorityCm in the last
+  //    tuning.farSeenMs (found or half, within the angle limit), and the two
+  //    readings agree - their distances cross inside both nodes' beams (with
+  //    the aim tolerance, as trilateration checks), on the board - the player
+  //    is at that crossing, and is not Out of bounds, whatever the readings
+  //    in between. Two far readings that do not agree are not the player (on
+  //    6 Oct the left node read 113 cm with its servo at its stop, 160
+  //    degrees, while the right one read 135 cm straight out), and change
+  //    nothing. A node that finds the player nearer than
+  //    tuning.farPriorityCm tuning.confidentReadings times in a row forgets
+  //    its far reading at once (farStep()).
+  //
+  // 0. A node at the confidence level (tuning.confidenceNode). The server
+  //    works out how sure each node is of where the player is (handover.py:
+  //    the share of its readings in the last 5 s that put them in one spot,
+  //    the Confidence column on the control panel). A node whose confidence
+  //    is at least tuning.confidenceLevelPct places the player by its own
+  //    reading, along its servo line (ownPoint()), and the other node's
+  //    readings are left out. When both are at the level the higher one
+  //    does; two equal ones leave it to the rules below. A confidence counts
+  //    only once the server says it is ready (the node has reported for 5 s,
+  //    with 8 readings or more, and its room is learnt, if it has one).
+  //
+  // 1. The near node in its far corner (tuning.cornerNode). A1 and A3, the
+  //    far-left and far-right squares, are far from the opposite node - the
+  //    back-left square is some 156 cm from the right node, at a shallow
+  //    angle. When the left node is confident (rule 3) and its own reading
+  //    puts the player in A1, that reading places them and the right node's
+  //    readings are left out; the same for the right node and A3.
+  //
+  // 2. The column lock (tuning.columnLock), from the two servo lines. Each
+  //    node's servo points where it last found or half-found the player; if
+  //    both have done so in the last tuning.centreSeenMs, where their lines
+  //    cross says which column the player is in, wherever the methods put
+  //    them. The line from a node, not its distance, is what the lock
+  //    trusts: a player is hard to place by distance because each node's
+  //    beam finds the edge of their body.
+  //    - The centre: the lines cross in the centre column. x is the
+  //      crossing's, kept COLUMN_MARGIN_CM inside the column so the column
+  //      hysteresis cannot hold the player in the column they came from; y is
+  //      the steadiest method's, or the crossing's when no method has a
+  //      position. Once the lines have crossed in the centre the player stays
+  //      there for tuning.centreHoldMs while both nodes still see them, even
+  //      if the crossing strays just outside: standing still in the centre
+  //      must never touch a side column (Aaron). On the rig on 5 Oct the
+  //      crossing strayed to 103.5 cm for two readings in 20 minutes.
+  //    - The sides: the lines cross at least tuning.sideLockDepthCm inside
+  //      the left or right column (and on the board). No hold, and it ends
+  //      any centre hold. Without the depth, the servos' lean (they read
+  //      20-30 degrees further in than the player on 4 Oct) put the crossing
+  //      in a side column while the player walked the centre: in that run's
+  //      replay walk-centre fell from 100 % to 76 % in its column.
+  //    (Aaron's first form of the centre, LEFT above 90 and RIGHT below it,
+  //    holds anywhere between the two nodes, which sit in the middle of the
+  //    outer columns; on the 4 Oct centre run it said centre at the left
+  //    spot every time. The crossing said so at the left spot 0 % of the
+  //    time and 81-100 % at the centre spots.)
+  //
+  // 3. A lone confident node (tuning.loneNode). A node whose last
+  //    tuning.confidentReadings readings all found the player (both heads),
+  //    the latest in the last tuning.confidentMs, and whose own reading - its
+  //    distance along its servo line - puts the player inside the play area
+  //    (across the board, and between its column's near edge and its far
+  //    edge plus tuning.farLeeway), is
+  //    confident. If only one node is, that reading places the player and the
+  //    other node's readings are left out. When both are, the methods place
+  //    the player as before. (On 5 Oct the left node, turned fully in, found
+  //    something 9 cm in front of the screen line, and at times something off
+  //    the left edge; neither is the player.)
+  //
+  // Python: TwoSensorGeometry._rule() in filterRules.py.
+  const seenAim = [null, null, null];   // { at, angle }: a slot's last new reading that found or half-found the player
+  const foundStreak = [0, 0, 0];        // its new readings in a row that found the player
+  let centreHeld = null;                // { at, x, y }: when and where the lines last crossed in the centre column
+  const farSeen = [null, null, null];   // { at, distance, angle }: a slot's last new reading past tuning.farPriorityCm
+
+  function resetDynamicRules() {
+    seenAim.fill(null);
+    foundStreak.fill(0);
+    centreHeld = null;
+    farSeen.fill(null);
+  }
+
+  // Once per update: this update's new readings. foundAt, which the
+  // confidence also reads, is noted by bothNodesLost(). A reading past the
+  // angle limit counts as none: it neither builds a found streak nor aims a
+  // servo line.
+  function stepDynamicRules(raw, filtered, scans, fresh, now) {
+    [LEFT_SENSOR, RIGHT_SENSOR].forEach((slot) => {
+      if (!fresh[slot]) return;
+      const { state, angle } = scans[slot];
+      const reading = filtered[slot] !== null && withinAngleLimit(slot, filtered[slot], angle);
+      foundStreak[slot] = reading && state === SCAN_FOUND ? foundStreak[slot] + 1 : 0;
+      if (reading && angle !== null && (state === SCAN_FOUND || state === SCAN_HALF)) {
+        seenAim[slot] = { at: now, angle };
+      }
+      farStep(slot, raw[slot], state, angle, now);
+    });
+    const crossing = linesCrossing(now);
+    if (crossing && inCentreColumn(crossing.x)) centreHeld = { at: now, x: crossing.x, y: crossing.y };
+    else if (crossing && deepSideColumn(crossing.x) !== null) centreHeld = null;
+  }
+
+  // Far priority's memory of one node's new reading (rule F): a reading past
+  // tuning.farPriorityCm - the node's own distance, as it arrived, before
+  // any filter - that found or half-found something, with an angle and
+  // within the angle limit, is kept; one nearer that found the player, the
+  // node's tuning.confidentReadings-th found reading in a row, forgets it.
+  // No-echo, half and lone nearer readings leave it alone: they are the noise.
+  function farStep(slot, distance, state, angle, now) {
+    if (distance === null || angle === null) return;
+    if (distance > tuning.farPriorityCm) {
+      if ((state === SCAN_FOUND || state === SCAN_HALF) && withinAngleLimit(slot, distance, angle)) {
+        farSeen[slot] = { at: now, distance, angle };
+      }
+    } else if (state === SCAN_FOUND && foundStreak[slot] >= tuning.confidentReadings) {
+      farSeen[slot] = null;
+    }
+  }
+
+  // Rule F's position, { x, y, source: "both" }, or null: both nodes' far
+  // readings (farStep()) are recent and agree - the two distances, to the
+  // middle of the player, cross inside both nodes' beams as each was aimed
+  // (inBeam(), with the aim tolerance), on the board. Null with the rule off.
+  function farFix(now) {
+    if (!tuning.farPriority) return null;
+    const left = farSeen[LEFT_SENSOR];
+    const right = farSeen[RIGHT_SENSOR];
+    if (!left || !right || now - left.at > tuning.farSeenMs || now - right.at > tuning.farSeenMs) return null;
+    const dL = bodyCentreCm(left.distance);
+    const dR = bodyCentreCm(right.distance);
+    const xLeft = columnCentreCm(LEFT_SENSOR);
+    const xRight = columnCentreCm(RIGHT_SENSOR);
+    const base = xRight - xLeft;
+    const along = (dL * dL - dR * dR + base * base) / (2 * base);
+    const h2 = dL * dL - along * along;
+    if (h2 < 0) return null;
+    const x = xLeft + along;
+    const y = Math.sqrt(h2);
+    const half = tuning.triBeamHalfDeg + (tuning.triAimTolerance ? tuning.triAimToleranceDeg : 0);
+    if (!inBeam(xLeft, left.angle, x, y, half) || !inBeam(xRight, right.angle, x, y, half)) return null;
+    if (window.isPointInPlayArea && !window.isPointInPlayArea(x, y)) return null;
+    return { x, y, source: "both" };
+  }
+
+  // Whether both nodes found or half-found the player in the last
+  // tuning.centreSeenMs.
+  function bothLinesRecent(now) {
+    const left = seenAim[LEFT_SENSOR];
+    const right = seenAim[RIGHT_SENSOR];
+    return Boolean(left && right) && now - left.at <= tuning.centreSeenMs && now - right.at <= tuning.centreSeenMs;
+  }
+
+  // Where the two nodes' servo lines cross, { x, y }, or null when one is not
+  // recent or they do not meet in front of the nodes.
+  function linesCrossing(now) {
+    if (!bothLinesRecent(now)) return null;
+    const tanLeft = Math.tan((seenAim[LEFT_SENSOR].angle - 90) * Math.PI / 180);
+    const tanRight = Math.tan((seenAim[RIGHT_SENSOR].angle - 90) * Math.PI / 180);
+    if (!(tanLeft > tanRight)) return null;
+    const y = (columnCentreCm(RIGHT_SENSOR) - columnCentreCm(LEFT_SENSOR)) / (tanLeft - tanRight);
+    return { x: columnCentreCm(LEFT_SENSOR) + y * tanLeft, y };
+  }
+
+  function inCentreColumn(x) {
+    const pitch = PLAY_WIDTH_CM / 3;
+    return x >= pitch && x <= 2 * pitch;
+  }
+
+  // The side column, 0 or 2, the lines' crossing is at least
+  // tuning.sideLockDepthCm inside (and on the board), or null.
+  function deepSideColumn(x) {
+    const pitch = PLAY_WIDTH_CM / 3;
+    if (x >= 0 && x <= pitch - tuning.sideLockDepthCm) return LEFT_SENSOR;
+    if (x <= PLAY_WIDTH_CM && x >= 2 * pitch + tuning.sideLockDepthCm) return RIGHT_SENSOR;
+    return null;
+  }
+
+  // The column lock, { by: "centre" | "lock-left" | "lock-right", fix }, or
+  // null: the lines cross in the centre column, or deep in a side column, or
+  // the centre is still held (tuning.centreHoldMs, both lines recent).
+  function columnLock(steadiest, now) {
+    const crossing = linesCrossing(now);
+    const pitch = PLAY_WIDTH_CM / 3;
+    const centre = (at) => ({
+      by: "centre",
+      fix: {
+        x: Math.max(pitch + COLUMN_MARGIN_CM, Math.min(2 * pitch - COLUMN_MARGIN_CM, at.x)),
+        y: steadiest ? steadiest.y : at.y,
+        source: "both",
+      },
+    });
+    if (crossing && inCentreColumn(crossing.x)) return centre(crossing);
+    const side = crossing ? deepSideColumn(crossing.x) : null;
+    if (side !== null) {
+      return {
+        by: side === LEFT_SENSOR ? "lock-left" : "lock-right",
+        fix: { x: crossing.x, y: steadiest ? steadiest.y : crossing.y, source: "both" },
+      };
+    }
+    if (centreHeld && now - centreHeld.at <= tuning.centreHoldMs && bothLinesRecent(now)) return centre(centreHeld);
+    return null;
+  }
+
+  // A node's own reading, { x, y } - its distance along its servo line - or
+  // null when it has no reading or angle, the reading is past the angle
+  // limit, or that point is outside the play area: across the board, and
+  // between its column's near edge and its far edge plus tuning.farLeeway
+  // (Aaron, 5 Oct: +20 percent at great distances).
+  function ownPoint(slot, filtered, scans) {
+    if (filtered[slot] === null || scans[slot].angle === null) return null;
+    if (!withinAngleLimit(slot, filtered[slot], scans[slot].angle)) return null;
+    const point = scannerPoint(columnCentreCm(slot), bodyCentreCm(filtered[slot]), scans[slot].angle);
+    if (point.x < 0 || point.x > PLAY_WIDTH_CM) return null;
+    const span = columnSpan(columnAtCm(point.x));
+    return point.y >= span.near && point.y <= span.far * (1 + tuning.farLeeway) ? point : null;
+  }
+
+  // A confident node's own reading (ownPoint()), or null when the node is
+  // not confident.
+  function confidentPoint(slot, filtered, scans, now) {
+    if (foundStreak[slot] < tuning.confidentReadings || now - foundAt[slot] > tuning.confidentMs) return null;
+    return ownPoint(slot, filtered, scans);
+  }
+
+  // A node's confidence from the server, 0-1, or null when it has none yet
+  // (no role, or not ready: see rule 0). game.js gets it with every node
+  // update; handover.py status().
+  function readConfidence(node) {
+    if (!node || !node.online || !node.confidence || node.confidence.ready !== true) return null;
+    const score = Number(node.confidence.score);
+    return Number.isFinite(score) ? score : null;
+  }
+
+  // Rule 0: the node at the confidence level, { slot, point }, or null. Both
+  // at it: the higher; equal: neither.
+  function levelNode(filtered, scans, confidence) {
+    const at = [LEFT_SENSOR, RIGHT_SENSOR]
+      .filter((slot) => confidence[slot] !== null && confidence[slot] * 100 >= tuning.confidenceLevelPct)
+      .map((slot) => ({ slot, score: confidence[slot], point: ownPoint(slot, filtered, scans) }))
+      .filter((c) => c.point);
+    if (at.length === 2 && at[0].score === at[1].score) return null;
+    if (at.length === 0) return null;
+    return at.length === 1 || at[0].score > at[1].score ? at[0] : at[1];
+  }
+
+  // Whether a node's own reading puts the player in its far corner: A1, the
+  // far-left square, for the left node; A3, the far-right one, for the right.
+  function inFarCorner(slot, point) {
+    const column = slot === LEFT_SENSOR ? 0 : 2;
+    if (columnAtCm(point.x) !== column) return false;
+    const grid = window.rawToGrid(column, point.y, null);
+    return Boolean(grid) && grid.gy === GRID_ROWS - 1;
+  }
+
+  // The rule placing the player for Dynamic, { by, fix: { x, y, source } } -
+  // by is "far" (rule F), "conf-left" | "conf-right" (rule 0), "corner-left" |
+  // "corner-right" (rule 1), "centre" | "lock-left" | "lock-right" (rule 2)
+  // or "left" | "right" (rule 3) - or null to follow the steadiest method,
+  // whose position is `steadiest`. confidence: [l, c, r], each node's from
+  // the server (readConfidence()).
+  function dynamicRule(filtered, scans, confidence, steadiest, now) {
+    const side = (slot) => (slot === LEFT_SENSOR ? "left" : "right");
+    const far = farFix(now);
+    if (far) return { by: "far", fix: far };
+    if (tuning.confidenceNode) {
+      const sure = levelNode(filtered, scans, confidence);
+      if (sure) {
+        const { slot, point } = sure;
+        return { by: `conf-${side(slot)}`, fix: { x: point.x, y: point.y, source: side(slot) } };
+      }
+    }
+    const points = [LEFT_SENSOR, RIGHT_SENSOR]
+      .map((slot) => ({ slot, point: confidentPoint(slot, filtered, scans, now) }))
+      .filter((c) => c.point);
+    if (tuning.cornerNode) {
+      const corner = points.find((c) => inFarCorner(c.slot, c.point));
+      if (corner) {
+        const { slot, point } = corner;
+        return { by: `corner-${side(slot)}`, fix: { x: point.x, y: point.y, source: side(slot) } };
+      }
+    }
+    if (tuning.columnLock) {
+      const lock = columnLock(steadiest, now);
+      if (lock) return lock;
+    }
+    if (tuning.loneNode && points.length === 1) {
+      const { slot, point } = points[0];
+      return { by: side(slot), fix: { x: point.x, y: point.y, source: side(slot) } };
+    }
+    return null;
+  }
+
   // --- Which method places the player ----------------------------------------
-  const POSITION_METHODS = ["los", "tri", "avg"];
+  // In switch order. Choosing any but Dynamic turns Dynamic off.
+  const POSITION_METHODS = ["dyn", "los", "tri", "avg"];
+  // Both are switched on the phone's /control page only; the game board only
+  // ever draws the one cursor (Aaron, 5 Oct).
   const positioning = {
-    method: "los",   // what drives the cursor and the game
-    compare: true,   // draw all three on the board
+    method: "dyn",   // what drives the cursor and the game
+    compare: true,   // ring line of sight, trilateration and the average on the control panel's pad
   };
 
   window.getPositionMethod = function getPositionMethod() {
@@ -1676,6 +2581,180 @@
     return positioning.method;
   };
 
+  window.getPositionCompare = function getPositionCompare() {
+    return positioning.compare;
+  };
+
+  window.setPositionCompare = function setPositionCompare(on) {
+    positioning.compare = Boolean(on);
+    return positioning.compare;
+  };
+
+  // What the control panel's Dynamic button adds to its name while Dynamic is
+  // on and placing the player: the method it follows ("LOS", "TRI", "AVG") or
+  // the rule ("MID", "L", "R"); null otherwise.
+  window.getDynamicFollowing = function getDynamicFollowing() {
+    const following = gameState.sensor && gameState.sensor.placedBy;
+    if (positioning.method !== "dyn" || !following) return null;
+    if (METHOD_STYLES[following]) return METHOD_STYLES[following].short;
+    return DYNAMIC_RULE_SHORT[following] || null;
+  };
+
+  // The Kalman switch, on by default; see tuning.kalman. Takes effect from
+  // the next reading.
+  window.getKalman = function getKalman() {
+    return tuning.kalman;
+  };
+
+  window.setKalman = function setKalman(on) {
+    tuning.kalman = Boolean(on);
+    console.info(`[kalman] ${tuning.kalman ? "on" : "off"}`);
+    return tuning.kalman;
+  };
+
+  // The cell confidence switch, on by default; see tuning.cellConfidence.
+  window.getCellConfidenceSwitch = function getCellConfidenceSwitch() {
+    return tuning.cellConfidence;
+  };
+
+  window.setCellConfidence = function setCellConfidence(on) {
+    tuning.cellConfidence = Boolean(on);
+    console.info(`[cell confidence] ${tuning.cellConfidence ? "on" : "off"}`);
+    return tuning.cellConfidence;
+  };
+
+  // Each cell's confidence, 0-1, index gx * 3 + gy (gy 0 nearest the screen).
+  window.getCellConfidence = function getCellConfidence() {
+    return cellConfidence.slice();
+  };
+
+  // Each hole's cell confidence, in hole order (0 top-left, reading order):
+  // the browser's own, or the server's with SERVER_FILTERING on.
+  function holeConfidence() {
+    const server = serverCoordinateActive && gameState.sensor && Array.isArray(gameState.sensor.cellConfidence);
+    const scores = server ? gameState.sensor.cellConfidence : cellConfidence;
+    const out = new Array(9).fill(0);
+    for (let gx = 0; gx < 3; gx++) {
+      for (let gy = 0; gy < 3; gy++) {
+        out[holeForCell(gx, gy)] = Math.round((Number(scores[gx * 3 + gy]) || 0) * 1000) / 1000;
+      }
+    }
+    return out;
+  }
+
+  // The player as the server's search wants them (0c's track:update):
+  // moving or still (stepMotion(), or the server's with SERVER_FILTERING on),
+  // the position (cm), the line-of-sight track's velocity (cm/s; 0 with no
+  // live track, or with the server placing the player), and at, when the
+  // track last took a reading in this page's performance.now() ms (now with
+  // no live track).
+  window.getSensorMotion = function getSensorMotion() {
+    const now = performance.now();
+    const live = !serverCoordinateActive && losFix(now) !== null;
+    const sensor = gameState.sensor || {};
+    return {
+      moving: serverCoordinateActive ? Boolean(sensor.moving) : motion.moving,
+      x: numberOrNull(sensor.xCm),
+      y: numberOrNull(sensor.yCm),
+      vx: live ? losTrack.x[2] : 0,
+      vy: live ? losTrack.x[3] : 0,
+      at: live ? losTrack.updatedAt : now,
+    };
+  };
+
+  // The tracking switch, OFF by default (Aaron, 6 Oct); see
+  // tuning.trackMoving. Takes effect from the next reading; the moving/still
+  // detector runs either way.
+  window.getTrackMoving = function getTrackMoving() {
+    return tuning.trackMoving;
+  };
+
+  window.setTrackMoving = function setTrackMoving(on) {
+    tuning.trackMoving = Boolean(on);
+    console.info(`[tracking] ${tuning.trackMoving ? "on" : "off"}`);
+    return tuning.trackMoving;
+  };
+
+  // The cell decision switch, on by default; see tuning.cellDecision. Either
+  // way the other one starts afresh, from the next reading.
+  window.getCellDecision = function getCellDecision() {
+    return tuning.cellDecision;
+  };
+
+  window.setCellDecision = function setCellDecision(on) {
+    const next = Boolean(on);
+    if (next !== tuning.cellDecision) resetCellFilter();
+    tuning.cellDecision = next;
+    console.info(`[cell decision] ${tuning.cellDecision ? "on" : "off"}`);
+    return tuning.cellDecision;
+  };
+
+  // The cell lock switch, on by default; see tuning.cellLock. Takes effect
+  // from the next frame.
+  window.getCellLock = function getCellLock() {
+    return tuning.cellLock;
+  };
+
+  window.setCellLock = function setCellLock(on) {
+    tuning.cellLock = Boolean(on);
+    console.info(`[cell lock] ${tuning.cellLock ? "on" : "off"}`);
+    return tuning.cellLock;
+  };
+
+  // The angle limit switch, on by default; see tuning.angleLimit. Takes effect
+  // from the next reading.
+  window.getAngleLimit = function getAngleLimit() {
+    return tuning.angleLimit;
+  };
+
+  window.setAngleLimit = function setAngleLimit(on) {
+    tuning.angleLimit = Boolean(on);
+    console.info(`[angle limit] ${tuning.angleLimit ? "on" : "off"}`);
+    return tuning.angleLimit;
+  };
+
+  // The tri aim tolerance switch, on by default; see tuning.triAimTolerance.
+  // Takes effect from the next update.
+  window.getTriAimTolerance = function getTriAimTolerance() {
+    return tuning.triAimTolerance;
+  };
+
+  window.setTriAimTolerance = function setTriAimTolerance(on) {
+    tuning.triAimTolerance = Boolean(on);
+    console.info(`[tri aim tolerance] ${tuning.triAimTolerance ? "on" : "off"}`);
+    return tuning.triAimTolerance;
+  };
+
+  // The far half switch, on by default; see tuning.farHalf. Takes effect at
+  // once, on the readings already kept as well.
+  window.getFarHalf = function getFarHalf() {
+    return tuning.farHalf;
+  };
+
+  window.setFarHalf = function setFarHalf(on) {
+    tuning.farHalf = Boolean(on);
+    console.info(`[far half] ${tuning.farHalf ? "on" : "off"}`);
+    return tuning.farHalf;
+  };
+
+  // How far each node's servo line runs on the grid at an angle (angleLimitCm()),
+  // for the tests and the console: slot 0 is the left node, 2 the right.
+  window.getAngleLimitCm = function getAngleLimitCm(slot, angle) {
+    return angleLimitCm(columnCentreCm(slot), angle);
+  };
+
+  // The dead zone switch, on by default; see tuning.deadZone. Takes effect
+  // from the next update.
+  window.getDeadZone = function getDeadZone() {
+    return tuning.deadZone;
+  };
+
+  window.setDeadZone = function setDeadZone(on) {
+    tuning.deadZone = Boolean(on);
+    console.info(`[dead zone] ${tuning.deadZone ? "on" : "off"}`);
+    return tuning.deadZone;
+  };
+
   // Which slots carry a reading not seen before. The server stamps each node's
   // latest message (last_seen), and only one node scans at a time, so between
   // its turns a node's last reading is repeated in every update. A slot with
@@ -1684,23 +2763,102 @@
   // `fresh` mask serverFilter.py hands filterRules.py.
   const lastSeenStamp = [null, null, null];
   const heardAt = [-Infinity, -Infinity, -Infinity];   // ms, a slot's last new reading
+  const foundAt = [-Infinity, -Infinity, -Infinity];   // ms, its last new one with both heads on the player
+  // Each node's readings this round, one per reading that arrived, the latest
+  // LOST_READINGS_MAX of them (bothNodesLost()): { state, backRow }, its scan
+  // state and whether its own point was in the back row (inBackRow()).
+  const stateLog = [[], [], []];
 
+  // Which slots carry a new reading (fresh, see above), and which nodes'
+  // messages actually arrived this update (heard): a new stamp, or every new
+  // update for a node with none. fresh also marks a slot with no reading, so
+  // a lost node's "no echo" would count again in every update while the other
+  // node takes its turn; heard counts each reading once. serverFilter.py
+  // passes the same as heard (the reporting node only).
   function freshSlots(list, raw, isNewReading, now) {
-    return raw.map((value, slot) => {
+    const heard = [false, false, false];
+    const fresh = raw.map((value, slot) => {
       if (!isNewReading) return false;
       const node = list[slot];
       const stamp = node && node.last_seen !== undefined ? node.last_seen : null;
+      heard[slot] = Boolean(node) && (stamp === null || stamp !== lastSeenStamp[slot]);
       const isNew = value === null || stamp === null || stamp !== lastSeenStamp[slot];
       lastSeenStamp[slot] = stamp;
       if (isNew && value !== null) heardAt[slot] = now;
       return isNew;
     });
+    return { fresh, heard };
+  }
+
+  // A reading's score towards a node being lost (Aaron, 5 Oct): found +1,
+  // half 0, lost -1; with tuning.farHalf on, a half reading in the back row
+  // +1, as found. entry: a stateLog entry.
+  function lostScore(entry) {
+    if (entry.state === SCAN_FOUND) return 1;
+    if (entry.state === SCAN_LOST) return -1;
+    return tuning.farHalf && entry.backRow ? 1 : 0;
+  }
+
+  // Whether a node's reading puts the player in the back row (Aaron, 5 Oct):
+  // its own point - its distance to the middle of the player, along its
+  // servo line - is across the board, no nearer than where its column's back
+  // row starts (two thirds of the way from the near edge to the far one;
+  // 100 cm on the default bounds), no further than the far edge plus
+  // tuning.farLeeway, and the reading is within the angle limit.
+  // filterRules.py TwoSensorGeometry._in_back_row().
+  function inBackRow(slot, filtered, scans) {
+    const distance = filtered[slot];
+    const angle = scans[slot].angle;
+    if (distance === null || !withinAngleLimit(slot, distance, angle)) return false;
+    const point = scannerPoint(columnCentreCm(slot), bodyCentreCm(distance), angle);
+    if (point.x < 0 || point.x > PLAY_WIDTH_CM) return false;
+    const span = columnSpan(columnAtCm(point.x));
+    const backRow = span.near + ((GRID_ROWS - 1) * (span.far - span.near)) / GRID_ROWS;
+    return point.y >= backRow && point.y <= span.far * (1 + tuning.farLeeway);
+  }
+
+  // Each node's score now, [left, right], for the control panel: { score,
+  // readings } - score the sum over its last tuning.lostReadings readings
+  // (0 or less is lost), or null until it has had that many this round.
+  window.getLostScores = function getLostScores() {
+    const n = tuning.lostReadings;
+    return [LEFT_SENSOR, RIGHT_SENSOR].map((slot) => {
+      const log = stateLog[slot];
+      const score = log.length < n ? null : log.slice(-n).reduce((sum, entry) => sum + lostScore(entry), 0);
+      return { score, readings: Math.min(log.length, n) };
+    });
+  };
+
+  // Whether both nodes are lost. A node is lost when its last
+  // tuning.lostReadings readings' scores (lostScore()) add up to 0 or less:
+  // on average half or lost, so the odd found reading among lost ones does
+  // not stop it, and a node mostly finding the player is never lost. Each
+  // reading counts once, when it arrives (heard), and a node waiting for its
+  // turn keeps the readings of its last one. A node is not lost until it has
+  // had that many readings this round, and one that sends no scan state never
+  // is. Notes this update's readings first (and foundAt, as before).
+  // TwoSensorGeometry._nobody_found() in filterRules.py.
+  function bothNodesLost(filtered, scans, fresh, heard, now) {
+    const lost = (slot) => {
+      const state = scans[slot].state;
+      if (fresh[slot] && state === SCAN_FOUND) foundAt[slot] = now;
+      const log = stateLog[slot];
+      if (heard[slot] && state !== null) log.push({ state, backRow: inBackRow(slot, filtered, scans) });
+      if (log.length > LOST_READINGS_MAX) log.shift();
+      const n = tuning.lostReadings;
+      if (log.length < n) return false;
+      return log.slice(-n).reduce((sum, entry) => sum + lostScore(entry), 0) <= 0;
+    };
+    const left = lost(LEFT_SENSOR);
+    const right = lost(RIGHT_SENSOR);
+    return left && right;
   }
 
   // Input:  [left, centre, right] node records, nulls allowed (calibration order).
   //         The centre is ignored: the rig has no centre sensor.
   // Output: {
-  //   status:     "ok" | "too-close" | "no-signal" | "out-of-bounds",
+  //   status:     "ok" | "too-close" | "no-signal" | "out-of-bounds" - out of
+  //               bounds only when nobodyFound,
   //   column:     the column the player is in - 0 left, 1 centre, 2 right,
   //   distanceCm: the player's depth from the screen (y),
   //   xCm, yCm:   the player's position in cm, source: "both" | "left" | "right",
@@ -1708,11 +2866,23 @@
   //   filtered:   [l, c, r] after median, Kalman, FFT and hold,
   //   fresh:      [l, c, r] whether each slot brought a new reading this update,
   //   heardMsAgo: [l, c, r] ms since each node's last new reading,
-  //   fixes:      { los, tri, avg } - every method's position, see solvePositions(),
-  //   method:     the method the position above came from,
-  //   depth:      [l, c, r] each node's own depth reading (filtered distance
-  //               turned by its servo angle) - what corner calibration captures,
+  //   fixes:      { dyn, los, tri, avg } - every method's position, see
+  //               solvePositions(), dynamicLeader() and dynamicRule(),
+  //   method:     the method switched on,
+  //   placedBy:   where the position above came from: the method switched
+  //               on ("los" | "tri" | "avg"), or, with Dynamic on, one of its
+  //               rules (dynamicRule(): "far" | "conf-left" | "conf-right" |
+  //               "corner-left" | "corner-right" |
+  //               "centre" | "lock-left" | "lock-right" | "left" | "right")
+  //               or the steadiest method,
+  //   depth:      [l, c, r] each node's own depth reading (filtered distance to
+  //               the middle of the player, bodyCentreCm(), turned by its servo
+  //               angle) - what corner calibration captures,
   //   scans:      [l, c, r] each node's scanner fields, see readScan(),
+  //   nobodyFound: both nodes are lost over their last tuning.lostReadings
+  //               readings (bothNodesLost()) - "out-of-bounds", with no hold,
+  //   offBoard:   the position was off the board (or past its calibrated
+  //               depth) and has been brought onto the edge square,
   //   configured: how many sensors currently have a usable value
   // }
   function readSensorCoordinate(orderedNodes) {
@@ -1730,32 +2900,44 @@
     // is still one reading.
     const isNewReading = sensorFrameSeq !== lastSeenFrameSeq;
     lastSeenFrameSeq = sensorFrameSeq;
-    const fresh = freshSlots(list, raw, isNewReading, now);
+    const { fresh, heard } = freshSlots(list, raw, isNewReading, now);
 
     const filtered = raw.map((value, slot) =>
       fresh[slot] ? conditionSensor(sensorFilters[slot], value, now, angles[slot]) : sensorFilters[slot].value);
     if (isNewReading) stepLosTrack(filtered, scans, fresh, now);
+    const bothLost = bothNodesLost(filtered, scans, fresh, heard, now);
+    if (isNewReading) stepDynamicRules(raw, filtered, scans, fresh, now);
+    // Far priority (rule F) places the player with Dynamic on: two far
+    // readings that agree are someone on the board, however lost the nodes'
+    // readings in between say they are.
+    const nobodyFound = bothLost && !(positioning.method === "dyn" && farFix(now));
     const fixes = solvePositions(filtered, angles, now);
+    if (isNewReading) stepDynamic(fixes, now);
+    const steadiest = dynamicLeader(fixes, now);
+    const confidence = [readConfidence(list[LEFT_SENSOR]), null, readConfidence(list[RIGHT_SENSOR])];
+    const rule = dynamicRule(filtered, scans, confidence, steadiest ? fixes[steadiest] : null, now);
+    const following = rule ? rule.by : steadiest;
+    fixes.dyn = rule ? rule.fix : steadiest ? fixes[steadiest] : null;
+    const placedBy = positioning.method === "dyn" ? following : positioning.method;
     const configured = filtered.filter((d) => d !== null).length;
     const depth = filtered.map((distance, slot) =>
-      distance === null || slot === 1 ? null : scannerPoint(columnCentreCm(slot), distance, angles[slot]).y);
+      distance === null || slot === 1 ? null
+        : scannerPoint(columnCentreCm(slot), bodyCentreCm(distance), angles[slot]).y);
     const heardMsAgo = heardAt.map((at) => now - at);
 
     const base = {
       raw, filtered, depth, scans, configured, isNewReading, fresh, heardMsAgo,
-      fixes, method: positioning.method,
+      fixes, method: positioning.method, placedBy, nobodyFound: false, offBoard: false,
       column: null, distanceCm: null, xCm: null, yCm: null, source: null,
     };
 
     // Safety runs on the RAW readings, never the filtered ones: a median window
     // full of safe distances would smooth away the very spike the alert exists
     // to catch. Two consecutive frames (100 ms at 20 Hz) are required so that
-    // crosstalk between the two sensors cannot raise a false alarm.
-    const rawMin = raw.reduce(
-      (min, value) => (value === null ? min : min === null || value < min ? value : min),
-      null
-    );
-    if (rawMin !== null && window.isTooClose(rawMin)) {
+    // crosstalk between the two sensors cannot raise a false alarm. With the
+    // dead zone on, each reading is first turned into its depth (closeDepthCm()).
+    const closest = closeDepthCm(raw, angles);
+    if (closest !== null && window.isTooClose(closest)) {
       closeStreak += 1;
     } else {
       closeStreak = 0;
@@ -1763,13 +2945,22 @@
     const tooClose = closeStreak >= TOO_CLOSE_FRAMES;
 
     const position = fixes[positioning.method];
-    const x = position ? Math.max(0, Math.min(PLAY_WIDTH_CM, position.x)) : null;
+    const x = position ? Math.max(EDGE_INSET_X_CM, Math.min(PLAY_WIDTH_CM - EDGE_INSET_X_CM, position.x)) : null;
 
     // Safety outranks every other state, including loss of signal. The column
     // is reported without advancing the hysteresis below.
     if (tooClose) {
       const column = position ? columnAtCm(x) : null;
-      return { ...base, column, distanceCm: rawMin, status: "too-close" };
+      return { ...base, column, distanceCm: closest, status: "too-close" };
+    }
+
+    // Both nodes are lost over their last readings (bothNodesLost()): nobody
+    // is on the board, whatever any method still makes of old or stray
+    // readings. The only Out of bounds there is; updateSensorCursor() does
+    // not ride it out on the last square.
+    if (nobodyFound) {
+      lastColumn = null;
+      return { ...base, status: "out-of-bounds", nobodyFound: true };
     }
 
     if (position === null) {
@@ -1777,7 +2968,6 @@
       return { ...base, status: "no-signal" };
     }
 
-    const y = position.y;
     let column = columnAtCm(x);
 
     // Column hysteresis: next to a column boundary the previous column holds,
@@ -1787,17 +2977,19 @@
       if (Math.abs(x - boundary) < COLUMN_MARGIN_CM) column = lastColumn;
     }
 
-    // Off either side of the board is out of bounds as much as past the far
-    // edge. x above is clamped for the cursor's column only; the check uses the
-    // position as measured.
-    const fix = { ...base, column, distanceCm: y, xCm: x, yCm: y, source: position.source };
-    const offTheSide = position.x < 0 || position.x > PLAY_WIDTH_CM;
-    if (offTheSide || y > maxCoordCm()) {
-      return { ...fix, status: "out-of-bounds" };
-    }
+    // Off the board - past a side, past the far edge, in front of the near
+    // one - the player is kept on the edge square, and the game carries on:
+    // x above and y here are brought EDGE_INSET of a square inside the
+    // board's edges, so the cursor sits on that square's hole (the hover test
+    // needs it there). The column's calibrated span sets the depth.
+    const span = columnSpan(column);
+    const insetY = ((span.far - span.near) / 3) * EDGE_INSET;
+    const y = Math.max(span.near + insetY, Math.min(span.far - insetY, position.y));
+    const offBoard = position.x < 0 || position.x > PLAY_WIDTH_CM ||
+      position.y < span.near || position.y > span.far;
 
     lastColumn = column;
-    return { ...fix, status: "ok" };
+    return { ...base, column, distanceCm: y, xCm: x, yCm: y, source: position.source, offBoard, status: "ok" };
   }
 
   window.readSensorCoordinate = readSensorCoordinate;
@@ -1885,7 +3077,7 @@
     // to different depths.
     const bounds = window.getCalibrationBounds ? window.getCalibrationBounds() : null;
     const slot = Number.isInteger(column) && column >= 0 && column < GRID_COLUMNS ? column : 1;
-    const span = bounds ? bounds.perColumn[slot] : { near: 20, far: 140 };
+    const span = bounds ? bounds.perColumn[slot] : { near: 10, far: 160 };
     const rowDepth = Math.max(1e-6, (span.far - span.near) / GRID_ROWS);
 
     // How many hole-widths from column 0's centre, and how far through the
@@ -1907,18 +3099,63 @@
   // Drives the drawn cursor from a continuous position, through the spring.
   // Returns the pixel actually drawn, because the hover test has to use the
   // drawn position too - scoring against the raw target would whack a mole a
-  // moment before the cursor visibly reached it.
-  function moveCursor(canvas, world, column, dt) {
-    const target = worldToCanvasPoint(canvas, world.x, world.y, column);
+  // moment before the cursor visibly reached it. cell is the voted cell
+  // ({ gx, gy }): with the cell lock on, the cursor aims for the nearest point
+  // to the position inside that cell's hole (lockedToCell()).
+  function moveCursor(canvas, world, column, dt, cell) {
+    let target = worldToCanvasPoint(canvas, world.x, world.y, column);
     if (!target) return null;
+    if (tuning.cellLock && cell) target = lockedToCell(canvas, target, cell);
     const point = cursorSmoother.step(target, dt);
     if (!point) return null;
     gameState.cursor = { x: point.x, y: point.y, inBounds: true };
     return point;
   }
 
-  // Last known-good cell, used to coast through brief signal loss.
-  const sensorHold = { grid: null, world: null, lastOkAt: -Infinity };
+  // The hole of a cell ({ gx, gy }) on the board, or null.
+  function holeOfCell(canvas, cell) {
+    const index = holeForCell(cell.gx, cell.gy);
+    return window.getGameGridLayout(canvas).holes.find((h) => h.index === index) || null;
+  }
+
+  // A canvas point moved to the nearest point inside a cell's hole, at least
+  // CELL_LOCK_INSET of the hole in from its edges: the cell lock's target.
+  function lockedToCell(canvas, point, cell) {
+    const hole = holeOfCell(canvas, cell);
+    if (!hole) return point;
+    const inset = hole.size * CELL_LOCK_INSET;
+    const clamp = (v, low, high) => Math.max(low, Math.min(high, v));
+    return {
+      x: clamp(point.x, hole.x + inset, hole.x + hole.size - inset),
+      y: clamp(point.y, hole.y + inset, hole.y + hole.size - inset),
+    };
+  }
+
+  // Last known-good cell, ridden out on through unusable readings.
+  const sensorHold = { grid: null, world: null };
+
+  // --- Sensors offline -----------------------------------------------------------
+  // Whether the rig has gone quiet: for each node, the server's stamp on its
+  // latest message (last_seen) and when that stamp last changed. A node with
+  // no stamp counts as heard on every frame while it is online.
+  const messageStamp = [null, null, null];
+  const messageAt = [-Infinity, -Infinity, -Infinity];
+
+  // Neither node has sent anything for tuning.offlineMs, or the server says
+  // both are offline: the rig is down, which is not the player leaving. Both
+  // nodes' messages are noted on every call (map, not every(), which would
+  // stop at the first node still sending).
+  function rigIsOffline(list, now) {
+    const quiet = [LEFT_SENSOR, RIGHT_SENSOR].map((slot) => {
+      const node = list[slot];
+      if (!node || !node.online || !node.latest) return true;
+      const stamp = node.last_seen !== undefined ? node.last_seen : null;
+      if (stamp === null || stamp !== messageStamp[slot]) messageAt[slot] = now;
+      messageStamp[slot] = stamp;
+      return now - messageAt[slot] > tuning.offlineMs;
+    });
+    return quiet.every(Boolean);
+  }
 
   // --- Cell stabilisation ----------------------------------------------------
 
@@ -1928,6 +3165,7 @@
   function resetCellFilter() {
     cellHistory.length = 0;
     stableCell = null;
+    resetCellDecision();
   }
 
   // Returns the cell the cursor should actually sit in: the most frequent cell
@@ -1966,6 +3204,331 @@
     return stableCell;
   }
 
+  // --- The cell decision (tuning.cellDecision) -------------------------------
+  // Aaron, 5 Oct: steady over jumpy, but a real move into the next cell still
+  // shows. Three parts, each a reason a still player's cell jumped:
+  //   - a margin: the position must go cellMarginCm past the cell's edges
+  //     before another cell is even a candidate, so standing on a line holds
+  //     the cell you came from;
+  //   - a dwell: the candidate must hold for cellDwellMs of readings, counted
+  //     up while readings put the player there and down while they put them
+  //     back, so a short swing never gets there. A cell that is not next to
+  //     the current one needs twice that;
+  //   - each node against itself: a node's reading within cellStillCm of its
+  //     anchor - its own point (ownPoint()) from its first reading with the
+  //     position in the cell, eased cellAnchorRate of the way to each later
+  //     one with the position in the cell, so it settles where a still player
+  //     stands but trails one walking to the edge - says the player has not
+  //     moved, whatever the two nodes together say. A node that has only read with the position
+  //     out of the cell has no anchor, and says nothing: it never saw the
+  //     player in the cell, so it cannot say they are still there. At a
+  //     scan turn the position jumps by the difference between the nodes'
+  //     biases (up to 66 cm on 4 Oct), not because anyone moved. That swing
+  //     comes back with the next turn; a position out of the cell for longer
+  //     than cellStillHoldMs is not a swing (a first cell taken from filters
+  //     still settling, say), and the nodes no longer hold it back. Nor do
+  //     they for the first cellStillHoldMs after the first cell is taken: it
+  //     often comes from one node alone, before the other has found the
+  //     player, and the margin and the dwell are enough to move it.
+  // Python: CellDecider in filterRules.py.
+
+  // A gap between counted readings longer than this counts as this long, so
+  // a node that was lost for a while does not bring a whole dwell with it.
+  const CELL_DWELL_STEP_CAP_MS = 250;
+
+  const cellDecision = {
+    cell: null,           // { gx, gy }: the decided cell
+    challenger: null,     // { gx, gy }: the cell gathering time to take over
+    evidenceMs: 0,        // the challenger's time so far
+    lastAt: null,         // ms: the last counted reading
+    firstAt: null,        // ms: when the first cell was taken
+    away: null,           // { gx, gy }: the cell the position has been in, out of the decided one
+    awaySince: null,      // ms: since when
+    anchors: [null, null, null],   // each node's { x, y } to compare with
+  };
+
+  // After Out of bounds or no signal: the cell decision starts again - no
+  // cell, anchors, challenger or evidence from before the loss - but keeps
+  // when it first started, so the start-up probation does not apply again.
+  function restartCellDecision() {
+    const firstAt = cellDecision.firstAt;
+    resetCellDecision();
+    cellDecision.firstAt = firstAt;
+  }
+
+  function resetCellDecision() {
+    cellDecision.cell = null;
+    cellDecision.challenger = null;
+    cellDecision.evidenceMs = 0;
+    cellDecision.lastAt = null;
+    cellDecision.firstAt = null;
+    cellDecision.away = null;
+    cellDecision.awaySince = null;
+    cellDecision.anchors = [null, null, null];
+  }
+
+  function sameCell(a, b) {
+    return Boolean(a) && Boolean(b) && a.gx === b.gx && a.gy === b.gy;
+  }
+
+  // The cell (x, y) is in, by the grid alone: no margin, no hysteresis.
+  function cellOfPosition(x, y) {
+    const gx = columnAtCm(x);
+    return { gx, gy: window.rawToGrid(gx, y, null).gy };
+  }
+
+  // Whether (x, y) is inside a cell grown by margin cm on every side.
+  function nearCell(cell, x, y, margin) {
+    const span = columnSpan(cell.gx);
+    const rowDepth = (span.far - span.near) / GRID_ROWS;
+    const top = span.near + cell.gy * rowDepth;
+    return x >= cell.gx * COLUMN_PITCH_CM - margin && x <= (cell.gx + 1) * COLUMN_PITCH_CM + margin
+      && y >= top - margin && y <= top + rowDepth + margin;
+  }
+
+  // Each node that read this update and sees the player (found or half), and
+  // its own point: [slot, { x, y }] pairs.
+  function readingNodes(fix) {
+    const out = [];
+    [LEFT_SENSOR, RIGHT_SENSOR].forEach((slot) => {
+      if (!fix.fresh[slot] || fix.raw[slot] === null || fix.scans[slot].state === SCAN_LOST) return;
+      const point = ownPoint(slot, fix.filtered, fix.scans);
+      if (point) out.push([slot, point]);
+    });
+    return out;
+  }
+
+  // Whether an update carries a node's new reading: render frames and the
+  // turn broadcasts do not.
+  function isCountedReading(fix) {
+    return fix.isNewReading && fix.fresh.some((isFresh, slot) => isFresh && fix.raw[slot] !== null);
+  }
+
+  // --- Moving or still (tuning.trackMoving; Aaron, 6 Oct) ---------------------
+  // A node sees the player move when its own point (ownPoint()) is moveCm or
+  // more from where that same node put them MOTION_POINTS - 1 readings
+  // before, within MOTION_POINT_MAX_AGE_MS: each node is only compared with
+  // itself, so a scan turn changing over - the two nodes' biases differing -
+  // is not a move. The line-of-sight track going at moveSpeedCmS or more is a
+  // move too. moveConfirmReadings counted readings in a row with a move make
+  // the player moving; still again after stillAfterMs with none. Standing
+  // still wins: a reading node whose last stillPoints own points all lie
+  // within stillCm of their middle makes the player still at once. Python:
+  // MotionDetector in filterRules.py.
+  const MOTION_POINTS = 3;
+  const MOTION_POINT_MAX_AGE_MS = 2500;
+  const motion = { moving: false, evidenceAt: -Infinity, streak: 0, points: [[], [], []] };
+
+  function resetMotion() {
+    motion.moving = false;
+    motion.evidenceAt = -Infinity;
+    motion.streak = 0;
+    motion.points = [[], [], []];
+  }
+
+  // Whether a node's last stillPoints own points all lie within stillCm of
+  // their middle (all inside MOTION_POINT_MAX_AGE_MS).
+  function nodeHoldsStill(list, now) {
+    const n = tuning.stillPoints;
+    if (list.length < n) return false;
+    const last = list.slice(-n);
+    if (now - last[0].at > MOTION_POINT_MAX_AGE_MS) return false;
+    const mx = last.reduce((sum, p) => sum + p.x, 0) / n;
+    const my = last.reduce((sum, p) => sum + p.y, 0) / n;
+    return last.every((p) => Math.hypot(p.x - mx, p.y - my) <= tuning.stillCm);
+  }
+
+  // The line-of-sight track's speed, cm/s, or 0 with no live track.
+  function losSpeedCmS(now) {
+    if (losFix(now) === null) return 0;
+    return Math.hypot(losTrack.x[2], losTrack.x[3]);
+  }
+
+  // Once per counted reading with the position on the board: nodes are this
+  // reading's nodes and their own points (readingNodes()). Returns whether
+  // the player is moving.
+  function stepMotion(nodes, now) {
+    const keep = Math.max(MOTION_POINTS, tuning.stillPoints);
+    let seen = false;
+    let still = false;
+    nodes.forEach(([slot, point]) => {
+      const list = motion.points[slot];
+      list.push({ x: point.x, y: point.y, at: now });
+      while (list.length > keep) list.shift();
+      const first = list[list.length - MOTION_POINTS];
+      if (first && now - first.at <= MOTION_POINT_MAX_AGE_MS
+        && Math.hypot(point.x - first.x, point.y - first.y) >= tuning.moveCm) seen = true;
+      if (nodeHoldsStill(list, now)) still = true;
+    });
+    if (losSpeedCmS(now) >= tuning.moveSpeedCmS) seen = true;
+    if (still) {
+      motion.moving = false;
+      motion.streak = 0;
+      return false;
+    }
+    motion.streak = seen ? motion.streak + 1 : 0;
+    if (motion.streak >= tuning.moveConfirmReadings) {
+      motion.moving = true;
+      motion.evidenceAt = now;
+    } else if (motion.moving && now - motion.evidenceAt >= tuning.stillAfterMs) {
+      motion.moving = false;
+    }
+    return motion.moving;
+  }
+
+  // --- Cell confidence (tuning.cellConfidence; Aaron, 6 Oct) -------------------
+  // See tuning.cellConfidence. Python: CellConfidence in filterRules.py.
+  const cellConfidence = new Array(9).fill(0);   // index gx * 3 + gy
+  let cellConfidenceAt = null;                   // ms: the last counted reading it was stepped on
+
+  function resetCellConfidence() {
+    cellConfidence.fill(0);
+    cellConfidenceAt = null;
+  }
+
+  // Once per counted reading with the position on the board, after the cell
+  // is decided: cell is the decided cell, nodes this reading's nodes and
+  // their own points (readingNodes()), scans the nodes' scan states.
+  function stepCellConfidence(cell, nodes, scans, now) {
+    const stepMs = cellConfidenceAt === null ? 0 : Math.min(CELL_DWELL_STEP_CAP_MS, now - cellConfidenceAt);
+    cellConfidenceAt = now;
+    const code = cell.gx * 3 + cell.gy;
+    const seen = !motion.moving && nodes.some(([slot, point]) =>
+      scans[slot].state === SCAN_FOUND && sameCell(cellOfPosition(point.x, point.y), cell));
+    const halfLifeS = seen ? tuning.cellConfidenceOtherHalfLifeS : tuning.cellConfidenceHalfLifeS;
+    const fade = Math.pow(2, -stepMs / 1000 / halfLifeS);
+    for (let i = 0; i < cellConfidence.length; i++) {
+      cellConfidence[i] = seen && i === code
+        ? Math.min(1, cellConfidence[i] + stepMs / tuning.cellConfidenceRiseMs)
+        : cellConfidence[i] * fade;
+    }
+  }
+
+  function confidenceOf(cell) {
+    return cellConfidence[cell.gx * 3 + cell.gy];
+  }
+
+  // The first cell after the decision starts again: the most confident cell
+  // with confidence tuning.cellConfidenceFirstCell or more within
+  // cellMarginCm of (x, y), or else here, the cell (x, y) is in.
+  function rememberedCell(here, x, y) {
+    let best = here;
+    let bestScore = tuning.cellConfidenceFirstCell;
+    for (let code = 0; code < cellConfidence.length; code++) {
+      const cell = { gx: Math.floor(code / 3), gy: code % 3 };
+      if (cellConfidence[code] >= bestScore && cellConfidence[code] > confidenceOf(best)
+        && nearCell(cell, x, y, tuning.cellMarginCm)) {
+        best = cell;
+        bestScore = cellConfidence[code];
+      }
+    }
+    return best;
+  }
+
+  // The decided cell for a fix with status "ok" at (fix.xCm, fix.yCm). Only an
+  // update carrying a node's new reading counts (isCountedReading()). While
+  // tracking a moving player (tuning.trackMoving and motion.moving) the
+  // dwell is cellMovingDwellMs; the nodes still hold the cell.
+  function decideCell(fix, now) {
+    const counted = isCountedReading(fix);
+    const tracking = tuning.trackMoving && motion.moving;
+    const here = cellOfPosition(fix.xCm, fix.yCm);
+    if (!counted) return cellDecision.cell || here;
+
+    const nodes = readingNodes(fix);
+    if (cellDecision.cell === null) {
+      // The first position is taken at once, so the cursor appears without
+      // waiting, and each node that read is anchored there. After a restart
+      // (restartCellDecision()) a confident cell next to it may be taken
+      // instead, and the start-up probation does not apply again.
+      cellDecision.cell = tuning.cellConfidence ? rememberedCell(here, fix.xCm, fix.yCm) : here;
+      cellDecision.lastAt = now;
+      if (cellDecision.firstAt === null) cellDecision.firstAt = now;
+      nodes.forEach(([slot, point]) => { cellDecision.anchors[slot] = point; });
+      return cellDecision.cell;
+    }
+
+    const current = cellDecision.cell;
+    const inside = nearCell(current, fix.xCm, fix.yCm, tuning.cellMarginCm);
+    let candidate = inside ? current : here;
+    if (inside) {
+      cellDecision.away = null;
+      cellDecision.awaySince = null;
+    } else if (!sameCell(here, cellDecision.away)) {
+      cellDecision.away = here;
+      cellDecision.awaySince = now;
+    }
+    const swing = !inside && now - cellDecision.awaySince < tuning.cellStillHoldMs
+      && now - cellDecision.firstAt >= tuning.cellStillHoldMs;
+
+    // Each node against its own anchor. A node with none is anchored now if
+    // the position is in the cell; while the position stays in the cell, the
+    // anchor eases towards each reading.
+    let still = 0;
+    let moved = 0;
+    nodes.forEach(([slot, point]) => {
+      const anchor = cellDecision.anchors[slot];
+      if (!anchor) {
+        if (inside) cellDecision.anchors[slot] = point;
+        return;
+      }
+      if (Math.hypot(point.x - anchor.x, point.y - anchor.y) < tuning.cellStillCm) {
+        still += 1;
+      } else {
+        moved += 1;
+      }
+      if (inside) {
+        const rate = tuning.cellAnchorRate;
+        cellDecision.anchors[slot] = { x: anchor.x + rate * (point.x - anchor.x), y: anchor.y + rate * (point.y - anchor.y) };
+      }
+    });
+    if (still > 0 && moved === 0 && swing) candidate = current;
+
+    const step = Math.min(CELL_DWELL_STEP_CAP_MS, now - cellDecision.lastAt);
+    cellDecision.lastAt = now;
+    if (sameCell(candidate, current)) {
+      cellDecision.evidenceMs = Math.max(0, cellDecision.evidenceMs - step);
+      if (cellDecision.evidenceMs === 0) cellDecision.challenger = null;
+    } else if (sameCell(candidate, cellDecision.challenger)) {
+      cellDecision.evidenceMs += step;
+    } else {
+      cellDecision.challenger = candidate;
+      cellDecision.evidenceMs = step;
+    }
+
+    const challenger = cellDecision.challenger;
+    if (challenger) {
+      const nextTo = Math.abs(challenger.gx - current.gx) <= 1 && Math.abs(challenger.gy - current.gy) <= 1;
+      const dwell = tracking ? tuning.cellMovingDwellMs : tuning.cellDwellMs;
+      // A cell the player has stood in takes less dwell (tuning.cellConfidence).
+      const familiar = tuning.cellConfidence ? 1 - 0.5 * confidenceOf(challenger) : 1;
+      if (cellDecision.evidenceMs >= dwell * (nextTo ? 1 : 2) * familiar) {
+        cellDecision.cell = challenger;
+        cellDecision.challenger = null;
+        cellDecision.evidenceMs = 0;
+        cellDecision.away = null;
+        cellDecision.awaySince = null;
+        cellDecision.anchors = [null, null, null];
+        nodes.forEach(([slot, point]) => { cellDecision.anchors[slot] = point; });
+      }
+    }
+    return cellDecision.cell;
+  }
+
+  // The sensors' cursor over a hole scores, as the mouse's does - unless the
+  // phone pad has the cursor, whose own hover scores instead.
+  // With the cell lock on, only the voted cell's hole scores (cell, { gx, gy }):
+  // the cursor easing from one hole to the next never whacks a third.
+  function hoverFromSensors(canvas, point, cell) {
+    if (gameState.remoteActive) return;
+    if (tuning.cellLock && cell) {
+      const hole = holeOfCell(canvas, cell);
+      const over = holeAtPoint(window.getGameGridLayout(canvas), point.x, point.y);
+      if (!hole || !over || over.index !== hole.index) return;
+    }
+    window.handleGameHover(canvas, point.x, point.y);
+  }
+
   // Reads the sensors, maps the fix into grid space, and drives the cursor from
   // it. Hovering the active mole scores, exactly as the mouse does.
   function updateSensorCursor(canvas, orderedNodes) {
@@ -1978,6 +3541,15 @@
     const dt = cursorLastStepAt === null ? 0 : now - cursorLastStepAt;
     cursorLastStepAt = now;
 
+    // The rig has gone quiet: say so, rather than ride out its last readings.
+    if (rigIsOffline(Array.isArray(orderedNodes) ? orderedNodes : [], now)) {
+      sensorHold.grid = null;
+      sensorHold.world = null;
+      gameState.sensor = { ...fix, status: "offline", gx: null, gy: null, held: false, heldFor: badReadingStreak };
+      gameState.cursor = { x: null, y: null, inBounds: false };
+      return;
+    }
+
     let grid = null;
     if (fix.status === "ok") {
       const mapped = window.rawToGrid(fix.column, fix.distanceCm, sensorHold.grid);
@@ -1986,9 +3558,16 @@
 
     if (grid) {
       badReadingStreak = 0;
-      // The cell the reading suggests is only a vote; the cursor follows the
-      // consensus of the recent window.
-      const cell = stabiliseCell(grid.gx, grid.gy, fix.isNewReading);
+      // Moving or still, from this reading's nodes (stepMotion()), before the
+      // cell is decided.
+      if (isCountedReading(fix)) stepMotion(readingNodes(fix), now);
+      // The cell the reading suggests is only a candidate: the cell decision
+      // (decideCell()), or with it off the vote over the recent window
+      // (stabiliseCell()), says whether the cell moves.
+      const cell = tuning.cellDecision
+        ? decideCell(fix, now)
+        : stabiliseCell(grid.gx, grid.gy, fix.isNewReading);
+      if (isCountedReading(fix)) stepCellConfidence(cell, readingNodes(fix), fix.scans, now);
       const stable = { ...grid, gx: cell.gx, gy: cell.gy };
 
       // Two things come out of one set of readings: the discrete cell, which is
@@ -2000,15 +3579,15 @@
 
       sensorHold.grid = { ...stable, yCm: world.y };
       sensorHold.world = world;
-      sensorHold.lastOkAt = now;
       gameState.sensor = {
         ...fix, gx: stable.gx, gy: stable.gy,
         rawGx: grid.gx, rawGy: grid.gy,
         calibrated: grid.calibrated, held: false, heldFor: 0,
-        xCm: world.x, yCm: world.y, resolved: world.resolved,
+        xCm: world.x, yCm: world.y, resolved: world.resolved, moving: motion.moving,
+        cellConfidence: cellConfidence.slice(),
       };
-      const point = moveCursor(canvas, world, cell.gx, dt);
-      if (point) window.handleGameHover(canvas, point.x, point.y);
+      const point = moveCursor(canvas, world, cell.gx, dt, cell);
+      if (point) hoverFromSensors(canvas, point, cell);
       return;
     }
 
@@ -2026,13 +3605,12 @@
     // far faster than the sensors report.
     if (fix.isNewReading) badReadingStreak += 1;
 
-    // Ride out a short burst of bad readings on the last known-good cell. A
-    // handful of rejects in a row is normal for unfiltered ultrasonics and must
-    // not throw the player out of the game.
-    const withinBudget = badReadingStreak <= tuning.holdReadings;
-    const withinTimeout = now - sensorHold.lastOkAt <= tuning.holdTimeoutMs;
-
-    if (sensorHold.grid && withinBudget && withinTimeout) {
+    // Ride out unusable readings on the last known-good square, for as long as
+    // they last: rejects are normal for ultrasonics and must not throw the
+    // player out of the game. Only both nodes being lost (Out of bounds,
+    // bothNodesLost(); that wait was the grace) ends it, or the rig going
+    // offline (above).
+    if (sensorHold.grid && !fix.nobodyFound) {
       const held = sensorHold.grid;
       // While held, the fix belongs to the BAD reading, so the last good
       // position is the one shown - exactly as the last good cell is.
@@ -2040,20 +3618,25 @@
       gameState.sensor = {
         ...fix, status: "ok", gx: held.gx, gy: held.gy,
         calibrated: held.calibrated, held: true, heldFor: badReadingStreak,
-        xCm: world.x, yCm: world.y, resolved: world.resolved,
+        xCm: world.x, yCm: world.y, resolved: world.resolved, moving: motion.moving,
+        cellConfidence: cellConfidence.slice(),
       };
       // The spring keeps running while held, so the cursor eases to a stop
       // instead of freezing mid-board the moment a frame is dropped.
-      const point = moveCursor(canvas, world, held.gx, dt);
-      if (point) window.handleGameHover(canvas, point.x, point.y);
+      const point = moveCursor(canvas, world, held.gx, dt, held);
+      if (point) hoverFromSensors(canvas, point, held);
       return;
     }
 
+    // No square to ride out on: Out of bounds if nobody is found, otherwise
+    // the round just waits for the first position, with no message. The cell
+    // decision starts again when the player is found.
     sensorHold.grid = null;
     sensorHold.world = null;
+    restartCellDecision();
     gameState.sensor = {
       ...fix,
-      status: fix.status === "ok" ? "out-of-bounds" : fix.status,
+      status: fix.nobodyFound ? "out-of-bounds" : "no-signal",
       gx: null, gy: null, held: false, heldFor: badReadingStreak,
     };
     gameState.cursor = { x: null, y: null, inBounds: false };
@@ -2097,12 +3680,16 @@
   // same shape updateSensorCursor() produces, so the HUD, alert and logging
   // work unchanged.
   function applyServerCoordinate(canvas, orderedNodes) {
-    // The server only recomputes when a reading arrives, so once every
-    // assigned sensor is offline its last coordinate would sit on screen
-    // forever. Treat that as no signal, which also pauses the round.
+    // The server only recomputes when a reading arrives, so once the rig has
+    // gone quiet its last coordinate would sit on screen forever. Say
+    // Sensors offline instead, which also pauses the round.
     const list = Array.isArray(orderedNodes) ? orderedNodes : [];
-    const anyOnline = list.some((node) => node && node.online);
-    const c = anyOnline ? serverCoordinate : null;
+    if (rigIsOffline(list, performance.now())) {
+      gameState.sensor = { ...emptySensorState(), status: "offline" };
+      gameState.cursor = { x: null, y: null, inBounds: false };
+      return;
+    }
+    const c = serverCoordinate;
 
     if (!c) {
       gameState.sensor = emptySensorState();
@@ -2131,6 +3718,10 @@
       calibrated: Boolean(c.calibrated),
       held: Boolean(c.held),
       heldFor: Number.isInteger(c.heldFor) ? c.heldFor : 0,
+      // The server's own moving/still detector and cell confidence
+      // (filterRules.py MotionDetector, CellConfidence).
+      moving: Boolean(c.moving),
+      cellConfidence: Array.isArray(c.cellConfidence) ? c.cellConfidence.slice(0, 9) : null,
     };
 
     if (!hasCell) {
@@ -2140,7 +3731,7 @@
 
     const point = window.gridToCanvasPoint(canvas, c.gx, c.gy);
     gameState.cursor = { x: point.x, y: point.y, inBounds: true };
-    window.handleGameHover(canvas, point.x, point.y);
+    hoverFromSensors(canvas, point);
   }
 
   // Everything the sensor pipeline currently knows. Callable from the browser
@@ -2165,7 +3756,6 @@
       cursor: gameState.cursor.x === null ? null : { ...gameState.cursor },
       badReadings: serverCoordinateActive ? sensor.heldFor || 0 : badReadingStreak,
       rejected: sensorFilters.map((filter) => filter.rejectCount),
-      holdBudget: tuning.holdReadings,
       tuning: { ...tuning },
       rawCell: sensor.rawGx === undefined || sensor.rawGx === null
         ? null
@@ -2185,9 +3775,12 @@
   // clock is held during these states so the player is not penalised for a
   // dropout they cannot control.
   // While the nodes learn the room, their echoes are the furniture's, not the
-  // player's, so the round waits for that too.
+  // player's, so the round waits for that too. Never while the phone pad
+  // places the player. The control panel's held alert (setAlertHeld()) and its
+  // Too close toggle (setRemoteAlert()) hold a round in any mode.
   function isSensorBlocked() {
-    return gameState.inputMode === "sensor" && (gameState.sensor.status !== "ok" || roomStatus === "learning");
+    return alertHeld || remoteAlert || (gameState.inputMode === "sensor" && !gameState.remoteActive &&
+      (gameState.sensor.status !== "ok" || roomStatus === "learning"));
   }
 
   window.getGameOverButtonAtPoint = function getGameOverButtonAtPoint(canvas, x, y) {
@@ -2232,7 +3825,8 @@
     const w = Math.max(220, Math.min(300, width * 0.22));
     return {
       x: width - 12 - w,
-      y: Math.max(140, height * 0.22),
+      // Below the Room button, the last of the top-right stack.
+      y: Math.max(188, height * 0.22),
       w,
       h: LEGEND_HEADER_H + LEGEND_ENTRIES * LEGEND_ENTRY_H + 14,
     };
@@ -2243,11 +3837,12 @@
     return pointInRect(x, y, getGamePauseLayout()) ? { type: "pause" } : null;
   };
 
-  // Top-right, under the level panel (and clear of the legend below it).
+  // Top-right, under the Stats toggle (and clear of the legend below it).
   function getPulsesButtonLayout(canvas) {
     const width = canvas.clientWidth || canvas.width;
     const w = 170;
-    return { x: width - 12 - w, y: 60, width: w, height: 36 };
+    const toggle = getStatsToggleLayout(canvas);
+    return { x: width - 12 - w, y: toggle.y + toggle.height + 8, width: w, height: 36 };
   }
 
   function pulsesLabel() {
@@ -2467,9 +4062,12 @@
     ctx.stroke();
   }
 
-  // Banner shown instead of the cursor when the sensors cannot place the
-  // player. The full-screen red alert is reserved for the too-close case and is
-  // handled by canvas.js switching screens, so it never appears here.
+  // Banner shown instead of the cursor: Out of bounds only when both nodes
+  // are lost over their last tuning.lostReadings readings (bothNodesLost();
+  // Aaron, 5 Oct), and Sensors offline when the rig has gone quiet. Waiting for a
+  // first position shows nothing. The full-screen red alert is reserved for
+  // the too-close case and is handled by canvas.js switching screens, so it
+  // never appears here.
   function renderSensorStatusOverlay(ctx, canvas) {
     const width = canvas.clientWidth || canvas.width;
     const height = canvas.clientHeight || canvas.height;
@@ -2480,13 +4078,12 @@
     if (roomStatus === "learning") {
       message = "Learning the room";
       detail = "Keep the play area clear until the Room button says learned";
-    } else if (status === "no-signal") {
-      // Nothing seen at all: nobody is on the board.
+    } else if (status === "out-of-bounds") {
       message = "Out of bounds";
       detail = "Nobody detected - step into the play area";
-    } else if (status === "out-of-bounds") {
-      message = "Come back in bounds";
-      detail = "Reading outside the play area - move back onto the board";
+    } else if (status === "offline") {
+      message = "Sensors offline";
+      detail = "No readings from either node - check their power and Wi-Fi";
     }
     if (!message) return;
 
@@ -2517,11 +4114,23 @@
     { index: RIGHT_SENSOR, label: "R", source: "right" },
   ];
   const SOURCE_LABELS = { both: "L+R", left: "L only", right: "R only" };
-  // The three ways of placing the player, as the switch and the board show them.
+  // The ways of placing the player, as the sensor panel and the control panel
+  // show them.
   const METHOD_STYLES = {
+    dyn: { label: "Dynamic", short: "DYN", colour: "#a3e635" },
     los: { label: "Line of sight", short: "LOS", colour: "#22d3ee" },
     tri: { label: "Trilateration", short: "TRI", colour: "#e879f9" },
     avg: { label: "Average", short: "AVG", colour: "#f8fafc" },
+  };
+  // What the control panel's Dynamic button says when one of its rules places
+  // the player (dynamicRule()): far priority, a node at the confidence level,
+  // a far corner, the column lock, or a lone confident node.
+  const DYNAMIC_RULE_SHORT = {
+    far: "FAR",
+    "conf-left": "CONF L", "conf-right": "CONF R",
+    "corner-left": "A1", "corner-right": "A3",
+    centre: "MID", "lock-left": "COL L", "lock-right": "COL R",
+    left: "L", right: "R",
   };
   // The scanner's state (src/scanning.cpp): both sensors agree, one sees the
   // player, or it is sweeping for them.
@@ -2630,7 +4239,8 @@
       ctx.fillStyle = coarse ? "#f59e0b" : "#cdd6f4";
       const from = SOURCE_LABELS[sensor.source] ? `  (${SOURCE_LABELS[sensor.source]})` : "";
       ctx.fillText(
-        `x ${formatCm(sensor.xCm)}  y ${formatCm(sensor.yCm)} cm${from}${coarse ? "  column centre" : ""}`,
+        `x ${formatCm(sensor.xCm)}  y ${formatCm(sensor.yCm)} cm${from}${coarse ? "  column centre" : ""}` +
+          (sensor.offBoard ? "  off board: edge" : ""),
         x + 16,
         posY
       );
@@ -2639,13 +4249,14 @@
       ctx.fillText("x --  y -- cm", x + 16, posY);
     }
 
-    // Every method's position side by side; the one in use is bold.
+    // Every method's position side by side; the one placing the player (the
+    // one Dynamic follows, with Dynamic on) is bold.
     const compareY = posY + 18;
     const fixes = sensor.fixes || {};
-    POSITION_METHODS.forEach((method, k) => {
+    DYNAMIC_METHODS.forEach((method, k) => {
       const style = METHOD_STYLES[method];
       const fix = fixes[method];
-      const inUse = method === positioning.method;
+      const inUse = method === sensor.placedBy;
       ctx.font = `${inUse ? "bold " : ""}11px monospace`;
       ctx.fillStyle = fix ? style.colour : "#63736f";
       const where = fix ? `${fix.x.toFixed(0)},${fix.y.toFixed(0)}` : "--";
@@ -2669,7 +4280,7 @@
         `grid (${sensor.gx}, ${sensor.gy})  @ ${formatCm(sensor.distanceCm)}cm` +
         (disagrees ? `  [raw ${sensor.rawGx},${sensor.rawGy} outvoted]` : "");
       ctx.fillText(
-        sensor.held ? `${label}  HELD ${sensor.heldFor}/${tuning.holdReadings}` : label,
+        sensor.held ? `${label}  HELD ${sensor.heldFor}` : label,
         x + 16,
         fixY
       );
@@ -2681,89 +4292,52 @@
     ctx.textAlign = "start";
   }
 
-  // --- Position switch ---------------------------------------------------------
-  // Sensor mode only: three buttons above the sensor panel pick the method that
-  // places the player, and Compare shows all three on the board.
-
-  function getPositionSwitchLayout(canvas) {
-    const height = canvas.clientHeight || canvas.height;
-    const y = height - HUD_EDGE - SENSOR_PANEL_H - HUD_GAP - POSITION_SWITCH_H;
-    const buttons = [];
-    let x = HUD_EDGE;
-    POSITION_METHODS.forEach((method) => {
-      buttons.push({ kind: "method", method, x, y, width: 100, height: POSITION_SWITCH_H });
-      x += 104;
-    });
-    buttons.push({ kind: "compare", x, y, width: HUD_EDGE + SENSOR_PANEL_W - x, height: POSITION_SWITCH_H });
-    return { top: y, buttons };
+  // --- Stats toggle ----------------------------------------------------------
+  // Top-right, under the level panel: shows or hides the stats panels
+  // (LIVE STATS, LIVE DATA). Remembered per browser; the game plays the
+  // same either way.
+  const STATS_VISIBLE_KEY = "eng3000.statsVisible";
+  let statsVisible = true;
+  try {
+    statsVisible = localStorage.getItem(STATS_VISIBLE_KEY) !== "0";
+  } catch (err) {
+    // Storage blocked: start with the stats shown.
   }
 
-  // The button under (x, y), while a sensor-mode round is playing, or null.
-  window.getPositionSwitchAtPoint = function getPositionSwitchAtPoint(canvas, x, y) {
-    if (gameState.inputMode !== "sensor" || gameState.status !== "playing") return null;
-    return getPositionSwitchLayout(canvas).buttons.find((b) => pointInRect(x, y, b)) || null;
-  };
-
-  window.applyPositionSwitch = function applyPositionSwitch(button) {
-    if (!button) return;
-    if (button.kind === "method") window.setPositionMethod(button.method);
-    else if (button.kind === "compare") positioning.compare = !positioning.compare;
-  };
-
-  function renderPositionSwitch(ctx, canvas) {
-    getPositionSwitchLayout(canvas).buttons.forEach((b) => {
-      const on = b.kind === "method" ? b.method === positioning.method : positioning.compare;
-      const colour = b.kind === "method" ? METHOD_STYLES[b.method].colour : "#f8fafc";
-      if (on) {
-        ctx.fillStyle = colour;
-        ctx.beginPath();
-        ctx.roundRect(b.x, b.y, b.width, b.height, 8);
-        ctx.fill();
-      } else {
-        drawHudPanel(ctx, b.x, b.y, b.width, b.height, 8);
-      }
-      ctx.textAlign = "center";
-      ctx.font = "bold 11px monospace";
-      ctx.fillStyle = on ? "#13131c" : colour;
-      const label = b.kind === "method" ? METHOD_STYLES[b.method].label : "Compare";
-      ctx.fillText(label, b.x + b.width / 2, b.y + b.height / 2 + 4);
-    });
-    ctx.textAlign = "start";
+  function getStatsToggleLayout(canvas) {
+    const width = canvas.clientWidth || canvas.width;
+    const w = 130; // the level panel's width, so the two line up
+    return { x: width - 12 - w, y: 60, width: w, height: 32 };
   }
 
-  // Compare: each method's position as a small labelled ring on the board. The
-  // big cursor is the method in use, eased by the spring; these are where each
-  // method puts the player right now.
-  const MARKER_LABEL_OFFSET = { los: [0, -13], tri: [0, 22], avg: [16, 4] };
+  window.getStatsToggleAtPoint = function getStatsToggleAtPoint(canvas, x, y) {
+    return pointInRect(x, y, getStatsToggleLayout(canvas)) ? { type: "stats" } : null;
+  };
 
-  function renderPositionMarkers(ctx, canvas) {
-    const fixes = gameState.sensor && gameState.sensor.fixes;
-    if (!positioning.compare || !fixes) return;
-    POSITION_METHODS.forEach((method) => {
-      const fix = fixes[method];
-      if (!fix) return;
-      const x = Math.max(0, Math.min(PLAY_WIDTH_CM, fix.x));
-      const point = worldToCanvasPoint(canvas, x, fix.y, columnAtCm(x));
-      if (!point) return;
-      const style = METHOD_STYLES[method];
-      ctx.save();
-      ctx.strokeStyle = style.colour;
-      ctx.lineWidth = method === positioning.method ? 3 : 2;
-      ctx.beginPath();
-      ctx.arc(point.x, point.y, 7, 0, Math.PI * 2);
-      ctx.stroke();
-      ctx.fillStyle = style.colour;
-      ctx.font = "bold 10px monospace";
-      ctx.textAlign = method === "avg" ? "left" : "center";
-      const [dx, dy] = MARKER_LABEL_OFFSET[method];
-      ctx.fillText(style.short, point.x + dx, point.y + dy);
-      ctx.restore();
-    });
+  window.toggleGameStats = function toggleGameStats() {
+    statsVisible = !statsVisible;
+    try {
+      localStorage.setItem(STATS_VISIBLE_KEY, statsVisible ? "1" : "0");
+    } catch (err) {
+      // Not remembered, but still toggled for this page.
+    }
+    return statsVisible;
+  };
+
+  function drawStatsToggle(ctx, canvas) {
+    const r = getStatsToggleLayout(canvas);
+    drawHudPanel(ctx, r.x, r.y, r.width, r.height, 10);
+    ctx.textAlign = "center";
+    ctx.fillStyle = statsVisible ? "#f4f4f5" : "#9298aa";
+    ctx.font = "bold 14px monospace";
+    ctx.fillText(statsVisible ? "Stats: On" : "Stats: Off", r.x + r.width / 2, r.y + r.height / 2 + 5);
+    ctx.textAlign = "left";
   }
 
   // --- HUD layout ------------------------------------------------------------
-  // Bottom-left: in sensor mode the sensor panel sits in the corner with the
-  // position switch above it (mouse and remote need no input box). LIVE STATS
+  // Bottom-left: in sensor mode the sensor panel sits in the corner (the mouse
+  // needs no input box), and stays there while the phone pad has the cursor.
+  // The position switch is on the control panel only. LIVE STATS
   // fills the room left between that and the score panel, showing as many
   // rows as fit. LIVE DATA (box plot and bar charts) sits under the How to
   // Play legend.
@@ -2777,15 +4351,12 @@
     let stackTop = height - HUD_EDGE;
 
     if (gameState.inputMode === "sensor") {
-      if (!serverCoordinateActive) renderPositionMarkers(ctx, canvas);
       stackTop -= SENSOR_PANEL_H;
       renderSensorPanel(ctx, HUD_EDGE, stackTop);
-      renderPositionSwitch(ctx, canvas);
-      stackTop = getPositionSwitchLayout(canvas).top;
     }
 
     const stats = roundStats();
-    if (!view || !stats) return;
+    if (!view || !stats || !statsVisible) return;
     const now = performance.now();
     const snap = stats.snapshot(now);
 
@@ -2889,6 +4460,7 @@
     ctx.fillStyle = "#f4f4f5";
     ctx.font = "bold 20px monospace";
     ctx.fillText(`Level: ${gameState.level}`, levelPanel.x + levelPanel.w - 14, levelPanel.y + 27);
+    drawStatsToggle(ctx, canvas);
 
     // Pulses button: multi-pulse on the scanner nodes, amber while on.
     if (gameState.status === "playing") {
@@ -3083,7 +4655,8 @@
 
     renderHud(ctx, canvas);
 
-    if (gameState.inputMode === "sensor" && gameState.status === "playing") {
+    // The phone pad places the player over whatever the sensors say.
+    if (gameState.inputMode === "sensor" && !gameState.remoteActive && gameState.status === "playing") {
       renderSensorStatusOverlay(ctx, canvas);
     }
 

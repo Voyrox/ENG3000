@@ -24,21 +24,22 @@
     </section>
 
     <section>
-        <h2>Holes <small>green mole · blue hat mole · red bomb · cyan cursor</small></h2>
+        <h2>Holes <small>green mole · blue hat mole · red bomb · cyan the sensors' cursor</small></h2>
         <div id="pad"></div>
         <div class="coord">
             <div><span>Sensor (x, y) cm</span><b id="coordXY">--</b></div>
             <div><span>Sensors</span><b id="coordState">--</b></div>
         </div>
         <div id="methodFixes" class="fixes"></div>
-        <p class="note">x runs across from screen-left (0-150 cm), y out from the screen. Rings: where each
-            method puts the player, as Compare draws them on the game board; the bold one moves the cursor.</p>
+        <p class="note">x runs across from screen-left (0-150 cm), y out from the screen. Rings (Compare):
+            where each method puts the player; the bold one moves the cursor. The game board only draws the
+            one cursor. While your finger is on the pad it has the game's cursor, and the sensors' cursor, the
+            rings and the game's panels carry on as before.</p>
     </section>
 
     <section>
-        <h2>Input</h2>
+        <h2>Input <small>a finger on the pad takes over from either</small></h2>
         <div class="row">
-            <button data-mode="remote">Remote</button>
             <button data-mode="sensor">Sensors</button>
             <button data-mode="mouse">Mouse</button>
         </div>
@@ -47,26 +48,160 @@
     <section>
         <h2>Placing the player <small>sensor mode</small></h2>
         <div class="row" id="position"></div>
+        <div class="row">
+            <button id="compareBtn" data-action="compare">Compare: on</button>
+            <button id="kalmanBtn" data-action="kalman">Kalman: on</button>
+            <button id="angleLimitBtn" data-action="angleLimit">Angle limit: on</button>
+            <button id="triAimToleranceBtn" data-action="triAimTolerance">Tri aim tolerance: on</button>
+            <button id="cellLockBtn" data-action="cellLock">Cell lock: on</button>
+            <button id="cellDecisionBtn" data-action="cellDecision">Cell decision: on</button>
+            <button id="trackMovingBtn" data-action="trackMoving">Tracking: off</button>
+            <button id="cellConfidenceBtn" data-action="cellConfidence">Cell confidence: on</button>
+        </div>
+        <p class="note">Kalman off: each node's distance goes median → FFT, and line of sight puts the
+            player at the newest reading, with no gate. The servos do not use it.</p>
+        <p class="note">Angle limit on: a node's reading further than its servo line runs on the
+            150 × 160 cm grid (+20 %) is dropped by line of sight and Dynamic's rules;
+            trilateration still uses it.</p>
+        <p class="note">Tri aim tolerance on: trilateration keeps the two nodes' crossing when a
+            servo points up to 20° further off it than its beam; off, it falls back to the nearer
+            node on its own.</p>
+        <p class="note">Cell lock on: the game's cursor stays inside the cell the vote decided, and
+            only that cell's hole scores, until the vote moves. Off: the cursor goes wherever the
+            position does and scores whichever hole it is over.</p>
+        <p class="note">Cell decision on: the cell moves once the position is 6 cm past its edges
+            for 0.5 s, and a node that still sees the player where it did before counts for
+            staying, so a scan turn changing over is not a move. Off: the older vote (13 of the
+            last 25 readings).</p>
+        <p class="note">Tracking (off by default): while the player is moving (twice in a row, a node
+            sees them 15 cm from where it did two readings before, or they go 40 cm/s), the cell
+            moves after 0.2 s instead of 0.5 s; still again after 0.7 s, or at once when a node has
+            held them within 10 cm for 5 readings.</p>
+        <p class="note">Cell confidence (shaded yellow on the pad): a cell rises to full over 3 s while
+            the player stands still in it and a node finds them there, and fades otherwise (half-life
+            30 s, 5 s while another cell rises). On, a confident cell needs up to half the dwell, and
+            after Out of bounds the cursor comes back to a confident cell next to the player.</p>
+    </section>
+
+    <section>
+        <h2>Too close <small>the 10 cm dead zone at the nodes</small></h2>
+        <div class="row">
+            <button id="deadZoneBtn" data-action="deadZone">Dead zone: on</button>
+            <button id="holdTooCloseBtn" class="hold">Hold: too close</button>
+        </div>
+        <p class="note">Dead zone on: too close when a node's raw reading, along its servo line, is
+            less than 10 cm out from the nodes (the 150 × 10 cm strip at the front of the grid):
+            10 cm straight ahead, 29 cm with the servo turned 70°. Off: the raw reading under
+            10 cm, whatever the angle. Hold the button to show the too-close screen; lift your
+            finger to go back.</p>
+    </section>
+
+    <section>
+        <h2>Dynamic's rules <small>checked in this order</small></h2>
+        <div class="row">
+            <button data-rule="farPriority">Far priority: on</button>
+        </div>
+        <div class="row">
+            <button data-rule="confidenceNode">Confidence: on</button>
+            <button data-rule="cornerNode">Far corners: on</button>
+        </div>
+        <div class="row">
+            <button data-rule="columnLock">Column lock: on</button>
+            <button data-rule="loneNode">Lone node: on</button>
+        </div>
+        <div class="row">
+            <button id="levelLess" aria-label="Lower confidence level">&minus;</button>
+            <b id="confidenceLevel" class="stepper">--</b>
+            <button id="levelMore" aria-label="Higher confidence level">+</button>
+        </div>
+        <p class="note">Far priority: when both nodes have read past 110 cm in the last 1.5 s
+            (one head is enough) and the two readings agree - they cross where both servos point - the
+            player is there (FAR), and not Out of bounds, whatever the no-echo and stray nearer
+            readings in between say. A node that finds you nearer twice in a row ends it.
+            Confidence: a node whose Confidence (the Sensors table below) is at or above
+            the level places the player on its own, along its servo line, and the other node is left
+            out (CONF L, CONF R); both at it, the higher one. &minus;/+ moves the level 5 %.
+            Far corners: in A1 (back left) or A3 (back right), the near node places the player
+            on its own when it is sure of them (Dynamic says A1 / A3). Column lock: where the two servo
+            lines cross says the column - the centre (held 1 s), or at least 20 cm into a side column
+            (MID, COL L, COL R). Lone node: when only one node is sure of the player, it places them on
+            its own (L, R).</p>
+    </section>
+
+    <section>
+        <h2>Out of bounds <small>readings per node</small></h2>
+        <div class="row">
+            <button id="lostLess" aria-label="Fewer readings">&minus;</button>
+            <b id="lostReadings" class="stepper">--</b>
+            <button id="lostMore" aria-label="More readings">+</button>
+        </div>
+        <div class="coord">
+            <div><span>Left score</span><b id="lostScoreLeft">--</b></div>
+            <div><span>Right score</span><b id="lostScoreRight">--</b></div>
+        </div>
+        <div class="row">
+            <button id="farHalfBtn" data-action="farHalf">Far half: on</button>
+        </div>
+        <p class="note">Each node's last n readings score found +1, half 0, lost &minus;1. A node whose
+            readings add up to 0 or less is lost, and the game says Out of bounds while both are.
+            Far half on: a half reading (one of the node's two sensors has the player) that puts
+            them in the back row scores +1, as found does.</p>
     </section>
 
     <section>
         <h2>Game</h2>
         <div class="grid2">
-            <button data-action="start" data-start-mode="remote" class="primary">Start remote round</button>
+            <button data-action="start" data-start-mode="sensor" class="primary">Start sensor round</button>
             <button data-action="start" data-start-mode="mouse">Start mouse round</button>
             <button id="pauseBtn" data-action="pause">Pause</button>
             <button data-action="restart">Restart</button>
             <button data-action="menu">Main menu</button>
             <button id="testBtn" data-action="testMode">Test mode: off</button>
+            <button id="alertBtn" data-action="alert" class="wide">Too close screen: off</button>
         </div>
     </section>
 
     <section>
+        <h2>Empty room <small>every node</small></h2>
+        <div class="grid2">
+            <button data-room="learn">Learn room</button>
+            <button data-room="forget">Forget room</button>
+        </div>
+        <p class="note">Learn: with nobody in the play area, each node sweeps its range and from then on
+            ignores the room's echoes. Forget: the nodes wipe the learnt room and every echo counts again.
+            Each node's room is in the Room column below.</p>
+    </section>
+
+    <section>
         <h2>Sensors</h2>
+        <div class="row">
+            <button id="handoverBtn">Handover: on</button>
+            <button id="searchBtn">Search: on</button>
+            <button id="headingBtn">Heading: on</button>
+            <button id="farHoldBtn">Far hold: on</button>
+            <button id="farSteerBtn">Far steer: on</button>
+        </div>
         <table>
-            <thead><tr><th>Node</th><th>State</th><th>Filtered cm</th><th>Angle</th><th>Scan</th><th>RPS</th></tr></thead>
-            <tbody id="nodes"><tr><td colspan="6">No nodes</td></tr></tbody>
+            <thead><tr><th>Node</th><th>State</th><th>Filtered cm</th><th>Angle</th><th>Scan</th><th>Room</th><th>RPS</th><th>Confidence</th></tr></thead>
+            <tbody id="nodes"><tr><td colspan="8">No nodes</td></tr></tbody>
         </table>
+        <p class="note">Confidence: the share of a node's readings in the last 5 s that put the
+            player in one spot, ± how tightly. Green is confident (80 %, for handover); underlined is
+            at Dynamic's confidence level; "following n" is a node
+            being aimed at node n's fix. Handover off: confidence is still worked out, but no
+            node is aimed (no LOOK).</p>
+        <p class="note">Search: a node that loses the player is first aimed back at the cell both
+            nodes' readings put them in most often over the last 3 s, and only sweeps after 3 lost
+            readings there; State says "checking" and the cell, then "sweeping (gave up on ...)".
+            It gives up for good on what it knew then: it only looks again for someone seen after
+            that (2 readings in a cell, in the last 5 s), so a stray echo never sends it back. After a far echo the far hold comes first. Heading: if the game says the
+            player was moving (the Tracking detector), the cell they were walking into instead
+            ("heading" in State). Off: a lost node sweeps at once. The server does it (LOOK), so
+            it works on the firmware as flashed.</p>
+        <p class="note">Far hold: after an echo 100 cm or more out, a node keeps its servo still for up
+            to 3 lost pairs before it sweeps (not at its servo's stop). Far steer: a half-found echo
+            100 cm or more out steers the servo 1&deg; instead of 3&deg;. Both are in the nodes'
+            firmware: they need the firmware from 6 Oct on, and work with no game page open.</p>
     </section>
 
     <script>
@@ -90,25 +225,27 @@
             }
         }
 
-        // The pad is a touchpad: while a finger is down the game switches to
-        // remote input and the cursor follows it smoothly; lifting hands control
-        // back to the sensors. Positions go out at most once per animation
+        // The pad is a touchpad: while a finger is down it has the game's
+        // cursor, which follows it smoothly, on top of whichever mode is
+        // running; lifting hands the cursor back. Positions go out at most once per animation
         // frame so a fast drag does not flood the socket, and a still finger
         // re-sends every HEARTBEAT_MS so the game knows it is still held.
         const finger = document.createElement("div");
         finger.id = "finger";
         pad.appendChild(finger);
 
-        // The game's own cursor, mirrored from game:status: in sensor mode
-        // that is where the sensors put the player. Hidden while a finger is
-        // down, because then it is only a delayed copy of the finger.
+        // The cursor mirrored from game:status. In sensor mode it is the
+        // sensors' own, where they put the player, finger or not; in mouse
+        // mode the game's, hidden while a finger is down, because then it is
+        // only a delayed copy of the finger.
         const gameCursor = document.createElement("div");
         gameCursor.id = "gameCursor";
         pad.appendChild(gameCursor);
 
-        // Compare, as on the game board: a ring for where each position method
-        // puts the player, in the game's colours. The cursor above follows the
-        // method in use, eased; the rings are where each method is right now.
+        // Compare: a ring for where line of sight, trilateration and the
+        // average put the player, in the game's colours. The cursor above
+        // follows the one placing the player (with Dynamic on, the one Dynamic
+        // follows), eased; the rings are where each is right now.
         const METHOD_STYLES = {
             los: { short: "LOS", colour: "#22d3ee" },
             tri: { short: "TRI", colour: "#e879f9" },
@@ -155,8 +292,6 @@
             pad.setPointerCapture(e.pointerId);
             dragging = true;
             finger.classList.add("down");
-            gameCursor.classList.remove("on");
-            Object.values(rings).forEach((ring) => ring.classList.remove("on"));
             queuePoint(e);
             clearInterval(heartbeat);
             heartbeat = setInterval(() => {
@@ -183,21 +318,126 @@
             btn.addEventListener("click", () => send({ action: "mode", mode: btn.dataset.mode }));
         });
 
+        // The empty room goes straight to the nodes (no game page needed).
+        // Both ask first: forgetting wipes what the nodes learnt, and learning
+        // needs the play area empty.
+        const ROOM_CONFIRM = {
+            learn: "Learn the empty room? Nobody may stand in the play area while the nodes sweep.",
+            forget: "Forget the learnt room on every node? Echoes from the room count again until it is learnt again.",
+        };
+        document.querySelectorAll("[data-room]").forEach((btn) => {
+            btn.addEventListener("click", () => {
+                if (confirm(ROOM_CONFIRM[btn.dataset.room])) send({ action: "room", room: btn.dataset.room });
+            });
+        });
+
+        // Handover goes straight to the server (no game page needed), which
+        // answers with handover:status.
+        let handoverOn = true;
+        $("handoverBtn").addEventListener("click", () => send({ action: "handover", enabled: !handoverOn }));
+        // So do Search and its Heading, which answer with search:status.
+        let search = { on: true, heading: true };
+        $("searchBtn").addEventListener("click", () => send({ action: "search", enabled: !search.on }));
+        $("headingBtn").addEventListener("click", () => send({ action: "searchHeading", enabled: !search.heading }));
+        function renderSearch(status) {
+            if (!status || typeof status.on !== "boolean" || typeof status.heading !== "boolean") return;
+            search = { on: status.on, heading: status.heading };
+            $("searchBtn").textContent = `Search: ${search.on ? "on" : "off"}`;
+            $("searchBtn").classList.toggle("selected", !search.on);
+            $("headingBtn").textContent = `Heading: ${search.heading ? "on" : "off"}`;
+            $("headingBtn").classList.toggle("selected", !search.heading);
+        }
+        // Far hold and far steer go straight to the server, which tells the
+        // nodes (FARHOLD / FARSTEER) and answers with far:status.
+        let far = { hold: true, steer: true };
+        $("farHoldBtn").addEventListener("click", () => send({ action: "farHold", enabled: !far.hold }));
+        $("farSteerBtn").addEventListener("click", () => send({ action: "farSteer", enabled: !far.steer }));
+        function renderFar(status) {
+            if (!status || typeof status.hold !== "boolean" || typeof status.steer !== "boolean") return;
+            far = { hold: status.hold, steer: status.steer };
+            $("farHoldBtn").textContent = `Far hold: ${far.hold ? "on" : "off"}`;
+            $("farHoldBtn").classList.toggle("selected", !far.hold);
+            $("farSteerBtn").textContent = `Far steer: ${far.steer ? "on" : "off"}`;
+            $("farSteerBtn").classList.toggle("selected", !far.steer);
+        }
+
+        function renderHandover(on) {
+            if (typeof on !== "boolean") return;
+            handoverOn = on;
+            $("handoverBtn").textContent = `Handover: ${on ? "on" : "off"}`;
+            $("handoverBtn").classList.toggle("selected", !on);
+        }
+
+        // The too-close screen while a finger is on the hold button, re-sent
+        // like the pad's point so the game lets go if the phone goes quiet.
+        const holdBtn = $("holdTooCloseBtn");
+        let holdBeat = null;
+        holdBtn.addEventListener("pointerdown", (e) => {
+            e.preventDefault();
+            holdBtn.setPointerCapture(e.pointerId);
+            holdBtn.classList.add("selected");
+            send({ action: "tooCloseHold", on: true });
+            clearInterval(holdBeat);
+            holdBeat = setInterval(() => send({ action: "tooCloseHold", on: true }), HEARTBEAT_MS);
+        });
+        const endHold = () => {
+            if (holdBeat === null) return;
+            clearInterval(holdBeat);
+            holdBeat = null;
+            holdBtn.classList.remove("selected");
+            send({ action: "tooCloseHold", on: false });
+        };
+        holdBtn.addEventListener("pointerup", endHold);
+        holdBtn.addEventListener("pointercancel", endHold);
+        holdBtn.addEventListener("lostpointercapture", endHold);
+
+        // Dynamic's rule switches: each press flips one (on until the game
+        // says otherwise).
+        const RULE_LABELS = {
+            farPriority: "Far priority", confidenceNode: "Confidence", cornerNode: "Far corners",
+            columnLock: "Column lock", loneNode: "Lone node",
+        };
+        const ruleOn = (name) => !(game && game.dynamicRules && game.dynamicRules[name] === false);
+        document.querySelectorAll("[data-rule]").forEach((btn) => {
+            btn.addEventListener("click", () => {
+                const name = btn.dataset.rule;
+                send({ action: "dynamicRules", rules: { [name]: !ruleOn(name) } });
+            });
+        });
+
         document.querySelectorAll("[data-action]").forEach((btn) => {
             btn.addEventListener("click", () => {
                 const action = btn.dataset.action;
                 if (action === "start") return send({ action, mode: btn.dataset.startMode });
                 if (action === "testMode") return send({ action, enabled: !(game && game.testMode) });
+                // On until the game says otherwise, so the first press turns it off.
+                if (action === "kalman") return send({ action, enabled: Boolean(game) && game.kalman === false });
+                if (action === "angleLimit") return send({ action, enabled: Boolean(game) && game.angleLimit === false });
+                if (action === "triAimTolerance") return send({ action, enabled: Boolean(game) && game.triAimTolerance === false });
+                if (action === "deadZone") return send({ action, enabled: Boolean(game) && game.deadZone === false });
+                if (action === "cellLock") return send({ action, enabled: Boolean(game) && game.cellLock === false });
+                if (action === "cellDecision") return send({ action, enabled: Boolean(game) && game.cellDecision === false });
+                // Off until the game says otherwise, so the first press turns it on.
+                if (action === "trackMoving") return send({ action, enabled: !(game && game.trackMoving) });
+                if (action === "cellConfidence") return send({ action, enabled: Boolean(game) && game.cellConfidence === false });
+                if (action === "farHalf") return send({ action, enabled: Boolean(game) && game.farHalf === false });
+                if (action === "compare") return send({ action, enabled: Boolean(game) && game.compare === false });
+                if (action === "alert") return send({ action, enabled: !(game && game.alertForced) });
                 if (action === "pause" && game && game.status === "paused") return send({ action: "resume" });
                 send({ action });
             });
         });
 
-        // The position switch: how the sensors place the player - line of
-        // sight, trilateration or their average. The game sends the methods it
-        // has, and the one in use, with its status, so a new method shows up
-        // here without changing this page.
+        // The position switch, which the game no longer draws: how the sensors
+        // place the player - Dynamic (the steadiest of the other three, or one
+        // of its rules), line of sight, trilateration or their average. The
+        // game sends the methods it has, and the one in use, with its status,
+        // so a new method shows up here without changing this page. While
+        // Dynamic is on its button says what it is following, as the game's
+        // own button did (dynamicFollowing: LOS, TRI, AVG, or a rule - A1, A3,
+        // MID, COL L, COL R, L or R).
         const DEFAULT_POSITION_METHODS = [
+            { id: "dyn", label: "Dynamic" },
             { id: "los", label: "Line of sight" },
             { id: "tri", label: "Trilateration" },
             { id: "avg", label: "Average" },
@@ -214,6 +454,7 @@
                 methods.forEach((m) => {
                     const btn = document.createElement("button");
                     btn.dataset.method = m.id;
+                    btn.dataset.label = m.label;
                     btn.textContent = m.label;
                     btn.addEventListener("click", () => send({ action: "position", method: m.id }));
                     box.appendChild(btn);
@@ -221,22 +462,122 @@
             }
             box.querySelectorAll("[data-method]").forEach((btn) => {
                 btn.classList.toggle("selected", Boolean(game) && btn.dataset.method === game.positionMethod);
+                const following = btn.dataset.method === "dyn" && game && game.dynamicFollowing;
+                btn.textContent = following ? `${btn.dataset.label} (${following})` : btn.dataset.label;
             });
         }
 
         renderPositionMethods();
 
+        // Out of bounds: how many readings each node's lost score is taken
+        // over. A tap asks the game for one more or fewer; until the game's
+        // status says it took, the number shown is the one asked for, so quick
+        // taps add up.
+        const LOST_READINGS_MAX = 50;
+        let lostReadingsAsked = null;
+
+        function lostReadingsShown() {
+            if (lostReadingsAsked !== null) return lostReadingsAsked;
+            return game && Number.isInteger(game.lostReadings) ? game.lostReadings : null;
+        }
+
+        function askLostReadings(step) {
+            const current = lostReadingsShown();
+            if (current === null) return;
+            lostReadingsAsked = Math.max(1, Math.min(LOST_READINGS_MAX, current + step));
+            send({ action: "lostReadings", count: lostReadingsAsked });
+            renderLostReadings();
+        }
+
+        $("lostLess").addEventListener("click", () => askLostReadings(-1));
+        $("lostMore").addEventListener("click", () => askLostReadings(1));
+
+        // Each node's score over its last n readings, from the game: positive
+        // is finding the player, 0 or less is lost; "--" until it has n.
+        function renderLostReadings() {
+            if (game && game.lostReadings === lostReadingsAsked) lostReadingsAsked = null;
+            const n = lostReadingsShown();
+            $("lostReadings").textContent = n === null ? "--" : String(n);
+            const scores = (game && game.lostScores) || [];
+            [["lostScoreLeft", scores[0]], ["lostScoreRight", scores[1]]].forEach(([id, entry]) => {
+                const box = $(id);
+                if (!entry || entry.score === null) {
+                    box.textContent = entry ? `-- (${entry.readings} of ${n})` : "--";
+                    box.style.color = "";
+                    return;
+                }
+                box.textContent = `${entry.score > 0 ? "+" : ""}${entry.score} ${entry.score > 0 ? "finding" : "lost"}`;
+                box.style.color = entry.score > 0 ? "#22c55e" : "#ef4444";
+            });
+        }
+
+        // The confidence level, in percent: as the lost readings above, a tap
+        // asks the game for 5 % more or less, and the number asked for shows
+        // until the game's status says it took.
+        let confidenceLevelAsked = null;
+
+        function confidenceLevelShown() {
+            if (confidenceLevelAsked !== null) return confidenceLevelAsked;
+            return game && Number.isInteger(game.confidenceLevel) ? game.confidenceLevel : null;
+        }
+
+        function askConfidenceLevel(step) {
+            const current = confidenceLevelShown();
+            if (current === null) return;
+            confidenceLevelAsked = Math.max(5, Math.min(100, current + step));
+            send({ action: "confidenceLevel", pct: confidenceLevelAsked });
+            renderConfidenceLevel();
+        }
+
+        $("levelLess").addEventListener("click", () => askConfidenceLevel(-5));
+        $("levelMore").addEventListener("click", () => askConfidenceLevel(5));
+
+        function renderConfidenceLevel() {
+            if (game && game.confidenceLevel === confidenceLevelAsked) confidenceLevelAsked = null;
+            const level = confidenceLevelShown();
+            $("confidenceLevel").textContent = level === null ? "--" : `${level}%`;
+        }
+
         function renderGame() {
             if (!game) return;
             renderPositionMethods();
+            renderLostReadings();
+            renderConfidenceLevel();
             $("screen").textContent = game.screen;
-            $("mode").textContent = game.mode;
+            $("mode").textContent = game.remote ? `${game.mode} + pad` : game.mode;
             $("score").textContent = game.score;
             $("lives").textContent = game.lives;
             $("time").textContent = `${Math.ceil(game.remainingMs / 1000)}s`;
             $("status").textContent = game.status;
             $("pauseBtn").textContent = game.status === "paused" ? "Resume" : "Pause";
             $("testBtn").textContent = `Test mode: ${game.testMode ? "on" : "off"}`;
+            $("compareBtn").textContent = `Compare: ${game.compare === false ? "off" : "on"}`;
+            $("compareBtn").classList.toggle("selected", game.compare !== false);
+            $("kalmanBtn").textContent = `Kalman: ${game.kalman === false ? "off" : "on"}`;
+            $("kalmanBtn").classList.toggle("selected", game.kalman === false);
+            $("angleLimitBtn").textContent = `Angle limit: ${game.angleLimit === false ? "off" : "on"}`;
+            $("angleLimitBtn").classList.toggle("selected", game.angleLimit === false);
+            $("triAimToleranceBtn").textContent = `Tri aim tolerance: ${game.triAimTolerance === false ? "off" : "on"}`;
+            $("triAimToleranceBtn").classList.toggle("selected", game.triAimTolerance === false);
+            $("deadZoneBtn").textContent = `Dead zone: ${game.deadZone === false ? "off" : "on"}`;
+            $("deadZoneBtn").classList.toggle("selected", game.deadZone === false);
+            $("cellLockBtn").textContent = `Cell lock: ${game.cellLock === false ? "off" : "on"}`;
+            $("cellLockBtn").classList.toggle("selected", game.cellLock === false);
+            $("cellDecisionBtn").textContent = `Cell decision: ${game.cellDecision === false ? "off" : "on"}`;
+            $("cellDecisionBtn").classList.toggle("selected", game.cellDecision === false);
+            $("trackMovingBtn").textContent = `Tracking: ${game.trackMoving ? "on" : "off"}`;
+            $("trackMovingBtn").classList.toggle("selected", Boolean(game.trackMoving));
+            $("cellConfidenceBtn").textContent = `Cell confidence: ${game.cellConfidence === false ? "off" : "on"}`;
+            $("cellConfidenceBtn").classList.toggle("selected", game.cellConfidence === false);
+            $("farHalfBtn").textContent = `Far half: ${game.farHalf === false ? "off" : "on"}`;
+            $("farHalfBtn").classList.toggle("selected", game.farHalf === false);
+            document.querySelectorAll("[data-rule]").forEach((btn) => {
+                const on = ruleOn(btn.dataset.rule);
+                btn.textContent = `${RULE_LABELS[btn.dataset.rule]}: ${on ? "on" : "off"}`;
+                btn.classList.toggle("selected", on);
+            });
+            $("alertBtn").textContent = `Too close screen: ${game.alertForced ? "on" : "off"}`;
+            $("alertBtn").classList.toggle("danger", Boolean(game.alertForced));
             document.querySelectorAll("[data-mode]").forEach((btn) => {
                 btn.classList.toggle("selected", btn.dataset.mode === game.mode);
             });
@@ -246,8 +587,13 @@
             const cursorHole = game.cursor !== undefined
                 ? (game.cursor ? game.cursor.hole : -1)
                 : game.remoteHole;
+            const sensor = game.cursor && game.cursor.sensor;
+            const confidence = sensor && Array.isArray(sensor.holeConfidence) ? sensor.holeConfidence : null;
             pad.querySelectorAll(".hole").forEach((cell, i) => {
                 const up = i === game.activeHole;
+                // Cell confidence: a yellow wash, stronger the surer the game is.
+                const c = confidence ? Number(confidence[i]) || 0 : 0;
+                cell.style.boxShadow = c > 0.01 ? `inset 0 0 0 999px rgba(250, 204, 21, ${(0.45 * c).toFixed(3)})` : "";
                 cell.classList.toggle("mole", up && game.moleType === "mole");
                 cell.classList.toggle("super", up && game.moleType === "super");
                 cell.classList.toggle("bomb", up && game.moleType === "bomb");
@@ -256,25 +602,28 @@
             renderCursor();
         }
 
-        const STATE_LABELS = { "too-close": "too close", "out-of-bounds": "out of bounds", "no-signal": "no signal" };
+        const STATE_LABELS = {
+            "too-close": "too close", "out-of-bounds": "out of bounds", "no-signal": "no signal",
+            offline: "sensors offline",
+        };
         const SOURCE_LABELS = { both: "both", left: "left only", right: "right only" };
         const cm = (v) => v.toFixed(1);
 
-        // Mirrors the game's cursor onto the pad and, in sensor mode, shows
-        // where the sensors put the player. A position off the board is pinned
-        // to its edge on the pad; the numbers stay exact.
+        // Mirrors the cursor onto the pad and, in sensor mode, shows where the
+        // sensors put the player - also while a finger has the game's cursor.
+        // A position off the board is pinned to its edge on the pad; the
+        // numbers stay exact.
         function renderCursor() {
             const cursor = game && game.cursor;
-            const board = cursor && cursor.board;
-            const show = Boolean(board) && !dragging && game.mode !== "remote";
-            gameCursor.classList.toggle("on", show);
-            if (show) {
+            const sensor = cursor && cursor.sensor;
+            const board = sensor ? sensor.board : cursor && !dragging && !game.remote ? cursor.board : null;
+            gameCursor.classList.toggle("on", Boolean(board));
+            if (board) {
                 const clamp = (v) => Math.min(1, Math.max(0, v));
                 gameCursor.style.left = `${clamp(board.nx) * 100}%`;
                 gameCursor.style.top = `${clamp(board.ny) * 100}%`;
             }
 
-            const sensor = cursor && cursor.sensor;
             gameCursor.classList.toggle("held", Boolean(sensor && sensor.held));
             renderRings(sensor);
             renderMethodFixes(sensor);
@@ -293,16 +642,16 @@
             $("coordState").textContent = state;
         }
 
-        // The rings, while Compare is on in a sensor round and no finger is
-        // down. A ring off the board is pinned to its edge, as the cursor is.
+        // The rings, while Compare is on in a sensor round, finger or not. A
+        // ring off the board is pinned to its edge, as the cursor is.
         function renderRings(sensor) {
             const fixes = (sensor && sensor.fixes) || {};
-            const show = Boolean(sensor && sensor.compare) && !dragging && game.mode === "sensor";
+            const show = Boolean(sensor && sensor.compare);
             Object.entries(rings).forEach(([method, ring]) => {
                 const fix = fixes[method];
                 const on = show && Boolean(fix) && fix.nx != null && fix.ny != null;
                 ring.classList.toggle("on", on);
-                ring.classList.toggle("inUse", Boolean(sensor) && sensor.method === method);
+                ring.classList.toggle("inUse", Boolean(sensor) && placedBy(sensor) === method);
                 if (!on) return;
                 const clamp = (v) => Math.min(1, Math.max(0, v));
                 ring.style.left = `${clamp(fix.nx) * 100}%`;
@@ -310,8 +659,14 @@
             });
         }
 
+        // The method placing the player: the one switched on, or the one
+        // Dynamic follows. A game from before Dynamic sends only the method.
+        function placedBy(sensor) {
+            return sensor.placedBy || sensor.method;
+        }
+
         // Every method's (x, y) side by side, as the game's sensor panel lists
-        // them; the one in use is bold.
+        // them; the one placing the player is bold.
         function renderMethodFixes(sensor) {
             const box = $("methodFixes");
             if (!sensor || !sensor.fixes) {
@@ -322,15 +677,17 @@
                 const fix = sensor.fixes[method];
                 const item = document.createElement("span");
                 item.style.color = fix ? style.colour : "#63736f";
-                item.classList.toggle("inUse", sensor.method === method);
+                item.classList.toggle("inUse", placedBy(sensor) === method);
                 item.textContent = `${style.short} ${fix ? `(${fix.xCm.toFixed(0)}, ${fix.yCm.toFixed(0)})` : "--"}`;
                 return item;
             }));
         }
 
-        // A node's servo angle and scan state, from its latest message - the
-        // same fields the game's sensor panel shows (readScan() in game.js).
+        // A node's servo angle, scan state and empty room, from its latest
+        // message - the same fields the game's sensor panel reads (readScan()
+        // in game.js). Firmware without the room filter sends no room.
         const SCAN_STATES = { 0: ["found", "#22c55e"], 1: ["half", "#f59e0b"], 2: ["lost", "#ef4444"] };
+        const ROOM_STATES = { 0: ["none", "#63736f"], 1: ["learning", "#f59e0b"], 2: ["learnt", "#22c55e"] };
 
         function readScan(n) {
             let payload = n.latest;
@@ -341,19 +698,23 @@
                     payload = null;
                 }
             }
-            if (!payload || typeof payload !== "object") return { angle: null, state: null };
+            if (!payload || typeof payload !== "object") return { angle: null, state: null, room: null };
             const number = (value) => {
                 if (value === null || value === undefined || value === "") return null;
                 const v = Number(value);
                 return Number.isFinite(v) ? v : null;
             };
-            return { angle: number(payload.angle), state: number(payload.scanState ?? payload.state) };
+            return {
+                angle: number(payload.angle),
+                state: number(payload.scanState ?? payload.state),
+                room: number(payload.room),
+            };
         }
 
         function renderNodes(nodes) {
             const body = $("nodes");
             if (!nodes.length) {
-                body.innerHTML = '<tr><td colspan="6">No nodes</td></tr>';
+                body.innerHTML = '<tr><td colspan="8">No nodes</td></tr>';
                 return;
             }
             body.innerHTML = nodes
@@ -361,14 +722,42 @@
                 .sort((a, b) => a.id - b.id)
                 .map((n) => {
                     const cm = n.filtered_distance == null ? "--" : n.filtered_distance.toFixed(1);
-                    const state = n.online ? (n.has_turn ? "scanning" : "online") : "offline";
-                    const scan = n.online ? readScan(n) : { angle: null, state: null };
+                    const conf = n.confidence;
+                    let state = n.online ? (n.has_turn ? "scanning" : "online") : "offline";
+                    if (n.online && conf && conf.following != null) state = `following ${conf.following}`;
+                    if (n.online && n.search) state = searchState(n.search);
+                    const scan = n.online ? readScan(n) : { angle: null, state: null, room: null };
                     const angle = scan.angle === null ? "--" : `${scan.angle.toFixed(0)}°`;
                     const [scanName, scanColour] = SCAN_STATES[scan.state] || ["--", "#63736f"];
+                    const [roomName, roomColour] = ROOM_STATES[scan.room] || ["--", "#63736f"];
                     return `<tr><td>${n.id}</td><td>${state}</td><td>${cm}</td><td>${angle}</td>` +
-                        `<td style="color:${scanColour}">${scanName}</td><td>${(n.rps || 0).toFixed(1)}</td></tr>`;
+                        `<td style="color:${scanColour}">${scanName}</td>` +
+                        `<td style="color:${roomColour}">${roomName}</td><td>${(n.rps || 0).toFixed(1)}</td>` +
+                        `${confidenceCell(conf)}</tr>`;
                 })
                 .join("");
+        }
+
+        // A node's search (search.py): the cell it is checking, why ("heading"
+        // for a moving player) and how many lost readings it has taken there,
+        // or sweeping after it.
+        function searchState(s) {
+            const by = s.by === "heading" ? " (heading)" : "";
+            if (s.state === "checking") return `checking ${s.name}${by} ${s.checks}/${s.of}`;
+            return s.name ? `sweeping (gave up on ${s.name})` : "sweeping";
+        }
+
+        // A node's confidence (handover.py): the score, and ± the spread of
+        // its points; "--" before calibration has given it a role. Underlined
+        // while it is ready and at the confidence level (Dynamic's first rule).
+        function confidenceCell(conf) {
+            if (!conf) return "<td>--</td>";
+            const pct = `${Math.round(conf.score * 100)}%`;
+            const spread = conf.spread_cm == null ? "" : ` ±${Math.round(conf.spread_cm)}`;
+            const level = game && Number.isInteger(game.confidenceLevel) ? game.confidenceLevel : null;
+            const atLevel = conf.ready === true && level !== null && conf.score * 100 >= level;
+            const classes = [conf.confident ? "sure" : "", atLevel ? "level" : ""].join(" ").trim();
+            return `<td class="${classes}">${pct}${spread}</td>`;
         }
 
         function connect() {
@@ -384,6 +773,12 @@
                     renderGame();
                 } else if (payload.type === "nodes:update") {
                     renderNodes(payload.nodes);
+                } else if (payload.type === "handover:status") {
+                    renderHandover(payload.on);
+                } else if (payload.type === "search:status") {
+                    renderSearch(payload);
+                } else if (payload.type === "far:status") {
+                    renderFar(payload);
                 }
             });
             socket.addEventListener("close", () => {
@@ -554,6 +949,8 @@
 
     .row { display: flex; gap: 8px; }
     .row button { flex: 1; }
+    .row + .row { margin-top: 8px; }
+    .stepper { flex: 0 0 64px; align-self: center; text-align: center; font-size: 22px; }
 
     .grid2 {
         display: grid;
@@ -574,10 +971,16 @@
     button:active { background: #3a3a50; }
     button.primary { background: #1d4ed8; }
     button.selected { background: #facc15; color: #13131c; font-weight: 600; }
+    button.hold { touch-action: none; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
+    button.hold.selected { background: #b21b1b; color: #ffffff; }
+    button.wide { grid-column: 1 / -1; }
+    button.danger { background: #dc2626; font-weight: 600; }
 
     table { width: 100%; border-collapse: collapse; font-size: 14px; }
     th { text-align: left; color: #9298aa; font-weight: normal; font-size: 12px; }
     th, td { padding: 6px 4px; border-bottom: 1px solid #2a2a3a; }
+    td.sure { color: #86efac; font-weight: 600; }
+    td.level { text-decoration: underline; }
 </style>
 
 </html>

@@ -43,10 +43,14 @@ const round6 = (v) => Math.round(v * 1e6) / 1e6;
 // Each segment exercises a different branch. Values are [left, centre, right];
 // the rig has two sensors, so the centre is always NO_ECHO. A simulated player
 // at (x, depth) cm is seen by a sensor only inside its beam; outside it the
-// sensor sees the back wall.
+// sensor sees the back wall. The player is a body: a sensor's echo comes off
+// the side of them nearest it, BODY_RADIUS_CM short of their middle (the
+// game's tuning.bodyRadiusCm adds it back).
 
 const SENSOR_X_CM = [25, 125];                    // centres of the outer columns
+const BODY_RADIUS_CM = 15;
 const beamHalfWidthCm = (depth) => 15 + depth * 0.36;
+const echoCm = (sensorX, x, depth) => Math.hypot(x - sensorX, depth) - BODY_RADIUS_CM;
 
 function buildStream() {
   const rand = lcg(20260929);
@@ -54,7 +58,7 @@ function buildStream() {
   const maybe = (value, dropRate) => (rand() < dropRate ? NO_ECHO : value);
   const wall = () => maybe(jitter(235, 6), 0.25);
   const sees = (sensorX, x, depth) =>
-    Math.abs(x - sensorX) <= beamHalfWidthCm(depth) ? jitter(Math.hypot(x - sensorX, depth), 2) : wall();
+    Math.abs(x - sensorX) <= beamHalfWidthCm(depth) ? jitter(echoCm(sensorX, x, depth), 2) : wall();
   const steps = [];
   const push = (l, r) => steps.push([l, NO_ECHO, r]);
   const at = (x, depth) => push(sees(SENSOR_X_CM[0], x, depth), sees(SENSOR_X_CM[1], x, depth));
@@ -99,11 +103,11 @@ function buildStream() {
 
   // From here the nodes are servo scanners: each entry is [distance, angle,
   // scanState], the angle the node's servo was at (90 = straight out, more =
-  // screen-left) in whole degrees as the firmware sends it, and the scan state
+  // screen-right) in whole degrees as the firmware sends it, and the scan state
   // (0 found, 1 half-found, 2 lost and sweeping).
-  const aimAt = (nodeX, x, depth) => Math.round(90 + (Math.atan2(nodeX - x, depth) * 180) / Math.PI);
+  const aimAt = (nodeX, x, depth) => Math.round(90 + (Math.atan2(x - nodeX, depth) * 180) / Math.PI);
   const scanned = (nodeX, x, depth, state = 0) =>
-    [jitter(Math.hypot(x - nodeX, depth), 2), aimAt(nodeX, x, depth), state];
+    [jitter(echoCm(nodeX, x, depth), 2), aimAt(nodeX, x, depth), state];
 
   // 11. Both scanners track a player walking diagonally across the board.
   for (let i = 0; i < 150; i++) {
@@ -152,12 +156,189 @@ function buildStream() {
     push(scanned(SENSOR_X_CM[0], 120, 60), scanned(SENSOR_X_CM[1], 120, 60));
   }
 
+  // 16. Both scanners lose the player for 3 s: the cursor rides it out until
+  //     each one's last tuning.lostReadings readings add up to 0 or less
+  //     (found +1, half 0, lost -1), then out of bounds at once, with no hold
+  //     - the only out of bounds there is - and on while, for the second half,
+  //     the left one half-finds furniture (one head hears it), which is not
+  //     the player. Then both find the player again.
+  for (let i = 0; i < 40; i++) push(scanned(SENSOR_X_CM[0], 70, 90), scanned(SENSOR_X_CM[1], 70, 90));
+  for (let i = 0; i < 150; i++) {
+    const sweep = 40 + ((i * 15) % 120);
+    push(i < 75 ? [NO_ECHO, sweep, 2] : [jitter(120, 2), 70, 1], [NO_ECHO, 180 - sweep, 2]);
+  }
+  for (let i = 0; i < 40; i++) push(scanned(SENSOR_X_CM[0], 70, 90), scanned(SENSOR_X_CM[1], 70, 90));
+
+  // 17. The player steps off the right side of the board and stays there,
+  //     both scanners finding them: the cursor stays on the edge square, and
+  //     never out of bounds, since the nodes are finding them. Then they step
+  //     back on.
+  for (let i = 0; i < 140; i++) push(scanned(SENSOR_X_CM[0], 175, 80), scanned(SENSOR_X_CM[1], 175, 80));
+  for (let i = 0; i < 40; i++) push(scanned(SENSOR_X_CM[0], 110, 80), scanned(SENSOR_X_CM[1], 110, 80));
+
+  // 18. The left scanner finds the player in play while the right one has
+  //     locked on to something past the right edge: never out of bounds.
+  for (let i = 0; i < 140; i++) push(scanned(SENSOR_X_CM[0], 60, 90), scanned(SENSOR_X_CM[1], 190, 60));
+
+  // 19. As on the rig on 5 Oct: the nodes take 500 ms turns and are mostly
+  //     lost, with the odd found (a stray echo) or half reading - one in ten
+  //     of each. Out of bounds once each one's last tuning.lostReadings
+  //     readings add up to 0 or less, however the odd found falls. Then both
+  //     find the player again, and it clears.
+  for (let i = 0; i < 200; i++) {
+    const k = i % 10;
+    const sweep = 40 + ((i * 15) % 120);
+    const reading = (nodeX) =>
+      k === 3 ? scanned(nodeX, 75, 80) : k === 7 ? [jitter(120, 2), sweep, 1] : [NO_ECHO, sweep, 2];
+    const leftTurn = Math.floor(i / 25) % 2 === 0;
+    push(leftTurn ? reading(SENSOR_X_CM[0]) : SILENT, leftTurn ? SILENT : reading(SENSOR_X_CM[1]));
+  }
+  for (let i = 0; i < 60; i++) push(scanned(SENSOR_X_CM[0], 75, 80), scanned(SENSOR_X_CM[1], 75, 80));
+
+  // 20. A lone confident node (Dynamic's second rule): the left node finds the
+  //     player straight in front of it, while the right one half-finds
+  //     furniture in the right column. The two servo lines cross in the left
+  //     column, so the centre rule stays out of it, and the left node alone
+  //     places the player (line of sight, which takes the furniture too, is
+  //     pulled towards the centre).
+  for (let i = 0; i < 60; i++) push(scanned(SENSOR_X_CM[0], 25, 85), [jitter(150, 2), 60, 1]);
+
+  // 21. The centre rule (Dynamic's first): a player in the centre, 80 cm out,
+  //     with both servos turned some 10-20 degrees further in than the
+  //     player's middle, the angles the rig read at that spot on 4 Oct (141
+  //     and 49; its servo stops where the beam first finds the body). The two
+  //     servo lines cross in the centre column, at 84 cm across.
+  for (let i = 0; i < 60; i++) {
+    push([jitter(echoCm(SENSOR_X_CM[0], 75, 80), 2), 141, 0], [jitter(echoCm(SENSOR_X_CM[1], 75, 80), 2), 49, 0]);
+  }
+
+  // 22. The centre hold: the player stays where they were, but the servo
+  //     lines stray to cross at 110 cm, in the right column, for 2 s. The
+  //     player stays in the centre column for tuning.centreHoldMs (1 s), then
+  //     the hold lets go.
+  for (let i = 0; i < 100; i++) {
+    push([jitter(echoCm(SENSOR_X_CM[0], 75, 80), 2), aimAt(SENSOR_X_CM[0], 110, 80), 0],
+      [jitter(echoCm(SENSOR_X_CM[1], 75, 80), 2), aimAt(SENSOR_X_CM[1], 110, 80), 0]);
+  }
+
+  // 23. A lone node outside the play area: the left node, turned fully in,
+  //     finds something 27 cm away (its own point 14 cm out, in front of the
+  //     near edge), as on the rig on 5 Oct, while the right one half-finds
+  //     furniture. It is not the player, so it does not place them alone.
+  for (let i = 0; i < 60; i++) push([jitter(27, 1), 160, 0], [jitter(150, 2), 60, 1]);
+
+  // 24. The side lock: both scanners find the player deep in the left column
+  //     (15 cm across), where the servo lines cross more than
+  //     tuning.sideLockDepthCm inside it; then deep in the right column; then
+  //     near the left-hand column boundary (40 cm), where there is no lock.
+  for (let i = 0; i < 50; i++) push(scanned(SENSOR_X_CM[0], 15, 80), scanned(SENSOR_X_CM[1], 15, 80));
+  for (let i = 0; i < 50; i++) push(scanned(SENSOR_X_CM[0], 135, 80), scanned(SENSOR_X_CM[1], 135, 80));
+  for (let i = 0; i < 50; i++) push(scanned(SENSOR_X_CM[0], 40, 80), scanned(SENSOR_X_CM[1], 40, 80));
+
+  // 25. The far corners: the left scanner finds the player in A1 (the far-left
+  //     square) while the right one is acting up - it finds something in the
+  //     centre, near the screen - so the left node alone places the player.
+  //     Then the same in A3 with the left scanner acting up.
+  for (let i = 0; i < 50; i++) push(scanned(SENSOR_X_CM[0], 25, 125), scanned(SENSOR_X_CM[1], 75, 50));
+  for (let i = 0; i < 50; i++) push(scanned(SENSOR_X_CM[0], 75, 50), scanned(SENSOR_X_CM[1], 125, 125));
+
+  // 26. The far squares across the board, seen by both: the player 135 cm out
+  //     in the right column, ~153 cm from the left node, then in the left
+  //     column. A node's distance there is longer than the far edge plus its
+  //     margin; only the point it gives along the servo line is on the board,
+  //     so trilateration still crosses the two distances.
+  for (let i = 0; i < 60; i++) push(scanned(SENSOR_X_CM[0], 125, 135), scanned(SENSOR_X_CM[1], 125, 135));
+  for (let i = 0; i < 60; i++) push(scanned(SENSOR_X_CM[0], 25, 135), scanned(SENSOR_X_CM[1], 25, 135));
+
+  // 27. The dead zone: the player steps in to the front of the right column,
+  //     their middle about 15 cm out. The right node, turned in to 31 degrees,
+  //     reads 14 cm - over 10, but its point along the servo line is 7 cm out,
+  //     inside the 10 cm strip, so too close with the dead zone on and not
+  //     with it off. Then they step back to 60 cm out.
+  for (let i = 0; i < 40; i++) push([jitter(60, 2), 150, 0], [jitter(14, 0.5), 31, 0]);
+  for (let i = 0; i < 40; i++) push(scanned(SENSOR_X_CM[0], 100, 60), scanned(SENSOR_X_CM[1], 100, 60));
+
+  // 28. Far half (Aaron, 5 Oct): the player stands in the back row of the
+  //     centre column, 130 cm out, and each node hears them with one sensor
+  //     only (half), as the rig's nodes mostly did past 100 cm on 5 Oct. With
+  //     tuning.farHalf on each half reading scores +1 and nobody is lost;
+  //     off, they score 0 and it is Out of bounds once each node has had
+  //     tuning.lostReadings of them. Then both find the player again.
+  for (let i = 0; i < 90; i++) {
+    push(scanned(SENSOR_X_CM[0], 75, 130, 1), scanned(SENSOR_X_CM[1], 75, 130, 1));
+  }
+  for (let i = 0; i < 40; i++) push(scanned(SENSOR_X_CM[0], 75, 130), scanned(SENSOR_X_CM[1], 75, 130));
+
+  // 29. The same in the front row, 50 cm out: a half reading there scores 0
+  //     with far half on as well, so it is Out of bounds either way (in an
+  //     empty room the floor and furniture near the nodes give half readings).
+  for (let i = 0; i < 90; i++) {
+    push(scanned(SENSOR_X_CM[0], 75, 50, 1), scanned(SENSOR_X_CM[1], 75, 50, 1));
+  }
+  for (let i = 0; i < 40; i++) push(scanned(SENSOR_X_CM[0], 75, 50), scanned(SENSOR_X_CM[1], 75, 50));
+
+  // 30. The confidence level (Dynamic's first rule; Aaron, 5 Oct). Each
+  //     entry also carries the node's confidence from the server
+  //     (handover.py), as nodes:update does. The left node, 90 % sure, finds
+  //     the player in front of it (25, 70) while the right one, 30 % sure,
+  //     finds something in the centre: the left node places the player alone.
+  //     Then the other way round, the right node 95 % sure at (125, 70). Then
+  //     both 85 % sure, which leaves it to the other rules; then the left one
+  //     at 75 %, under the level, and the right one with no confidence yet.
+  const withConfidence = (reading, confidence) => [...reading, confidence];
+  for (let i = 0; i < 60; i++) {
+    push(withConfidence(scanned(SENSOR_X_CM[0], 25, 70), 0.9),
+      withConfidence(scanned(SENSOR_X_CM[1], 90, 50), 0.3));
+  }
+  for (let i = 0; i < 60; i++) {
+    push(withConfidence(scanned(SENSOR_X_CM[0], 60, 50), 0.3),
+      withConfidence(scanned(SENSOR_X_CM[1], 125, 70), 0.95));
+  }
+  for (let i = 0; i < 40; i++) {
+    push(withConfidence(scanned(SENSOR_X_CM[0], 75, 90), 0.85),
+      withConfidence(scanned(SENSOR_X_CM[1], 75, 90), 0.85));
+  }
+  for (let i = 0; i < 40; i++) {
+    push(withConfidence(scanned(SENSOR_X_CM[0], 25, 70), 0.75),
+      withConfidence(scanned(SENSOR_X_CM[1], 90, 50), null));
+  }
+
+  // 31. Far priority (Dynamic's rule F; Aaron, 6 Oct). The player stands far
+  //     out, at (90, 140): about 139 cm from the left node and 129 cm from
+  //     the right. As on the rig on 6 Oct, the nodes take 500 ms turns and
+  //     past 110 cm hear the player one reading in five, with one head
+  //     (half); the rest are no echo, sweeping, and a stray nearer half
+  //     echo at 60 cm. With the rule on the player is held at the far
+  //     readings' crossing; off, they come and go.
+  for (let i = 0; i < 200; i++) {
+    const k = i % 5;
+    const sweep = 40 + ((i * 15) % 120);
+    const reading = (nodeX) =>
+      k === 0 ? scanned(nodeX, 90, 140, 1) : k === 3 ? [jitter(60, 2), sweep, 1] : [NO_ECHO, sweep, 2];
+    const leftTurn = Math.floor(i / 25) % 2 === 0;
+    push(leftTurn ? reading(SENSOR_X_CM[0]) : SILENT, leftTurn ? SILENT : reading(SENSOR_X_CM[1]));
+  }
+  //     Then two far readings that do not agree, as on the rig on 6 Oct: the
+  //     left node hears something 113 cm off with its servo at its stop (160
+  //     degrees), the right one something 135 cm straight out. Their
+  //     distances cross nowhere near where the left servo points, so far
+  //     priority leaves them alone. Then both find the player at (75, 80).
+  for (let i = 0; i < 100; i++) {
+    const leftTurn = Math.floor(i / 25) % 2 === 0;
+    const left = i % 2 ? [jitter(113, 1), 160, 1] : [NO_ECHO, 160, 2];
+    const right = i % 2 ? [jitter(135, 1), 85, 1] : [NO_ECHO, 85, 2];
+    push(leftTurn ? left : SILENT, leftTurn ? SILENT : right);
+  }
+  for (let i = 0; i < 60; i++) push(scanned(SENSOR_X_CM[0], 75, 80), scanned(SENSOR_X_CM[1], 75, 80));
+
   return steps;
 }
 
 // --- Run the real JS -----------------------------------------------------------
 
-function runJs(stream, calibration, method) {
+function runJs(stream, calibration, method, kalman = true, dynamicRules = null, angleLimit = true,
+  deadZone = true, farHalf = true, triAimTolerance = true, cellDecision = true, trackMoving = false,
+  cellConfidence = true) {
   let clock = 0;
   const context = {
     console,
@@ -192,6 +373,15 @@ function runJs(stream, calibration, method) {
   }
 
   w.setPositionMethod(method);
+  w.setKalman(kalman);
+  w.setAngleLimit(angleLimit);
+  w.setDeadZone(deadZone);
+  w.setFarHalf(farHalf);
+  w.setTriAimTolerance(triAimTolerance);
+  w.setCellDecision(cellDecision);
+  w.setTrackMoving(trackMoving);
+  w.setCellConfidence(cellConfidence);
+  if (dynamicRules) w.setDynamicRules(dynamicRules);
   w.setGameInputMode("sensor");
   w.resetGame();
   const canvas = { clientWidth: 1280, clientHeight: 720, width: 1280, height: 720 };
@@ -200,18 +390,26 @@ function runJs(stream, calibration, method) {
   const nodes = [node(1), null, node(3)];
 
   const out = [];
+  // The method that placed the player at each step: the run's own, or the one
+  // Dynamic followed.
+  const placedBy = [];
   let stamp = 0;
   stream.forEach((reading, i) => {
     clock = (i + 1) * STEP_MS;
     reading.forEach((value, s) => {
       if (!nodes[s] || value === SILENT) return;
-      // A scanner entry is [distance, angle, scanState]; a plain number has
-      // neither. Each message gets a new server stamp, as last_seen does.
-      const [distance, angle, state] = Array.isArray(value) ? value : [value, undefined, undefined];
+      // A scanner entry is [distance, angle, scanState], and from segment 29
+      // the node's confidence as well; a plain number has none of them. Each
+      // message gets a new server stamp, as last_seen does. The confidence
+      // rides on the node record, as the server sends it (a ready one, or
+      // none).
+      const [distance, angle, state, confidence] = Array.isArray(value) ? value : [value];
       const payload = { avg: distance === NO_ECHO ? -1 : distance };
       if (angle !== undefined) payload.angle = angle;
       if (state !== undefined) payload.scanState = state;
       nodes[s].latest = JSON.stringify(payload);
+      nodes[s].confidence = confidence === undefined || confidence === null ? null
+        : { score: confidence, ready: true };
       stamp += 1;
       nodes[s].last_seen = stamp;
     });
@@ -232,17 +430,35 @@ function runJs(stream, calibration, method) {
       (s.fresh || [true, true, true]).map((f) => (f ? 1 : 0)),
       s.status === "ok" ? round6(s.xCm) : null,
       s.status === "ok" ? round6(s.yCm) : null,
+      s.moving ? 1 : 0,
+      confidenceTop(s.cellConfidence),
     ]);
+    placedBy.push(s.placedBy ?? null);
   });
-  return { calibration: effective, steps: out };
+  return { calibration: effective, steps: out, placedBy };
 }
 
 const FIELDS = ["status", "gx", "gy", "rawGx", "rawGy", "column", "held", "heldFor", "filtered",
-  "fresh", "x", "y"];
+  "fresh", "x", "y", "moving", "confTop"];
+
+// The most confident cell and its score, [gx * 3 + gy, score to 6 places]
+// (the first of a tie), or null when no cell has any: enough to check the
+// cell confidence without nine numbers a step.
+function confidenceTop(scores) {
+  if (!Array.isArray(scores)) return null;
+  let best = 0;
+  scores.forEach((score, i) => { if (score > scores[best]) best = i; });
+  return scores[best] > 0 ? [best, round6(scores[best])] : null;
+}
 
 const stream = buildStream();
+const RULES_OFF = { farPriority: false, confidenceNode: false, columnLock: false, loneNode: false, cornerNode: false };
+const FAR_PRIORITY_OFF = { farPriority: false };
 // [near, far] per column; the centre entry is ignored (no centre sensor to capture it).
 const calibrated = [[28.47, 140.68], [20.44, 138.26], [10.89, 145.81]];
+// A far edge past 150 cm, as on a 150 cm board starting 10 cm in front of the
+// nodes: the far corners must still be capturable.
+const deepCalibrated = [[12.3, 160.4], [11, 160], [10.6, 158.7]];
 
 const trace = {
   generatedBy: "Website/tests/generate_parity_trace.js",
@@ -250,12 +466,64 @@ const trace = {
   fields: FIELDS,
   stream,
   // One run per position method (the game's switch), on the default bounds,
-  // plus line of sight on calibrated bounds.
+  // plus line of sight and Dynamic on calibrated bounds, and both with the
+  // Kalman switch off.
   runs: {
     default: { method: "los", ...runJs(stream, null, "los") },
     calibrated: { method: "los", ...runJs(stream, calibrated, "los") },
     trilateration: { method: "tri", ...runJs(stream, null, "tri") },
+    trilaterationDeep: { method: "tri", ...runJs(stream, deepCalibrated, "tri") },
     average: { method: "avg", ...runJs(stream, null, "avg") },
+    dynamic: { method: "dyn", ...runJs(stream, null, "dyn") },
+    dynamicCalibrated: { method: "dyn", ...runJs(stream, calibrated, "dyn") },
+    kalmanOff: { method: "los", kalman: false, ...runJs(stream, null, "los", false) },
+    kalmanOffDynamic: { method: "dyn", kalman: false, ...runJs(stream, null, "dyn", false) },
+    // Dynamic with all its rules switched off: the steadiest method only.
+    dynamicRulesOff: { method: "dyn", dynamicRules: RULES_OFF, ...runJs(stream, null, "dyn", true, RULES_OFF) },
+    // Dynamic with far priority off: far readings come and go with the noise.
+    farPriorityOff: {
+      method: "dyn", dynamicRules: FAR_PRIORITY_OFF, ...runJs(stream, null, "dyn", true, FAR_PRIORITY_OFF),
+    },
+    // Line of sight and Dynamic with the angle limit off: every reading counts.
+    angleLimitOff: { method: "los", angleLimit: false, ...runJs(stream, null, "los", true, null, false) },
+    angleLimitOffDynamic: { method: "dyn", angleLimit: false, ...runJs(stream, null, "dyn", true, null, false) },
+    // Line of sight and Dynamic with the dead zone off: too close by the raw
+    // reading, whatever the angle.
+    deadZoneOff: { method: "los", deadZone: false, ...runJs(stream, null, "los", true, null, true, false) },
+    deadZoneOffDynamic: { method: "dyn", deadZone: false, ...runJs(stream, null, "dyn", true, null, true, false) },
+    // Dynamic with far half off: a half reading in the back row scores 0.
+    farHalfOff: { method: "dyn", farHalf: false, ...runJs(stream, null, "dyn", true, null, true, true, false) },
+    // Trilateration and Dynamic with the aim tolerance off: the beam check
+    // holds a crossing to the beam alone.
+    triAimToleranceOff: {
+      method: "tri", triAimTolerance: false,
+      ...runJs(stream, null, "tri", true, null, true, true, true, false),
+    },
+    triAimToleranceOffDynamic: {
+      method: "dyn", triAimTolerance: false,
+      ...runJs(stream, null, "dyn", true, null, true, true, true, false),
+    },
+    // Dynamic and line of sight with the cell decision off: the vote decides.
+    cellDecisionOff: {
+      method: "dyn", cellDecision: false,
+      ...runJs(stream, null, "dyn", true, null, true, true, true, true, false),
+    },
+    cellDecisionOffLos: {
+      method: "los", cellDecision: false,
+      ...runJs(stream, null, "los", true, null, true, true, true, true, false),
+    },
+    // Dynamic with tracking on (off by default): the cell decision dwells
+    // less while the player moves.
+    trackMovingOn: {
+      method: "dyn", trackMoving: true,
+      ...runJs(stream, null, "dyn", true, null, true, true, true, true, true, true),
+    },
+    // Dynamic with cell confidence off: the cell decision ignores it (it is
+    // still kept).
+    cellConfidenceOff: {
+      method: "dyn", cellConfidence: false,
+      ...runJs(stream, null, "dyn", true, null, true, true, true, true, true, false, false),
+    },
   },
 };
 

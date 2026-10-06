@@ -154,7 +154,9 @@ class BrokerTestCase(unittest.TestCase):
 
     def setUp(self):
         self._saved = (dict(app.nodes), app.next_node_id, app.sync_tick,
-                       set(app.BROWSER_CONNECTIONS), app.WS_LOOP)
+                       set(app.BROWSER_CONNECTIONS), app.WS_LOOP, app.handover, app.search)
+        app.handover = app.Handover()
+        app.search = app.Search()
         app.nodes.clear()
         app.next_node_id = 1
         app.sync_tick = 0
@@ -165,7 +167,9 @@ class BrokerTestCase(unittest.TestCase):
 
     def tearDown(self):
         self._quiet.__exit__(None, None, None)
-        nodes, next_id, tick, browsers, loop = self._saved
+        nodes, next_id, tick, browsers, loop, handover, search = self._saved
+        app.handover = handover
+        app.search = search
         app.nodes.clear()
         app.nodes.update(nodes)
         app.next_node_id = next_id
@@ -403,7 +407,8 @@ class NodeRegistryTests(BrokerTestCase):
         app.update_node(node_id, '{"avg":12.5}')
         fields = set(app.serialize_node(app.nodes[node_id]))
         self.assertEqual(fields, {"id", "address", "latest", "filtered_distance",
-                                  "online", "last_seen", "rps", "synced", "has_turn"})
+                                  "online", "last_seen", "rps", "synced", "has_turn",
+                                  "confidence", "search"})
 
 
 class HandshakeTests(BrokerTestCase):
@@ -625,6 +630,30 @@ class ReadingPipelineTests(BrokerTestCase):
         app.update_distance(node, {"avg": -1}, t)
         self.assertEqual(node["filtered_distance"], 50.0)
         self.assertNotIn(-1.0, node["median_samples"])
+
+    def test_a_non_finite_reading_leaves_the_distance_alone(self):
+        """NaN or +/-inf is missing, like no echo: it never enters the median
+        window, where it would turn the median and the Kalman's input NaN."""
+        for bad in (float("nan"), float("inf"), float("-inf"), "nan", "inf", "-inf"):
+            with self.subTest(bad=bad):
+                _, node = self.add_node()
+                t = self.feed_at(node, [50.0] * 3)
+                window = list(node["median_samples"])
+                history = list(node["distance_samples"])
+                app.update_distance(node, {"avg": bad}, t)
+                self.assertEqual(node["filtered_distance"], 50.0)
+                self.assertEqual(list(node["median_samples"]), window)
+                self.assertEqual(list(node["distance_samples"]), history)
+
+    def test_a_non_finite_json_reading_leaves_the_distance_alone(self):
+        """Python's json reads the NaN and Infinity literals a node could send."""
+        node_id, node = self.add_node()
+        app.update_node(node_id, '{"avg":7}')
+        for bad in ('{"avg":NaN}', '{"avg":Infinity}', '{"avg":-Infinity}'):
+            with self.subTest(bad=bad):
+                app.update_node(node_id, bad)
+                self.assertEqual(node["filtered_distance"], 7.0)
+                self.assertEqual(list(node["median_samples"]), [7.0])
 
     def test_a_gap_starts_the_windows_again(self):
         """A node that waited out the other node's turn starts afresh rather
@@ -1380,12 +1409,12 @@ class NodeRoleTests(BrokerTestCase):
         app.assign_node_roles([1, None, None])
         conn = FakeNodeSocket(b"\r\n")
         app.handle_node_connection(conn, ("10.0.0.1", 1000))
-        self.assertEqual(conn.sent, ["1\n", "SCAN\n", "ROLE LEFT\n", "PULSES 1\n"])
+        self.assertEqual(conn.sent, ["1\n", "SCAN\n", "ROLE LEFT\n", "PULSES 1\n", "FARHOLD 1\n", "FARSTEER 1\n"])
 
     def test_a_node_without_a_role_is_sent_none(self):
         conn = FakeNodeSocket(b"\r\n")
         app.handle_node_connection(conn, ("10.0.0.1", 1000))
-        self.assertEqual(conn.sent, ["1\n", "SCAN\n", "PULSES 1\n"])
+        self.assertEqual(conn.sent, ["1\n", "SCAN\n", "PULSES 1\n", "FARHOLD 1\n", "FARSTEER 1\n"])
 
     def test_bad_slots_are_ignored(self):
         app.assign_node_roles([1, 2])
@@ -1433,20 +1462,20 @@ class NodeAimTests(BrokerTestCase):
         app.set_nodes_aim(True)
         conn = FakeNodeSocket(b"\r\n")
         app.handle_node_connection(conn, ("10.0.0.1", 1000))
-        self.assertEqual(conn.sent, ["1\n", "AIM 90\n", "PULSES 1\n"])
+        self.assertEqual(conn.sent, ["1\n", "AIM 90\n", "PULSES 1\n", "FARHOLD 1\n", "FARSTEER 1\n"])
 
     def test_a_node_that_connects_while_nobody_calibrates_is_told_to_scan(self):
         # It boots holding straight, so it only sweeps once told to.
         conn = FakeNodeSocket(b"\r\n")
         app.handle_node_connection(conn, ("10.0.0.1", 1000))
-        self.assertEqual(conn.sent, ["1\n", "SCAN\n", "PULSES 1\n"])
+        self.assertEqual(conn.sent, ["1\n", "SCAN\n", "PULSES 1\n", "FARHOLD 1\n", "FARSTEER 1\n"])
 
     def test_the_hold_is_sent_before_the_role(self):
         app.set_nodes_aim(True)
         app.assign_node_roles([1, None, None])
         conn = FakeNodeSocket(b"\r\n")
         app.handle_node_connection(conn, ("10.0.0.1", 1000))
-        self.assertEqual(conn.sent, ["1\n", "AIM 90\n", "ROLE LEFT\n", "PULSES 1\n"])
+        self.assertEqual(conn.sent, ["1\n", "AIM 90\n", "ROLE LEFT\n", "PULSES 1\n", "FARHOLD 1\n", "FARSTEER 1\n"])
 
     def test_another_page_off_the_calibration_screen_cannot_release_the_hold(self):
         _, node = self.add_node(conn=RecordingConn())
@@ -1518,7 +1547,7 @@ class NodePulsesTests(BrokerTestCase):
         app.set_nodes_pulse_count(2)
         conn = FakeNodeSocket(b"\r\n")
         app.handle_node_connection(conn, ("10.0.0.1", 1000))
-        self.assertEqual(conn.sent, ["1\n", "SCAN\n", "PULSES 2\n"])
+        self.assertEqual(conn.sent, ["1\n", "SCAN\n", "PULSES 2\n", "FARHOLD 1\n", "FARSTEER 1\n"])
 
     def test_a_bad_count_is_ignored(self):
         _, node = self.add_node(conn=RecordingConn())
@@ -1535,6 +1564,63 @@ class NodePulsesTests(BrokerTestCase):
             asyncio.run(app.browser_handler(socket))
         self.assertEqual(node["conn"].sent, ["PULSES 3\n"])
         self.assertEqual(app.nodes_pulse_count, 3)
+
+
+class NodeFarTests(BrokerTestCase):
+    """Far hold and far steer (Aaron, 6 Oct): the control panel's switches
+    reach the scanner nodes' firmware (FARHOLD / FARSTEER)."""
+
+    def setUp(self):
+        super().setUp()
+        self._saved_far = dict(app.nodes_far)
+        app.nodes_far.update(hold=True, steer=True)
+
+    def tearDown(self):
+        app.nodes_far.update(self._saved_far)
+        super().tearDown()
+
+    def test_both_are_on_until_switched(self):
+        self.assertEqual(app.far_message(), {"type": "far:status", "hold": True, "steer": True})
+
+    def test_a_switch_reaches_every_connected_node(self):
+        _, first = self.add_node(conn=RecordingConn())
+        _, second = self.add_node(address=("10.0.0.2", 1001), conn=RecordingConn())
+        with mock.patch("builtins.print"):
+            self.assertTrue(app.set_nodes_far("hold", False))
+            self.assertTrue(app.set_nodes_far("steer", False))
+            self.assertTrue(app.set_nodes_far("hold", True))
+        for node in (first, second):
+            self.assertEqual(node["conn"].sent, ["FARHOLD 0\n", "FARSTEER 0\n", "FARHOLD 1\n"])
+        self.assertEqual(app.far_message(), {"type": "far:status", "hold": True, "steer": False})
+
+    def test_a_node_that_connects_later_is_told_the_current_switches(self):
+        with mock.patch("builtins.print"):
+            app.set_nodes_far("steer", False)
+        conn = FakeNodeSocket(b"\r\n")
+        app.handle_node_connection(conn, ("10.0.0.1", 1000))
+        self.assertEqual(conn.sent[-2:], ["FARHOLD 1\n", "FARSTEER 0\n"])
+
+    def test_a_bad_switch_is_ignored(self):
+        _, node = self.add_node(conn=RecordingConn())
+        with mock.patch("builtins.print"):
+            for switch, on in (("hold", "no"), ("hold", 0), ("steer", None), ("pulses", False)):
+                self.assertFalse(app.set_nodes_far(switch, on))
+        self.assertEqual(node["conn"].sent, [])
+        self.assertEqual(app.far_message(), {"type": "far:status", "hold": True, "steer": True})
+
+    def test_the_control_panel_switches_go_straight_to_the_nodes(self):
+        # No game page needed: the server tells the nodes and answers every
+        # control panel with far:status, and nothing goes to the browsers.
+        _, node = self.add_node(conn=RecordingConn())
+        events = [{"action": "farHold", "enabled": False}, {"action": "farSteer", "enabled": False}]
+        phone = FakeControlSocket(path="/control", incoming=[json.dumps(e) for e in events])
+        with mock.patch.object(app, "broadcast") as broadcast, mock.patch("builtins.print"):
+            asyncio.run(app.control_handler(phone))
+        self.assertEqual(node["conn"].sent, ["FARHOLD 0\n", "FARSTEER 0\n"])
+        self.assertIn(json.dumps({"type": "far:status", "hold": True, "steer": True}), phone.sent)
+        statuses = [json.loads(call.args[1]) for call in broadcast.call_args_list]
+        self.assertEqual(statuses[-1], {"type": "far:status", "hold": False, "steer": False})
+        self.assertTrue(all(status["type"] == "far:status" for status in statuses))
 
 
 class FakeControlSocket(FakeBrowserSocket):
@@ -1557,8 +1643,61 @@ class ControlPanelTests(BrokerTestCase):
         sent = self.relayed({"action": "position", "method": "tri"})
         self.assertEqual(sent, [{"action": "position", "method": "tri", "type": "remote:command"}])
 
+    def test_the_compare_switch_is_relayed_to_the_game(self):
+        sent = self.relayed({"action": "compare", "enabled": False})
+        self.assertEqual(sent, [{"action": "compare", "enabled": False, "type": "remote:command"}])
+
+    def test_the_kalman_switch_is_relayed_to_the_game(self):
+        sent = self.relayed({"action": "kalman", "enabled": False})
+        self.assertEqual(sent, [{"action": "kalman", "enabled": False, "type": "remote:command"}])
+
+    def test_the_angle_limit_switch_is_relayed_to_the_game(self):
+        sent = self.relayed({"action": "angleLimit", "enabled": False})
+        self.assertEqual(sent, [{"action": "angleLimit", "enabled": False, "type": "remote:command"}])
+
+    def test_the_tri_aim_tolerance_switch_is_relayed_to_the_game(self):
+        sent = self.relayed({"action": "triAimTolerance", "enabled": False})
+        self.assertEqual(sent, [{"action": "triAimTolerance", "enabled": False, "type": "remote:command"}])
+
+    def test_the_dead_zone_switch_is_relayed_to_the_game(self):
+        sent = self.relayed({"action": "deadZone", "enabled": False})
+        self.assertEqual(sent, [{"action": "deadZone", "enabled": False, "type": "remote:command"}])
+
+    def test_the_cell_confidence_switch_is_relayed_to_the_game(self):
+        sent = self.relayed({"action": "cellConfidence", "enabled": False})
+        self.assertEqual(sent, [{"action": "cellConfidence", "enabled": False, "type": "remote:command"}])
+
+    def test_the_tracking_switch_is_relayed_to_the_game(self):
+        sent = self.relayed({"action": "trackMoving", "enabled": False})
+        self.assertEqual(sent, [{"action": "trackMoving", "enabled": False, "type": "remote:command"}])
+
+    def test_the_cell_decision_switch_is_relayed_to_the_game(self):
+        sent = self.relayed({"action": "cellDecision", "enabled": False})
+        self.assertEqual(sent, [{"action": "cellDecision", "enabled": False, "type": "remote:command"}])
+
+    def test_the_cell_lock_switch_is_relayed_to_the_game(self):
+        sent = self.relayed({"action": "cellLock", "enabled": False})
+        self.assertEqual(sent, [{"action": "cellLock", "enabled": False, "type": "remote:command"}])
+
+    def test_the_too_close_hold_is_relayed_to_the_game(self):
+        for on in (True, False):
+            sent = self.relayed({"action": "tooCloseHold", "on": on})
+            self.assertEqual(sent, [{"action": "tooCloseHold", "on": on, "type": "remote:command"}])
+
+    def test_dynamic_rule_switches_are_relayed_to_the_game(self):
+        sent = self.relayed({"action": "dynamicRules", "rules": {"loneNode": False}})
+        self.assertEqual(sent, [{"action": "dynamicRules", "rules": {"loneNode": False},
+                                 "type": "remote:command"}])
+
     def test_an_unknown_action_is_not_relayed(self):
         self.assertEqual(self.relayed({"action": "selfDestruct"}), [])
+
+    def test_learn_and_forget_room_go_straight_to_the_nodes(self):
+        _, node = self.add_node(conn=RecordingConn())
+        sent = self.relayed({"action": "room", "room": "forget"}, {"action": "room", "room": "learn"},
+                            {"action": "room", "room": "wipe"})
+        self.assertEqual(sent, [], "the game page is not needed for the room")
+        self.assertEqual(node["conn"].sent, ["FORGET\n", "LEARN\n"])
 
 
 class ScanStateTests(unittest.TestCase):

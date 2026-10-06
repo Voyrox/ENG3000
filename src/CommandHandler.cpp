@@ -46,12 +46,26 @@ void CommandHandler::handle(const String& line) {
         int degrees = line.substring(4).toInt();
         scanner_.holdAt(degrees);
         Serial.printf("Servo held at %d\n", degrees);
+    } else if (line.startsWith("LOOK ")) {
+        // The other node is confident where the player is: turn towards them
+        // and track from there. Unlike AIM, the servo is not held.
+        int degrees = line.substring(5).toInt();
+        scanner_.lookAt(degrees);
+        Serial.printf("Looking towards %d\n", degrees);
     } else if (line == "SCAN") {
         scanner_.resumeScanning();
         Serial.println("Scanning resumed");
     } else if (line.startsWith("PULSES ")) {
         scanner_.setPulsesPerAngle(line.substring(7).toInt());
         Serial.printf("Pulses per angle: %d\n", scanner_.pulsesPerAngle());
+    } else if (line.startsWith("FARHOLD ")) {
+        // The control panel's Far hold switch: 1 on, 0 off (see Config.h).
+        scanner_.setFarHold(line.substring(8).toInt() != 0);
+        Serial.printf("Far hold: %s\n", scanner_.farHold() ? "on" : "off");
+    } else if (line.startsWith("FARSTEER ")) {
+        // The control panel's Far steer switch: 1 on, 0 off (see Config.h).
+        scanner_.setFarSteer(line.substring(9).toInt() != 0);
+        Serial.printf("Far steer: %s\n", scanner_.farSteer() ? "on" : "off");
     } else if (line == "LEARN") {
         if (scanner_.learnRoom()) {
             Serial.println("Learning the room: keep the play area clear");

@@ -5,17 +5,22 @@
 // is from where they really are, for each position method:
 //
 //     node Website/tools/simulate_positions.js
-//     node Website/tools/simulate_positions.js --methods los,tri --turn-ms 1000,250
+//     node Website/tools/simulate_positions.js --methods dyn,los --turn-ms 1000,250
 //     node Website/tools/simulate_positions.js --site path/to/other/public --seeds 5
 //
-// The rig: nodes at x = 25 and 125 cm on the screen line. A node scans only in
-// its turn (the server's TURN / HALT), reading every 66 ms. A head sees the
-// player within BEAM_DEG of the servo's aim, both heads within BOTH_DEG
-// (found), one of them otherwise (half-found); the firmware's servo steps
-// 3 degrees towards the player when half-found and sweeps 14 degrees when
-// lost. Distances carry 2 cm of noise. A --furniture x,y adds an object the
-// beam can find instead of the player. The player walks a tour of the board at
-// 60 cm/s, pausing at each stop.
+// The rig: nodes at x = 25 and 125 cm on the screen line, their servo angles
+// turning towards screen-right as they grow (as the rig's do). A node scans
+// only in its turn (the server's TURN / HALT), reading every 66 ms. The
+// player is a body --body-half-width-cm either side of their middle (default
+// 20): a head sees them while any of it is within BEAM_DEG of the servo's aim,
+// both heads within BOTH_DEG (found), one of them otherwise (half-found), and
+// the echo comes off the near side of them, --body-radius-cm short of their
+// middle (default 15; 0 and 0 make the player a point). The firmware's servo
+// steps 3 degrees towards the player when half-found and sweeps 14 degrees
+// when lost. Distances carry 2 cm of noise. A --furniture x,y adds an object
+// (a point) the beam can find instead of the player. The player walks a tour
+// of the board at 60 cm/s, pausing at each stop. --tune '{"bodyRadiusCm": 0}'
+// passes settings to the game's tuneSensor() first.
 //
 // Reported per method: median and 90th percentile position error (cm) over the
 // frames with a position, and the share of frames in the right cell. Scores
@@ -32,11 +37,14 @@ const option = (name, fallback) => {
   return at === -1 ? fallback : args[at + 1];
 };
 const SITE = option("site", path.join(__dirname, "..", "public"));
-const METHODS = option("methods", "los,tri,avg").split(",");
+const METHODS = option("methods", "dyn,los,tri,avg").split(",");
 const TURNS_MS = option("turn-ms", "1000,0").split(",").map(Number);   // 0 = both nodes at once
 const SEEDS = Number(option("seeds", "3"));
 const DURATION_S = Number(option("duration", "45"));
 const FURNITURE = option("furniture", null);
+const BODY_RADIUS_CM = Number(option("body-radius-cm", "15"));
+const BODY_HALF_WIDTH_CM = Number(option("body-half-width-cm", "20"));
+const TUNE = JSON.parse(option("tune", "{}"));
 
 const NODE_X = [25, null, 125];
 const BEAM_DEG = 15;
@@ -89,13 +97,16 @@ function loadGame() {
 function scan(slot, servo, player, furniture, rand) {
   const gauss = () => Math.sqrt(-2 * Math.log(rand() || 1e-9)) * Math.cos(2 * Math.PI * rand());
   const nodeX = NODE_X[slot];
-  const bearingTo = ([x, y]) => 90 + (Math.atan2(nodeX - x, y) * 180) / Math.PI;
+  const bearingTo = ([x, y]) => 90 + (Math.atan2(x - nodeX, y) * 180) / Math.PI;
   const aim = servo[slot];
   let distance = -1;
   let state = 2;
-  const off = Math.abs(bearingTo(player) - aim);
+  const reach = Math.hypot(player[0] - nodeX, player[1]);
+  // How far either side of the player's middle their body reaches, seen from the node.
+  const bodyDeg = (Math.atan2(BODY_HALF_WIDTH_CM, reach) * 180) / Math.PI;
+  const off = Math.max(0, Math.abs(bearingTo(player) - aim) - bodyDeg);
   if (off <= BEAM_DEG) {
-    distance = Math.hypot(player[0] - nodeX, player[1]) + 2 * gauss();
+    distance = Math.max(2, reach - BODY_RADIUS_CM) + 2 * gauss();
     state = off <= BOTH_DEG ? 0 : 1;
   } else if (furniture) {
     const furnitureOff = Math.abs(bearingTo(furniture) - aim);
@@ -121,7 +132,12 @@ function run(method, turnMs, seed) {
   const { game, setClock } = loadGame();
   const rand = lcg(seed);
   const canvas = { clientWidth: 1280, clientHeight: 720, width: 1280, height: 720 };
-  if (game.setPositionMethod) game.setPositionMethod(method);
+  // An older game (--site) without this method would quietly keep its own and
+  // be scored under the wrong name.
+  if (game.setPositionMethod && game.setPositionMethod(method) !== method) {
+    throw new Error(`this game has no position method "${method}"`);
+  }
+  if (Object.keys(TUNE).length) game.tuneSensor(TUNE);
   game.setGameInputMode("sensor");
   game.resetGame();
   const nodes = [{ id: 1, online: true, latest: null }, null, { id: 3, online: true, latest: null }];
@@ -132,7 +148,7 @@ function run(method, turnMs, seed) {
   let rightCell = 0;
   let stamp = 0;
   let nextMessage = 0;
-  const rowOf = (y) => (y < 60 ? 0 : y < 100 ? 1 : 2);   // default bounds, 20-140 cm
+  const rowOf = (y) => (y < 60 ? 0 : y < 110 ? 1 : 2);   // default bounds, 10-160 cm
   const columnOf = (x) => Math.max(0, Math.min(2, Math.floor(x / 50)));
 
   for (let t = 0; t < DURATION_S * 1000; t += FRAME_MS) {

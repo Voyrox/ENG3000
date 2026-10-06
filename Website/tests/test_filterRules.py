@@ -19,6 +19,7 @@ Standard library only:
 
 import json
 import math
+from dataclasses import replace
 import os
 import sys
 import unittest
@@ -32,21 +33,33 @@ from filterRules import (  # noqa: E402
     STATUS_OUT_OF_BOUNDS,
     STATUS_TOO_CLOSE,
     CartesianGeometry,
+    CellConfidence,
+    CellDecider,
     CellStabiliser,
+    MotionDetector,
     ChannelFilter,
     CoordinatePipeline,
+    DYNAMIC_RULE_SWITCHES,
+    DynamicPicker,
     FilterConfig,
+    GRID_LENGTH_CM,
+    LOST_READINGS_MAX,
     MajorityWindowHold,
+    OFF_BOARD,
     PlayArea,
     ProximityGuard,
     StreakHold,
     TwoSensorGeometry,
     UltrasonicArrayGeometry,
+    angle_limit_cm,
+    body_centre_cm,
     fft_lowpass_last,
     in_beam,
     in_sensor_range,
     line_of_sight,
+    lost_score,
     scanner_point,
+    within_angle_limit,
 )
 from tracking import ConstantVelocityTracker  # noqa: E402
 
@@ -67,7 +80,19 @@ class ParityWithGameJs(unittest.TestCase):
         fields = self.trace["fields"]
         area = (PlayArea.calibrated(run["calibration"]) if run["calibration"]
                 else PlayArea.default())
-        pipeline = CoordinatePipeline(TwoSensorGeometry(method=run["method"]), area=area)
+        # Dynamic's rule switches, as the run set them (setDynamicRules()).
+        switches = run.get("dynamicRules") or {}
+        config = FilterConfig(kalman=run.get("kalman", True),
+                              angle_limit=run.get("angleLimit", True),
+                              dead_zone=run.get("deadZone", True),
+                              far_half=run.get("farHalf", True),
+                              tri_aim_tolerance=run.get("triAimTolerance", True),
+                              cell_decision=run.get("cellDecision", True),
+                              track_moving=run.get("trackMoving", False),
+                              cell_confidence=run.get("cellConfidence", True),
+                              **{DYNAMIC_RULE_SWITCHES[name]: on for name, on in switches.items()})
+        pipeline = CoordinatePipeline(TwoSensorGeometry(method=run["method"]), area=area,
+                                      config=config)
 
         # A node that is "silent" for a step sent nothing: its last reading
         # stands, as the server keeps it, and the recorded fresh mask (what
@@ -80,7 +105,10 @@ class ParityWithGameJs(unittest.TestCase):
                 if entry != SILENT:
                     latest[slot] = entry
             fresh = [bool(f) for f in expected["fresh"]]
-            got = pipeline.update(list(latest), now_ms, fresh=fresh)
+            # Heard: the nodes that sent something this step (game.js: a new
+            # last_seen stamp), so each scan state counts once.
+            heard = [entry != SILENT for entry in reading]
+            got = pipeline.update(list(latest), now_ms, fresh=fresh, heard=heard)
             where = f"{run_name} step {i}, reading {reading}"
 
             self.assertEqual(got.status, expected["status"], where)
@@ -88,6 +116,17 @@ class ParityWithGameJs(unittest.TestCase):
             self.assertEqual(got.column, expected["column"], where)
             self.assertEqual(got.held, bool(expected["held"]), where)
             self.assertEqual(got.held_for, expected["heldFor"], where)
+            self.assertEqual(got.moving, bool(expected["moving"]), f"{where}, moving")
+            if got.status == STATUS_OK:
+                top = expected["confTop"]
+                scores = got.cell_confidence
+                best = max(range(9), key=lambda i: (scores[i], -i))
+                if top is None:
+                    self.assertEqual(max(scores), 0, f"{where}, cell confidence")
+                else:
+                    self.assertEqual(best, top[0], f"{where}, most confident cell")
+                    self.assertAlmostEqual(scores[best], top[1], delta=2e-6,
+                                           msg=f"{where}, cell confidence")
             # The raw cell is only reported on a fresh, un-held ok.
             if got.status == STATUS_OK and not got.held:
                 self.assertEqual((got.raw_gx, got.raw_gy),
@@ -101,6 +140,10 @@ class ParityWithGameJs(unittest.TestCase):
             if got.status == STATUS_OK:
                 self.assertAlmostEqual(got.x_cm, expected["x"], delta=2e-6, msg=f"{where}, x")
                 self.assertAlmostEqual(got.y_cm, expected["y"], delta=2e-6, msg=f"{where}, y")
+            # And which method placed them: the run's own, or the one Dynamic
+            # followed.
+            self.assertEqual(pipeline.geometry.placed_by(got.filtered, area),
+                             run["placedBy"][i], f"{where}, placed by")
         return len(run["steps"])
 
     def test_default_bounds(self):
@@ -112,8 +155,113 @@ class ParityWithGameJs(unittest.TestCase):
     def test_trilateration(self):
         self.assertGreater(self._replay("trilateration"), 0)
 
+    def test_trilateration_with_the_far_edge_past_150_cm(self):
+        self.assertGreater(self._replay("trilaterationDeep"), 0)
+
     def test_average_of_line_of_sight_and_trilateration(self):
         self.assertGreater(self._replay("average"), 0)
+
+    def test_dynamic(self):
+        self.assertGreater(self._replay("dynamic"), 0)
+
+    def test_dynamic_on_calibrated_bounds(self):
+        self.assertGreater(self._replay("dynamicCalibrated"), 0)
+
+    def test_line_of_sight_with_the_kalman_off(self):
+        self.assertGreater(self._replay("kalmanOff"), 0)
+
+    def test_dynamic_with_the_kalman_off(self):
+        self.assertGreater(self._replay("kalmanOffDynamic"), 0)
+
+    def test_line_of_sight_with_the_angle_limit_off(self):
+        self.assertGreater(self._replay("angleLimitOff"), 0)
+
+    def test_dynamic_with_the_angle_limit_off(self):
+        self.assertGreater(self._replay("angleLimitOffDynamic"), 0)
+
+    def test_line_of_sight_with_the_dead_zone_off(self):
+        self.assertGreater(self._replay("deadZoneOff"), 0)
+
+    def test_dynamic_with_the_dead_zone_off(self):
+        self.assertGreater(self._replay("deadZoneOffDynamic"), 0)
+
+    def test_dynamic_with_far_half_off(self):
+        self.assertGreater(self._replay("farHalfOff"), 0)
+
+    def test_trilateration_with_the_aim_tolerance_off(self):
+        self.assertGreater(self._replay("triAimToleranceOff"), 0)
+
+    def test_dynamic_with_the_aim_tolerance_off(self):
+        self.assertGreater(self._replay("triAimToleranceOffDynamic"), 0)
+
+    def test_dynamic_with_the_cell_decision_off(self):
+        self.assertGreater(self._replay("cellDecisionOff"), 0)
+
+    def test_line_of_sight_with_the_cell_decision_off(self):
+        self.assertGreater(self._replay("cellDecisionOffLos"), 0)
+
+    def test_dynamic_with_cell_confidence_off(self):
+        self.assertGreater(self._replay("cellConfidenceOff"), 0)
+
+    def test_the_stream_builds_some_cell_confidence(self):
+        tops = [row[self.trace["fields"].index("confTop")] for row in self.trace["runs"]["dynamic"]["steps"]]
+        self.assertTrue(any(top and top[1] > 0.5 for top in tops))
+
+    def test_dynamic_with_tracking_on(self):
+        self.assertGreater(self._replay("trackMovingOn"), 0)
+
+    def test_the_stream_has_the_player_moving_and_still(self):
+        moving = {row[self.trace["fields"].index("moving")] for row in self.trace["runs"]["dynamic"]["steps"]}
+        self.assertEqual(moving, {0, 1}, "the detector must say both somewhere on the stream")
+
+    def test_the_cell_decision_runs_differ_from_the_vote_somewhere(self):
+        on = [(row[1], row[2]) for row in self.trace["runs"]["dynamic"]["steps"]]
+        off = [(row[1], row[2]) for row in self.trace["runs"]["cellDecisionOff"]["steps"]]
+        self.assertNotEqual(on, off, "the switch must change the cell somewhere on the stream")
+
+    def test_far_half_keeps_a_back_row_player_in_play_on_the_recorded_stream(self):
+        # Segment 28: half readings in the back row are Out of bounds only
+        # with far half off; segment 29's, in the front row, either way.
+        runs = self.trace["runs"]
+        status = self.trace["fields"].index("status")
+        only_off = sum(1 for on, off in zip(runs["dynamic"]["steps"], runs["farHalfOff"]["steps"])
+                       if off[status] == "out-of-bounds" and on[status] != "out-of-bounds")
+        only_on = sum(1 for on, off in zip(runs["dynamic"]["steps"], runs["farHalfOff"]["steps"])
+                      if on[status] == "out-of-bounds" and off[status] != "out-of-bounds")
+        self.assertGreater(only_off, 50)
+        self.assertEqual(only_on, 0)
+
+    def test_the_kalman_switch_changes_the_recorded_stream(self):
+        # Otherwise the two runs above would not show the switch doing anything.
+        runs = self.trace["runs"]
+        filtered = self.trace["fields"].index("filtered")
+        at = self.trace["fields"].index("x")
+        smoothing = sum(1 for a, b in zip(runs["default"]["steps"], runs["kalmanOff"]["steps"])
+                        if a[filtered] != b[filtered])
+        placed = sum(1 for a, b in zip(runs["default"]["steps"], runs["kalmanOff"]["steps"])
+                     if a[at] is not None and b[at] is not None and abs(a[at] - b[at]) > 1.0)
+        self.assertGreater(smoothing, 50, "the distances should differ without the Kalman")
+        self.assertGreater(placed, 50, "line of sight should place the player differently")
+
+    def test_dynamic_with_far_priority_off(self):
+        self.assertGreater(self._replay("farPriorityOff"), 0)
+
+    def test_dynamic_with_its_rules_switched_off(self):
+        self.assertGreater(self._replay("dynamicRulesOff"), 0)
+        followed = set(self.trace["runs"]["dynamicRulesOff"]["placedBy"]) - {None}
+        self.assertLessEqual(followed, {"los", "tri", "avg"})
+
+    def test_dynamic_follows_every_method_and_rule_somewhere_on_the_recorded_stream(self):
+        # Otherwise the parity above would not show the picker and the rules
+        # agreeing. Since the centre hold, the centre rule takes the stretches
+        # where the picker used to follow the average, so only two of the
+        # methods are required (DynamicPickerBehaviour covers the average).
+        for run in ("dynamic", "dynamicCalibrated"):
+            followed = set(self.trace["runs"][run]["placedBy"]) - {None}
+            self.assertLessEqual({"far", "conf-left", "conf-right", "corner-left", "corner-right",
+                                  "centre", "lock-left", "lock-right", "left", "right"},
+                                 followed, run)
+            self.assertGreaterEqual(len(followed & {"los", "tri", "avg"}), 2, run)
 
     def test_the_methods_really_differ_on_the_recorded_stream(self):
         runs = self.trace["runs"]
@@ -181,6 +329,13 @@ class ChannelFilterRules(unittest.TestCase):
             window = (window + [v])[-self.cfg.median_window:]
             expected = tracker.update(sorted(window)[len(window) // 2], t * 20 / 1000.0)
             self.assertAlmostEqual(ch.update(v, t * 20), expected, places=12)
+
+    def test_with_the_kalman_off_the_median_goes_straight_on(self):
+        ch = ChannelFilter(FilterConfig(kalman=False, fft_window=0))
+        window = []
+        for t, v in enumerate([70, 74, 69, 72, 75, 71, 73, 70, 76, 72]):
+            window = (window + [v])[-self.cfg.median_window:]
+            self.assertEqual(ch.update(v, t * 20), sorted(window)[len(window) // 2])
 
     def test_the_fft_stage_runs_once_the_window_has_enough_readings(self):
         readings = [70, 74, 69, 72, 75, 71, 73, 70, 76, 72, 71, 74]
@@ -301,7 +456,7 @@ class PlayAreaRules(unittest.TestCase):
     def test_uncalibrated_limits(self):
         area = PlayArea.default()
         self.assertEqual(area.alert_threshold_cm, 10)
-        self.assertEqual(area.max_cm, 150)
+        self.assertEqual(area.max_cm, 205)
 
     def test_calibrated_limits_never_less_cautious_than_the_floor(self):
         area = PlayArea.calibrated([(12, 140), (12, 140), (12, 140)])
@@ -312,9 +467,9 @@ class PlayAreaRules(unittest.TestCase):
         self.assertFalse(area.is_calibrated)
 
     def test_row_hysteresis_holds_near_a_boundary(self):
-        area = PlayArea.default()                      # rows split at 60 and 100
-        self.assertEqual(area.row_for(0, 102, previous_row=1), 1, "within 6 cm")
-        self.assertEqual(area.row_for(0, 110, previous_row=1), 2, "clear of it")
+        area = PlayArea.default()                      # rows split at 60 and 110
+        self.assertEqual(area.row_for(0, 112, previous_row=1), 1, "within 6 cm")
+        self.assertEqual(area.row_for(0, 120, previous_row=1), 2, "clear of it")
 
 
 class CellStabiliserRules(unittest.TestCase):
@@ -343,6 +498,301 @@ class CellStabiliserRules(unittest.TestCase):
     def test_rejects_a_vote_threshold_that_allows_flicker(self):
         with self.assertRaises(ValueError):
             FilterConfig(cell_window=10, cell_votes=5)
+
+
+class MotionDetectorRules(unittest.TestCase):
+    """Moving or still (stepMotion() in game.js). Readings 100 ms apart."""
+
+    def setUp(self):
+        self.config = FilterConfig()
+        self.motion = MotionDetector()
+        self.now = 0.0
+
+    def step(self, points=(), speed=0.0, ms=100.0):
+        self.now += ms
+        return self.motion.step(list(points), speed, self.now, self.config)
+
+    def test_a_node_whose_point_holds_still_is_still(self):
+        for _ in range(10):
+            self.assertFalse(self.step([(0, (70.0, 80.0))]))
+
+    def test_a_node_whose_point_keeps_moving_is_moving_on_the_second_move(self):
+        self.assertFalse(self.step([(0, (70.0, 80.0))]))
+        self.assertFalse(self.step([(0, (78.0, 80.0))]))
+        self.assertFalse(self.step([(0, (86.0, 80.0))]))     # 16 cm from two readings before: once
+        self.assertTrue(self.step([(0, (94.0, 80.0))]))      # and again: moving
+
+    def test_a_spike_that_comes_back_is_not_a_move(self):
+        self.step([(0, (70.0, 80.0))])
+        self.step([(0, (70.0, 80.0))])
+        self.assertFalse(self.step([(0, (90.0, 80.0))]))     # 20 cm from two before: once
+        self.assertFalse(self.step([(0, (70.0, 80.0))]))     # back where it was two before
+        self.assertFalse(self.step([(0, (70.0, 80.0))]))
+
+    def test_standing_still_wins_over_the_track_speed(self):
+        # A node that has held the player within 10 cm for 5 readings makes
+        # them still, however fast the track says they go.
+        for _ in range(5):
+            self.step([(0, (70.0, 80.0))], speed=60.0)
+        self.assertFalse(self.step([(0, (72.0, 81.0))], speed=60.0))
+
+    def test_two_nodes_that_disagree_are_not_a_move(self):
+        # A scan turn changing over: each node steady where it puts the
+        # player, 40 cm apart from each other.
+        for i in range(12):
+            slot, point = (0, (60.0, 80.0)) if (i // 4) % 2 == 0 else (2, (100.0, 80.0))
+            self.assertFalse(self.step([(slot, point)]))
+
+    def test_points_too_far_apart_in_time_do_not_count(self):
+        self.step([(0, (70.0, 80.0))])
+        self.step([(0, (70.0, 80.0))])
+        self.assertFalse(self.step([(0, (90.0, 80.0))], ms=2500.0))
+
+    def test_the_track_going_fast_twice_is_a_move(self):
+        self.assertFalse(self.step(speed=45.0))
+        self.assertTrue(self.step(speed=45.0))
+        self.assertTrue(self.step(speed=10.0))
+
+    def test_still_again_after_700_ms_with_no_move(self):
+        self.step(speed=60.0)
+        self.assertTrue(self.step(speed=60.0))
+        held = [self.step(speed=0.0) for _ in range(7)]
+        self.assertEqual(held, [True] * 6 + [False])
+
+
+class CellConfidenceRules(unittest.TestCase):
+    """stepCellConfidence() in game.js. Readings 100 ms apart; the centre
+    cell (1, 1) is x 50-100, y 60-110 on the default bounds."""
+
+    IN_CENTRE = [(0, (75.0, 85.0))]
+
+    def setUp(self):
+        self.area = PlayArea.default()
+        self.config = FilterConfig()
+        self.conf = CellConfidence()
+        self.now = 0.0
+
+    def step(self, cell=(1, 1), found=IN_CENTRE, moving=False, ms=100.0):
+        self.now += ms
+        self.conf.step(cell, list(found), moving, self.now, self.area, self.config)
+        return self.conf.scores
+
+    def test_a_still_player_found_in_the_cell_fills_it_in_3_s(self):
+        self.step()                                      # the first step only starts the clock
+        scores = [self.step()[4] for _ in range(30)]
+        self.assertAlmostEqual(scores[14], 0.5)
+        self.assertAlmostEqual(scores[-1], 1.0)
+
+    def test_moving_half_or_another_cell_adds_nothing(self):
+        self.step()
+        self.assertEqual(self.step(moving=True)[4], 0.0)
+        self.assertEqual(self.step(found=[])[4], 0.0)              # half-found: no found point
+        self.assertEqual(self.step(found=[(0, (25.0, 85.0))])[4], 0.0)   # found in another cell
+
+    def test_other_cells_fade_fast_while_one_fills(self):
+        self.conf.scores[1] = 1.0                        # (0, 1): where the player stood before
+        self.step()
+        for _ in range(50):
+            self.step()
+        self.assertAlmostEqual(self.conf.scores[1], 0.5, places=6)   # 5 s half-life
+        self.assertEqual(self.conf.scores[4], 1.0)
+
+    def test_everything_fades_slowly_otherwise(self):
+        self.conf.scores[4] = 1.0
+        self.step(moving=True)
+        for _ in range(300):
+            self.step(moving=True)
+        self.assertAlmostEqual(self.conf.scores[4], 0.5, places=6)   # 30 s half-life
+
+    def test_a_long_gap_counts_as_250_ms(self):
+        self.step()
+        self.assertAlmostEqual(self.step(ms=5000.0)[4], 250.0 / 3000.0)
+
+
+class CellDeciderRules(unittest.TestCase):
+    """The cell decision (decideCell() in game.js). The default bounds give
+    columns 50 cm wide and rows 50 cm deep from 10 cm out: the centre cell
+    (1, 1) is x 50-100, y 60-110. Readings 100 ms apart."""
+
+    CENTRE = (75.0, 85.0)
+
+    def setUp(self):
+        self.area = PlayArea.default()
+        self.config = FilterConfig()
+        self.decider = CellDecider(self.config)
+        self.now = 0.0
+
+    def step(self, x, y, points=(), counted=True, ms=100.0):
+        self.now += ms
+        return self.decider.decide(x, y, counted, list(points), self.now, self.area, self.config)
+
+    def settle(self, points=()):
+        """The first cell, the centre, then the start-up time (cell_still_hold_ms),
+        when the nodes do not hold the cell yet, spent standing in it."""
+        self.assertEqual(self.step(*self.CENTRE, points=points), (1, 1))
+        while self.now < self.config.cell_still_hold_ms + 100:
+            self.assertEqual(self.step(*self.CENTRE, points=points), (1, 1))
+
+    def test_the_first_cell_is_taken_at_once(self):
+        self.assertEqual(self.step(30.0, 135.0), (0, 2))
+
+    def test_within_the_margin_of_the_cell_never_moves(self):
+        self.settle()
+        for _ in range(30):
+            self.assertEqual(self.step(104.0, 85.0), (1, 1))   # 4 cm past the line, under the 6 cm margin
+
+    def test_past_the_margin_moves_after_the_dwell(self):
+        self.settle()
+        self.assertEqual([self.step(108.0, 85.0) for _ in range(5)],
+                         [(1, 1)] * 4 + [(2, 1)])   # 500 ms of readings
+
+    def test_a_swing_that_comes_back_never_gets_there(self):
+        self.settle()
+        for _ in range(10):
+            self.assertEqual(self.step(120.0, 85.0), (1, 1))
+            self.assertEqual(self.step(120.0, 85.0), (1, 1))
+            self.assertEqual(self.step(*self.CENTRE), (1, 1))
+            self.assertEqual(self.step(*self.CENTRE), (1, 1))
+
+    def test_a_cell_not_next_to_it_needs_twice_the_dwell(self):
+        self.assertEqual(self.step(25.0, 85.0), (0, 1))
+        cells = [self.step(125.0, 85.0) for _ in range(10)]
+        self.assertEqual(cells[:9], [(0, 1)] * 9)
+        self.assertEqual(cells[9], (2, 1))
+
+    def test_a_gap_between_readings_counts_as_at_most_250_ms(self):
+        self.settle()
+        self.assertEqual(self.step(120.0, 85.0, ms=1000.0), (1, 1))
+        self.assertEqual(self.step(120.0, 85.0), (1, 1))     # 250 + 100 ms
+        self.assertEqual(self.step(120.0, 85.0), (1, 1))     # 450 ms
+        self.assertEqual(self.step(120.0, 85.0), (2, 1))     # 550 ms
+
+    def test_a_render_frame_or_turn_broadcast_changes_nothing(self):
+        self.settle()
+        for _ in range(20):
+            self.assertEqual(self.step(120.0, 85.0, counted=False), (1, 1))
+        # And it did not count towards the dwell either.
+        self.assertEqual(self.step(120.0, 85.0), (1, 1))
+
+    def test_a_node_that_still_sees_the_player_holds_the_cell_at_a_handover(self):
+        node = [(0, (70.0, 80.0))]                          # LEFT's own point, anchored in the cell
+        self.settle(points=node)
+        # The other node takes over and the position jumps right; LEFT, still
+        # reading, sees the player where it did: no move, for the hold.
+        held = [self.step(120.0, 85.0, points=[(0, (72.0, 82.0))])
+                for _ in range(int(self.config.cell_still_hold_ms / 100) - 1)]
+        self.assertEqual(set(held), {(1, 1)})
+
+    def test_past_the_hold_the_position_wins_anyway(self):
+        node = [(0, (70.0, 80.0))]
+        self.settle(points=node)
+        cells = [self.step(120.0, 85.0, points=node) for _ in range(25)]
+        self.assertEqual(cells[0], (1, 1))
+        # 1.5 s of being out of the cell, then the 500 ms dwell.
+        self.assertEqual(cells.index((2, 1)), 19)
+
+    def test_a_node_that_has_moved_does_not_hold_the_cell(self):
+        self.settle(points=[(0, (70.0, 80.0))])
+        cells = [self.step(120.0, 85.0, points=[(0, (110.0, 82.0))]) for _ in range(5)]
+        self.assertEqual(cells, [(1, 1)] * 4 + [(2, 1)])
+
+    def test_a_node_only_seen_with_the_position_out_of_the_cell_says_nothing(self):
+        self.settle()
+        # RIGHT's first reading comes with the position out of the cell: it
+        # never saw the player in it, so it is not anchored and holds nothing.
+        cells = [self.step(120.0, 85.0, points=[(2, (118.0, 84.0))]) for _ in range(5)]
+        self.assertEqual(cells, [(1, 1)] * 4 + [(2, 1)])
+
+    def test_the_nodes_hold_nothing_in_the_first_moments(self):
+        # Straight after the first cell (one node alone, say), only the margin
+        # and the dwell apply.
+        node = [(0, (70.0, 80.0))]
+        self.assertEqual(self.step(*self.CENTRE, points=node), (1, 1))
+        cells = [self.step(120.0, 85.0, points=node) for _ in range(5)]
+        self.assertEqual(cells, [(1, 1)] * 4 + [(2, 1)])
+
+    def test_an_anchor_settles_where_a_still_player_stands_and_trails_a_walker(self):
+        self.settle(points=[(0, (70.0, 80.0))])
+        # Walking 6 cm a reading towards the right edge, inside the cell: the
+        # anchor trails, so by the edge the node has moved more than 25 cm.
+        x = 70.0
+        while x < 100.0:
+            x += 6.0
+            self.step(min(x, 99.0), 85.0, points=[(0, (x, 80.0))])
+        cells = [self.step(112.0, 85.0, points=[(0, (112.0, 80.0))]) for _ in range(5)]
+        self.assertEqual(cells[-1], (2, 1), "the node of a player walking out says moved: no hold")
+
+    def test_tracking_a_moving_player_dwells_200_ms(self):
+        self.settle()
+        cells = [self.decider.decide(120.0, 85.0, True, [], self.now + 100.0 * (i + 1), self.area,
+                                     self.config, tracking=True) for i in range(2)]
+        self.assertEqual(cells, [(1, 1), (2, 1)])
+
+    def test_tracking_still_lets_a_node_hold_the_cell(self):
+        node = [(0, (70.0, 80.0))]
+        self.settle(points=node)
+        cells = [self.decider.decide(120.0, 85.0, True, node, self.now + 100.0 * (i + 1), self.area,
+                                     self.config, tracking=True) for i in range(5)]
+        self.assertEqual(set(cells), {(1, 1)})
+
+    def test_a_confident_cell_takes_less_dwell(self):
+        self.settle()
+        scores = [0.0] * 9
+        scores[7] = 1.0                                  # (2, 1): half the dwell, 250 ms
+        cells = [self.decider.decide(108.0, 85.0, True, [], self.now + 100.0 * (i + 1), self.area,
+                                     self.config, confidence=scores) for i in range(3)]
+        self.assertEqual(cells, [(1, 1), (1, 1), (2, 1)])
+
+    def test_after_a_restart_a_confident_cell_next_to_the_player_is_taken(self):
+        self.settle()
+        self.decider.restart()
+        scores = [0.0] * 9
+        scores[4] = 0.8                                  # the centre, where they stood
+        # Back 4 cm into the right column: within the margin of the centre.
+        cell = self.decider.decide(104.0, 85.0, True, [], self.now + 100.0, self.area, self.config,
+                                   confidence=scores)
+        self.assertEqual(cell, (1, 1))
+        self.decider.restart()
+        # Well into the right column: there.
+        cell = self.decider.decide(120.0, 85.0, True, [], self.now + 200.0, self.area, self.config,
+                                   confidence=scores)
+        self.assertEqual(cell, (2, 1))
+
+    def test_after_a_restart_the_new_cell_is_taken_at_once(self):
+        self.settle(points=[(0, (70.0, 80.0))])
+        self.decider.restart()
+        # Found again in the right column: there at once, with no dwell.
+        self.assertEqual(self.decider.decide(120.0, 85.0, True, [(0, (118.0, 84.0))], self.now + 100.0,
+                                             self.area, self.config), (2, 1))
+
+    def test_after_a_restart_the_nodes_hold_at_once_with_no_second_probation(self):
+        self.settle()
+        self.decider.restart()
+        node = [(0, (118.0, 84.0))]
+        self.assertEqual(self.decider.decide(120.0, 85.0, True, node, self.now + 100.0, self.area,
+                                             self.config), (2, 1))
+        # A handover swing back to the centre while the node still sees the
+        # player where it did: held, as it would be had the round just gone on.
+        cells = [self.decider.decide(75.0, 85.0, True, node, self.now + 100.0 * (i + 2),
+                                     self.area, self.config) for i in range(8)]
+        self.assertEqual(set(cells), {(2, 1)})
+
+    def test_the_pipeline_switch_picks_the_vote_or_the_decision(self):
+        pipeline = CoordinatePipeline(TwoSensorGeometry())
+        self.assertTrue(pipeline.config.cell_decision)
+        pipeline.set_cell_decision(False)
+        self.assertFalse(pipeline.config.cell_decision)
+        pipeline.set_cell_decision(True)
+        self.assertTrue(pipeline.config.cell_decision)
+        self.assertTrue(pipeline.config.cell_confidence)
+        pipeline.set_cell_confidence(False)
+        self.assertFalse(pipeline.config.cell_confidence)
+        pipeline.set_cell_confidence(True)
+        self.assertFalse(pipeline.config.track_moving, "tracking is off by default")
+        pipeline.set_track_moving(True)
+        self.assertTrue(pipeline.config.track_moving)
+        pipeline.set_track_moving(False)
+        self.assertFalse(pipeline.config.track_moving)
 
 
 class HoldPolicies(unittest.TestCase):
@@ -393,20 +843,397 @@ class PipelineBehaviour(unittest.TestCase):
         self.assertEqual(pipe.update([None, None, None], 20).status, STATUS_NO_SIGNAL)
 
 
+# The player is a body: each echo comes off the side of them nearest the node,
+# this far short of their middle (FilterConfig.body_radius_cm adds it back).
+BODY_RADIUS_CM = FilterConfig().body_radius_cm
+
+
 def scanner_sample(x_cm, y_cm, state=0, aim_error_deg=0.0):
-    """[left, centre, right] scanner readings of a player at (x_cm, y_cm):
-    exact distances, each node's angle pointing at the player (plus
-    aim_error_deg), and a scan state."""
+    """[left, centre, right] scanner readings of a player whose middle is at
+    (x_cm, y_cm): exact distances to the near side of them, each node's angle
+    pointing at their middle (larger turns towards screen-right, as the rig's
+    servos do; plus aim_error_deg), and a scan state."""
     def reading(node_x):
-        angle = 90 + math.degrees(math.atan2(node_x - x_cm, y_cm)) + aim_error_deg
-        return (math.hypot(x_cm - node_x, y_cm), angle, state)
+        angle = 90 + math.degrees(math.atan2(x_cm - node_x, y_cm)) + aim_error_deg
+        return (math.hypot(x_cm - node_x, y_cm) - BODY_RADIUS_CM, angle, state)
     return [reading(25.0), None, reading(125.0)]
 
 
 def two_sensor_sample(x_cm, depth_cm):
-    """[left, centre, right] distances a player at (x, depth) would produce,
-    with the sensors at the centres of the outer columns (25 and 125 cm)."""
-    return [math.hypot(x_cm - 25.0, depth_cm), None, math.hypot(x_cm - 125.0, depth_cm)]
+    """[left, centre, right] distances a player whose middle is at (x, depth)
+    would produce (to the near side of them), with the sensors at the centres
+    of the outer columns (25 and 125 cm)."""
+    return [math.hypot(x_cm - 25.0, depth_cm) - BODY_RADIUS_CM, None,
+            math.hypot(x_cm - 125.0, depth_cm) - BODY_RADIUS_CM]
+
+
+class DynamicPickerBehaviour(unittest.TestCase):
+    """Dynamic: the method that has held its square longest places the player."""
+
+    # Squares on the default board (columns 50 cm wide, rows 50 cm deep from
+    # 10 cm out): A is the near-left cell, B the middle, C the far-right.
+    A = (25.0, 40.0)
+    B = (75.0, 80.0)
+    C = (125.0, 120.0)
+
+    def setUp(self):
+        self.picker = DynamicPicker()
+        self.area = PlayArea.default()
+        self.config = FilterConfig()
+
+    def at(self, now_ms, los, tri, avg):
+        """Steps the picker with these positions and returns its leader."""
+        fixes = {"los": los, "tri": tri, "avg": avg}
+        self.picker.step(fixes, now_ms, self.area)
+        return self.picker.leader(fixes, now_ms, self.config)
+
+    def test_squares_are_the_cells_of_the_board(self):
+        self.assertEqual(DynamicPicker.square_of(self.A, self.area), 0)
+        self.assertEqual(DynamicPicker.square_of(self.B, self.area), 4)
+        self.assertEqual(DynamicPicker.square_of(self.C, self.area), 8)
+        self.assertIsNone(DynamicPicker.square_of(None, self.area))
+
+    def test_off_the_board_is_a_square_of_its_own(self):
+        for where in ((-5.0, 80.0), (155.0, 80.0), (75.0, 400.0)):
+            self.assertEqual(DynamicPicker.square_of(where, self.area), OFF_BOARD, where)
+
+    def test_follows_the_method_that_has_held_its_square_longest(self):
+        self.at(0, self.A, self.A, self.A)
+        # Line of sight moves; the other two have held A for 200 ms, and
+        # trilateration comes before the average.
+        self.assertEqual(self.at(200, self.B, self.A, self.A), "tri")
+        self.assertEqual(self.at(300, self.B, self.A, self.B), "tri")
+
+    def test_a_method_that_keeps_changing_square_is_passed_over(self):
+        self.at(0, self.A, self.C, self.B)
+        for step in range(1, 20):
+            los = self.B if step % 2 else self.A   # bounces every 100 ms
+            self.assertEqual(self.at(step * 100, los, self.C, self.B), "tri", step)
+
+    def test_past_the_steady_time_line_of_sight_wins(self):
+        self.at(0, self.A, self.C, self.C)
+        self.at(500, self.B, self.C, self.C)
+        # Trilateration has held C 1.4 s, but counts only 1 s; line of sight
+        # has held B 0.9 s.
+        self.assertEqual(self.at(1400, self.B, self.C, self.C), "tri")
+        # Both fully steady: line of sight first.
+        self.assertEqual(self.at(1500, self.B, self.C, self.C), "los")
+        self.assertEqual(self.at(9000, self.B, self.C, self.C), "los")
+
+    def test_the_steady_time_is_tunable(self):
+        self.config = FilterConfig(dynamic_steady_ms=2000.0)
+        self.at(0, self.A, self.C, self.C)
+        self.at(500, self.B, self.C, self.C)
+        self.assertEqual(self.at(1500, self.B, self.C, self.C), "tri")
+        self.assertEqual(self.at(2500, self.B, self.C, self.C), "los")
+
+    def test_a_method_with_no_position_is_out_of_the_running(self):
+        self.at(0, self.A, self.C, self.C)
+        self.assertEqual(self.at(300, None, self.C, self.C), "tri")
+        # Back in A, line of sight starts its time again from 400 ms.
+        self.assertEqual(self.at(400, self.A, self.C, self.C), "tri")
+        self.assertEqual(self.at(1300, self.A, self.C, self.C), "tri")
+        self.assertEqual(self.at(1400, self.A, self.C, self.C), "los")
+        self.assertIsNone(self.at(1500, None, None, None))
+
+    def test_an_unstepped_position_has_been_held_for_no_time(self):
+        # As just after a reset: line of sight first, as on a tie.
+        fixes = {"los": self.A, "tri": self.C, "avg": self.B}
+        self.assertEqual(self.picker.leader(fixes, 0, self.config), "los")
+        fixes["los"] = None
+        self.assertEqual(self.picker.leader(fixes, 0, self.config), "tri")
+
+    def test_reset_forgets_every_square(self):
+        self.at(0, self.A, self.C, self.C)
+        self.at(500, self.B, self.C, self.C)
+        self.picker.reset()
+        self.assertEqual(self.at(600, self.B, self.C, self.C), "los")
+
+
+class DynamicPositionMethod(unittest.TestCase):
+    """TwoSensorGeometry's "dyn": the position comes from the method it follows."""
+
+    def test_dynamic_is_the_default(self):
+        self.assertEqual(TwoSensorGeometry().method, "dyn")
+
+    def test_an_unknown_method_is_refused(self):
+        with self.assertRaises(ValueError):
+            TwoSensorGeometry(method="steady")
+
+    def test_the_position_is_the_one_dynamic_follows(self):
+        # In the left column near its boundary with the centre, seen by both
+        # nodes: none of Dynamic's rules applies (the servo lines cross in
+        # the left column but not tuning's 20 cm inside it, both nodes are
+        # confident, and it is not a far corner), so it follows the steadiest
+        # method.
+        pipe = CoordinatePipeline(TwoSensorGeometry(method="dyn"))
+        geometry = pipe.geometry
+        for step in range(40):
+            got = pipe.update(scanner_sample(38.0 + (step % 3), 90.0), step * 50.0)
+            fixes = geometry.fixes(got.filtered, pipe.area)
+            follows = geometry.placed_by(got.filtered, pipe.area)
+            self.assertIn(follows, ("los", "tri", "avg"), step)
+            self.assertEqual(fixes["dyn"], fixes[follows], step)
+            if got.status == STATUS_OK and not got.held:
+                self.assertAlmostEqual(got.x_cm, min(max(fixes[follows][0], 0.0), 150.0), msg=step)
+
+    def test_another_method_is_placed_by_itself(self):
+        geometry = TwoSensorGeometry(method="tri")
+        self.assertEqual(geometry.placed_by([None] * 3, PlayArea.default()), "tri")
+
+
+class DynamicRules(unittest.TestCase):
+    """Dynamic's two rules, before the steadiest method (Aaron, 5 Oct): the
+    centre, when both nodes' servo lines cross inside the centre column, and
+    then a lone confident node."""
+
+    FURNITURE = (150.0, 60, 1)   # the right node half-finding something in the right column
+
+    def setUp(self):
+        self.area = PlayArea.default()
+        self.config = FilterConfig()
+
+    def scan(self, geometry, sample, now_ms, fresh=(True, True, True)):
+        readings = geometry.channels(sample)
+        geometry.track(readings, list(fresh), now_ms, self.area, self.config)
+        fix = geometry.locate(readings, self.area, self.config)
+        return fix, geometry.placed_by(readings, self.area)
+
+    def test_servo_lines_crossing_in_the_centre_put_the_player_in_the_centre(self):
+        # The angles the rig read with a player 80 cm out in the centre on
+        # 4 Oct (141 and 49): the lines cross at 84 cm across. The left
+        # node's own reading along its line would put them at 98 cm.
+        geometry = TwoSensorGeometry()
+        sample = [(80.0, 141, 0), None, (80.0, 49, 0)]
+        for k in range(3):
+            fix, by = self.scan(geometry, sample, 50.0 * k)
+        self.assertEqual(by, "centre")
+        self.assertEqual(fix.column, 1)
+        self.assertAlmostEqual(fix.x_cm, 25.0 + 100.0 * math.tan(math.radians(51))
+                               / (math.tan(math.radians(51)) + math.tan(math.radians(41))))
+
+    def test_left_above_90_and_right_below_90_is_not_enough(self):
+        # Straight in front of the left node, its servo leant 10 degrees in
+        # (100): Aaron's first form (LEFT > 90 and RIGHT < 90) would call this
+        # the centre. The lines cross in the left column, so neither rule
+        # applies (both nodes are confident) and the steadiest method places
+        # the player.
+        geometry = TwoSensorGeometry()
+        left = scanner_sample(25.0, 80.0)[0]
+        right = scanner_sample(25.0, 80.0)[2]
+        for k in range(5):
+            fix, by = self.scan(geometry, [(left[0], 100, 0), None, right], 50.0 * k)
+        self.assertIn(by, ("los", "tri", "avg"))
+        self.assertEqual(fix.column, 0)
+
+    def test_the_centre_x_clears_the_column_hysteresis(self):
+        # Coming from the left column, a crossing 2 cm past the boundary would
+        # be held in the left column by the 8 cm margin; the rule's x is kept
+        # that far inside the centre column instead.
+        geometry = TwoSensorGeometry()
+        for k in range(5):
+            self.scan(geometry, scanner_sample(30.0, 80.0), 50.0 * k)
+        fix, by = self.scan(geometry, scanner_sample(52.0, 80.0), 250.0)
+        self.assertEqual(by, "centre")
+        self.assertEqual((fix.x_cm, fix.column), (50.0 + self.config.column_margin_cm, 1))
+
+    # The lone-node tests stand the player 40 cm across: the left node's line
+    # and the furniture's then cross at 48 cm, short of the centre and not
+    # deep in the left column, so the column lock stays out of it.
+    LONE = (40.0, 85.0)
+
+    def test_a_lone_confident_node_places_the_player_by_itself(self):
+        geometry = TwoSensorGeometry()
+        left = scanner_sample(*self.LONE)[0]
+        for k in range(2):
+            fix, by = self.scan(geometry, [left, None, self.FURNITURE], 50.0 * k)
+        self.assertEqual(by, "left")
+        self.assertAlmostEqual(fix.x_cm, 40.0)
+        self.assertAlmostEqual(fix.y_cm, 85.0)
+        self.assertEqual(fix.column, 0)
+
+    def test_one_reading_that_found_the_player_is_not_confident(self):
+        geometry = TwoSensorGeometry()
+        left = scanner_sample(*self.LONE)[0]
+        self.scan(geometry, [(left[0], left[1], 1), None, self.FURNITURE], 0.0)
+        _, by = self.scan(geometry, [left, None, self.FURNITURE], 50.0)
+        self.assertNotEqual(by, "left")
+        _, by = self.scan(geometry, [left, None, self.FURNITURE], 100.0)
+        self.assertEqual(by, "left")
+
+    def test_confidence_lasts_through_the_other_nodes_turn_then_lapses(self):
+        geometry = TwoSensorGeometry()
+        left = scanner_sample(*self.LONE)[0]
+        for k in range(2):
+            self.scan(geometry, [left, None, self.FURNITURE], 50.0 * k)
+        # Only the right node reports now; the left node's last reading is
+        # repeated but not new.
+        right_turn = (False, True, True)
+        _, by = self.scan(geometry, [left, None, self.FURNITURE], 50.0 + self.config.confident_ms,
+                          fresh=right_turn)
+        self.assertEqual(by, "left")
+        _, by = self.scan(geometry, [left, None, self.FURNITURE], 51.0 + self.config.confident_ms,
+                          fresh=right_turn)
+        self.assertNotEqual(by, "left")
+
+    def test_both_nodes_confident_follow_the_steadiest_method(self):
+        # In the right column, short of the side lock's 20 cm.
+        geometry = TwoSensorGeometry()
+        for k in range(5):
+            _, by = self.scan(geometry, scanner_sample(110.0, 90.0), 50.0 * k)
+        self.assertIn(by, ("los", "tri", "avg"))
+
+    def test_the_centre_rule_comes_before_a_lone_confident_node(self):
+        # The left node found the player (confident), the right one only
+        # half-found them; their lines cross in the centre.
+        geometry = TwoSensorGeometry()
+        sample = scanner_sample(75.0, 80.0)
+        sample[2] = (sample[2][0], sample[2][1], 1)
+        for k in range(3):
+            _, by = self.scan(geometry, sample, 50.0 * k)
+        self.assertEqual(by, "centre")
+
+    def test_the_centre_rule_needs_both_lines_to_be_recent(self):
+        geometry = TwoSensorGeometry()
+        centre = scanner_sample(75.0, 80.0)
+        self.scan(geometry, centre, 0.0)
+        # The left node sweeps from then on; the right one still finds the
+        # player, but the left node's line is too old once centre_seen_ms is up.
+        sample = [(None, 150, 2), None, centre[2]]
+        _, by = self.scan(geometry, sample, self.config.centre_seen_ms)
+        self.assertEqual(by, "centre")
+        _, by = self.scan(geometry, sample, self.config.centre_seen_ms + 1.0)
+        self.assertEqual(by, "right")
+
+    def test_the_other_methods_do_not_use_the_rules(self):
+        for method in ("los", "tri", "avg"):
+            geometry = TwoSensorGeometry(method=method)
+            for k in range(3):
+                _, by = self.scan(geometry, [(80.0, 141, 0), None, (80.0, 49, 0)], 50.0 * k)
+            self.assertEqual(by, method)
+
+    # --- the centre hold and the play area (Aaron, 5 Oct) -----------------
+
+    def test_the_centre_holds_while_the_crossing_strays_just_outside_it(self):
+        # Standing still in the centre must never touch a side column. On the
+        # rig on 5 Oct the crossing strayed to 103.5 cm for two readings.
+        geometry = TwoSensorGeometry()
+        for k in range(3):
+            self.scan(geometry, scanner_sample(75.0, 80.0), 50.0 * k)
+        # Here the lines stray to cross at 110 cm, past the 8 cm the column
+        # hysteresis would hold anyway.
+        hold = self.config.centre_hold_ms
+        for t in (150.0, 100.0 + hold):
+            fix, by = self.scan(geometry, scanner_sample(110.0, 80.0), t)
+            self.assertEqual((by, fix.column), ("centre", 1), t)
+        fix, by = self.scan(geometry, scanner_sample(110.0, 80.0), 101.0 + hold)
+        self.assertIn(by, ("los", "tri", "avg"))
+        self.assertEqual(fix.column, 2)
+
+    def test_the_centre_hold_needs_both_nodes_still_seeing_the_player(self):
+        self.config = FilterConfig(centre_hold_ms=5000.0)
+        geometry = TwoSensorGeometry()
+        self.scan(geometry, scanner_sample(75.0, 80.0), 0.0)
+        # The left node sweeps from then on; its last line is too old once
+        # centre_seen_ms is up, however long the hold.
+        right = scanner_sample(104.0, 80.0)[2]
+        _, by = self.scan(geometry, [(None, 150, 2), None, right], self.config.centre_seen_ms)
+        self.assertEqual(by, "centre")
+        _, by = self.scan(geometry, [(None, 150, 2), None, right], self.config.centre_seen_ms + 1.0)
+        self.assertNotEqual(by, "centre")
+
+    def test_a_lone_node_reading_in_front_of_the_near_edge_is_not_confident(self):
+        # The left node, turned fully in (160), finds something 10 cm away -
+        # its own point (the middle, 25 cm along its line) 8.6 cm out, in
+        # front of the board's near edge (10 cm). Not the player, so it does
+        # not place them on its own. (On 5 Oct it found something 27 cm away:
+        # its point is 14 cm out, on the board since the rows start at 10 cm,
+        # and the reading is in the dead zone, 9.2 cm out.)
+        geometry = TwoSensorGeometry()
+        for k in range(3):
+            _, by = self.scan(geometry, [(10.0, 160, 0), None, self.FURNITURE], 50.0 * k)
+        self.assertNotEqual(by, "left")
+
+    def test_a_lone_node_reading_off_the_side_of_the_board_is_not_confident(self):
+        # 5 Oct: the left node turned out to 59 found something 112 cm away,
+        # 40 cm off the left edge of the board.
+        geometry = TwoSensorGeometry()
+        for k in range(3):
+            _, by = self.scan(geometry, [(112.0, 59, 0), None, self.FURNITURE], 50.0 * k)
+        self.assertNotEqual(by, "left")
+
+    # --- the side lock, the far corners and the switches (Aaron, 5 Oct) ---
+
+    def test_servo_lines_crossing_deep_in_a_side_column_lock_it(self):
+        for x, by_want, column in ((15.0, "lock-left", 0), (135.0, "lock-right", 2)):
+            geometry = TwoSensorGeometry()
+            for k in range(3):
+                fix, by = self.scan(geometry, scanner_sample(x, 80.0), 50.0 * k)
+            self.assertEqual((by, fix.column), (by_want, column), x)
+            self.assertAlmostEqual(fix.x_cm, x)
+
+    def test_a_crossing_short_of_the_side_lock_depth_does_not_lock(self):
+        # 30 cm across is exactly 20 cm inside the left column: locked. 31 cm
+        # is not.
+        geometry = TwoSensorGeometry()
+        _, by = self.scan(geometry, scanner_sample(30.0, 80.0), 0.0)
+        self.assertEqual(by, "lock-left")
+        geometry = TwoSensorGeometry()
+        _, by = self.scan(geometry, scanner_sample(31.0, 80.0), 0.0)
+        self.assertNotEqual(by, "lock-left")
+
+    def test_a_deep_side_crossing_ends_the_centre_hold(self):
+        geometry = TwoSensorGeometry()
+        for k in range(3):
+            self.scan(geometry, scanner_sample(75.0, 80.0), 50.0 * k)
+        _, by = self.scan(geometry, scanner_sample(15.0, 80.0), 150.0)
+        self.assertEqual(by, "lock-left")
+        # Back to near the boundary, well within the hold: the hold has ended,
+        # so it is not the centre again.
+        _, by = self.scan(geometry, scanner_sample(40.0, 80.0), 200.0)
+        self.assertNotEqual(by, "centre")
+
+    def test_the_near_node_alone_places_the_player_in_its_far_corner(self):
+        # A1 for the left node, A3 for the right, while the other node is
+        # acting up: it finds something in the centre near the screen.
+        for slot, spot, by_want, column in ((0, (25.0, 125.0), "corner-left", 0),
+                                            (2, (125.0, 125.0), "corner-right", 2)):
+            geometry = TwoSensorGeometry()
+            near = scanner_sample(*spot)[slot]
+            other = scanner_sample(75.0, 50.0)[2 - slot]
+            sample = [near, None, other] if slot == 0 else [other, None, near]
+            for k in range(3):
+                fix, by = self.scan(geometry, sample, 50.0 * k)
+            self.assertEqual((by, fix.column), (by_want, column), by_want)
+            self.assertAlmostEqual(fix.x_cm, spot[0])
+            self.assertAlmostEqual(fix.y_cm, spot[1])
+
+    def test_the_corner_needs_the_far_row(self):
+        # The left node finds the player in the left column's middle row: not
+        # A1, so the corner rule stays out of it.
+        geometry = TwoSensorGeometry()
+        sample = [scanner_sample(25.0, 80.0)[0], None, scanner_sample(75.0, 50.0)[2]]
+        for k in range(3):
+            _, by = self.scan(geometry, sample, 50.0 * k)
+        self.assertNotEqual(by, "corner-left")
+
+    def test_each_rule_has_a_switch(self):
+        corner = [scanner_sample(25.0, 125.0)[0], None, scanner_sample(75.0, 50.0)[2]]
+        lone = [scanner_sample(*self.LONE)[0], None, self.FURNITURE]
+        cases = (("corner_node", corner, "corner-left"),
+                 ("column_lock", scanner_sample(75.0, 80.0), "centre"),
+                 ("column_lock", scanner_sample(15.0, 80.0), "lock-left"),
+                 ("lone_node", lone, "left"))
+        for switch, sample, by_on in cases:
+            for on in (True, False):
+                self.config = FilterConfig(**{switch: on})
+                geometry = TwoSensorGeometry()
+                for k in range(3):
+                    _, by = self.scan(geometry, sample, 50.0 * k)
+                if on:
+                    self.assertEqual(by, by_on, switch)
+                else:
+                    self.assertNotEqual(by, by_on, switch)
 
 
 class TwoSensorGeometryBehaviour(unittest.TestCase):
@@ -435,12 +1262,13 @@ class TwoSensorGeometryBehaviour(unittest.TestCase):
 
     def test_a_wall_reading_falls_back_to_the_other_sensor(self):
         fix = self.locate([70.0, None, 235.0])
-        self.assertEqual((fix.x_cm, fix.y_cm, fix.column), (25.0, 70.0, 0))
+        self.assertEqual((fix.x_cm, fix.y_cm, fix.column), (25.0, 70.0 + BODY_RADIUS_CM, 0))
 
     def test_circles_that_miss_fall_back_to_the_nearer_sensor(self):
-        # 30 + 40 < the 100 cm between the sensors: no crossing exists.
-        fix = self.locate([30.0, None, 40.0])
-        self.assertEqual((fix.x_cm, fix.y_cm, fix.column), (25.0, 30.0, 0))
+        # 35 + 45 cm to the middle of the player < the 100 cm between the
+        # sensors: no crossing exists.
+        fix = self.locate([20.0, None, 30.0])
+        self.assertEqual((fix.x_cm, fix.y_cm, fix.column), (25.0, 20.0 + BODY_RADIUS_CM, 0))
 
     def test_the_centre_channel_is_ignored(self):
         self.assertEqual(self.geometry.channels([None, 70.0, None]), [None, None, None])
@@ -453,26 +1281,52 @@ class TwoSensorGeometryBehaviour(unittest.TestCase):
         self.assertEqual(self.locate(two_sensor_sample(52.0, 90.0)).column, 0)
         self.assertEqual(self.locate(two_sensor_sample(60.0, 90.0)).column, 1)
 
-    def test_beyond_the_far_limit_is_out_of_bounds(self):
+    def test_beyond_the_far_limit_is_kept_on_the_far_square(self):
+        # Only nobody found is out of bounds (Aaron, 5 Oct). 185 cm straight
+        # out from the right node is past the far edge (160 cm): the player is
+        # kept a tenth of a row inside it, 155 cm, on the far right square.
         fix = self.locate([None, None, 170.0])
-        self.assertEqual(fix.status, STATUS_OUT_OF_BOUNDS)
+        self.assertEqual(fix.status, STATUS_OK)
+        self.assertEqual(fix.column, 2)
+        self.assertAlmostEqual(fix.y_cm, 160.0 - 50.0 * 0.1)
+        self.assertEqual(fix.distance_cm, fix.y_cm)
 
-    def test_off_either_side_of_the_board_is_out_of_bounds(self):
+    def test_in_front_of_the_near_edge_is_kept_on_the_near_square(self):
+        fix = self.locate(two_sensor_sample(75.0, 5.0))
+        self.assertEqual(fix.status, STATUS_OK)
+        self.assertAlmostEqual(fix.y_cm, 10.0 + 50.0 * 0.1)
+
+    def test_off_either_side_of_the_board_is_kept_on_the_edge_square(self):
         # Every method, each on its own geometry (a line-of-sight track would
-        # carry over). 80 cm from the left scanner at 130 degrees:
-        # x = 25 - 80 sin 40 = -26.
+        # carry over). 80 cm (95 to the player's middle) from the left scanner
+        # at 50 degrees: x = 25 - 95 sin 40 = -36, kept a tenth of a column
+        # (5 cm) inside the left edge. With the angle limit off: on, line of
+        # sight drops both readings (the next test).
+        self.config = FilterConfig(angle_limit=False)
         for method in ("los", "tri", "avg"):
-            left = self.scan([(80.0, 130), None, None], geometry=TwoSensorGeometry(method=method))
-            self.assertEqual(left.status, STATUS_OUT_OF_BOUNDS, method)
-            self.assertEqual(left.x_cm, 0.0, method)  # clamped for the column, still out
-            # 80 cm from the right scanner at 50 degrees: x = 125 + 80 sin 40 = 176.
-            right = self.scan([None, None, (80.0, 50)], geometry=TwoSensorGeometry(method=method))
-            self.assertEqual(right.status, STATUS_OUT_OF_BOUNDS, method)
+            left = self.scan([(80.0, 50), None, None], geometry=TwoSensorGeometry(method=method))
+            self.assertEqual(left.status, STATUS_OK, method)
+            self.assertEqual((left.x_cm, left.column), (5.0, 0), method)
+            # From the right scanner at 130 degrees: x = 125 + 95 sin 40 = 186.
+            right = self.scan([None, None, (80.0, 130)], geometry=TwoSensorGeometry(method=method))
+            self.assertEqual(right.status, STATUS_OK, method)
+            self.assertEqual((right.x_cm, right.column), (145.0, 2), method)
+
+    def test_the_angle_limit_drops_those_readings_for_line_of_sight_only(self):
+        # 80 cm from the left node at 50 degrees, where its line leaves the
+        # grid after 38.9 cm: past the limit. Line of sight has nothing;
+        # trilateration ignores the limit, and the average follows it.
+        fix = self.scan([(80.0, 50), None, None], geometry=TwoSensorGeometry(method="los"))
+        self.assertEqual(fix.status, STATUS_NO_SIGNAL)
+        for method in ("tri", "avg"):
+            fix = self.scan([(80.0, 50), None, None], geometry=TwoSensorGeometry(method=method))
+            self.assertEqual((fix.status, fix.x_cm, fix.column), (STATUS_OK, 5.0, 0), method)
 
     def test_just_inside_the_side_edge_is_in_bounds(self):
-        # 80 cm from the left scanner at 105 degrees: x = 25 - 80 sin 15 = 4.3.
+        # 80 cm (95 to the middle) from the left scanner at 75 degrees:
+        # x = 25 - 95 sin 15 = 0.4.
         for method in ("los", "tri", "avg"):
-            fix = self.scan([(80.0, 105), None, None], geometry=TwoSensorGeometry(method=method))
+            fix = self.scan([(80.0, 75), None, None], geometry=TwoSensorGeometry(method=method))
             self.assertEqual(fix.status, STATUS_OK, method)
 
     # --- servo scanners: (distance, angle) per node ---------------------------
@@ -480,10 +1334,25 @@ class TwoSensorGeometryBehaviour(unittest.TestCase):
     def test_a_scanner_at_90_degrees_points_straight_out(self):
         self.assertEqual(scanner_point(25.0, 80.0, 90), (25.0, 80.0))
 
-    def test_a_larger_angle_turns_towards_screen_left(self):
-        x, y = scanner_point(125.0, 80.0, 120)
-        self.assertAlmostEqual(x, 85.0)
+    def test_a_larger_angle_turns_towards_screen_right(self):
+        # As the rig's servos turn (the centre test, 4 Oct 2026).
+        x, y = scanner_point(25.0, 80.0, 120)
+        self.assertAlmostEqual(x, 65.0)
         self.assertAlmostEqual(y, 80.0 * math.cos(math.radians(30)))
+        x, _ = scanner_point(125.0, 80.0, 60)
+        self.assertAlmostEqual(x, 85.0)
+
+    def test_the_body_radius_is_added_to_every_distance(self):
+        # A player straight out from the left node: the echo comes off the
+        # near side of them, and the fix is their middle.
+        config = FilterConfig(body_radius_cm=12.0)
+        self.assertEqual(body_centre_cm(68.0, config), 80.0)
+        for method in ("los", "tri", "avg"):
+            geometry = TwoSensorGeometry(method=method)
+            readings = geometry.channels([(68.0, 90, 0), None, None])
+            geometry.track(readings, [True] * 3, 0.0, self.area, config)
+            fix = geometry.locate(readings, self.area, config)
+            self.assertEqual((fix.x_cm, fix.y_cm), (25.0, 80.0), method)
 
     # --- the position methods, which need track() before locate() ----------
 
@@ -501,17 +1370,17 @@ class TwoSensorGeometryBehaviour(unittest.TestCase):
         self.assertEqual(fix.column, 1)
 
     def test_one_scanner_hearing_nothing_leaves_the_other(self):
-        fix = self.scan([(None, 70, 2), None, (90.0, 115, 0)])
-        x, y = scanner_point(125.0, 90.0, 115)
+        fix = self.scan([(None, 110, 2), None, (90.0, 65, 0)])
+        x, y = scanner_point(125.0, body_centre_cm(90.0, self.config), 65)
         self.assertAlmostEqual(fix.x_cm, x)
         self.assertAlmostEqual(fix.y_cm, y)
 
     def test_line_of_sight_leaves_out_a_node_that_is_sweeping(self):
         # The left node is lost, and its beam has found furniture at 120 cm.
         sample = scanner_sample(80.0, 95.0)
-        sample[0] = (120.0, 60, 2)
+        sample[0] = (120.0, 120, 2)
         fix = self.scan(sample)
-        x, y = scanner_point(125.0, *sample[2][:2])
+        x, y = scanner_point(125.0, body_centre_cm(sample[2][0], self.config), sample[2][1])
         self.assertAlmostEqual(fix.x_cm, x)
         self.assertAlmostEqual(fix.y_cm, y)
         # Trilateration does not know the node is lost. Here the circles cross
@@ -531,22 +1400,69 @@ class TwoSensorGeometryBehaviour(unittest.TestCase):
     def test_trilateration_refuses_a_crossing_outside_a_beam(self):
         geometry = TwoSensorGeometry(method="tri")
         # Both servos point somewhere else entirely: the crossing is not where
-        # either is looking, so the nearer node (left, 87 cm) places the player
-        # by its own distance along its own aim instead.
-        d_left = math.hypot(60 - 25, 80)
-        sample = [(d_left, 120, 0), None, (math.hypot(60 - 125, 80), 120, 0)]
+        # the left one is looking, so the nearer node (left, 87 cm to the
+        # player's middle) places the player by its own distance along its own
+        # aim instead. Its point is 5 cm past the left edge: inside the margin,
+        # so still on the board.
+        d_left = math.hypot(60 - 25, 80) - BODY_RADIUS_CM
+        sample = [(d_left, 70, 0), None, (math.hypot(60 - 125, 80) - BODY_RADIUS_CM, 70, 0)]
         fix = self.scan(sample, geometry=geometry)
-        x, y = scanner_point(25.0, d_left, 120)
-        self.assertAlmostEqual(fix.x_cm, max(0.0, x))
+        x, y = scanner_point(25.0, body_centre_cm(d_left, self.config), 70)
+        self.assertAlmostEqual(fix.x_cm, max(5.0, x))   # off the left edge: kept on it
         self.assertAlmostEqual(fix.y_cm, y)
 
+    def test_trilateration_prefers_a_node_whose_beam_reaches_the_board(self):
+        geometry = TwoSensorGeometry(method="tri")
+        # As above with both servos at 50: even the edge of the left node's
+        # beam (42.5) is 22 cm past the left edge, past the margin, so nothing
+        # it hears is on the board, and the right node, further away but
+        # pointing on to the board, places the player - in the centre column,
+        # where they are.
+        d_right = math.hypot(60 - 125, 80) - BODY_RADIUS_CM
+        sample = [(math.hypot(60 - 25, 80) - BODY_RADIUS_CM, 50, 0), None, (d_right, 50, 0)]
+        fix = self.scan(sample, geometry=geometry)
+        x, y = scanner_point(125.0, body_centre_cm(d_right, self.config), 50)
+        self.assertAlmostEqual(fix.x_cm, x)
+        self.assertAlmostEqual(fix.y_cm, y)
+        self.assertEqual(fix.column, 1)
+
+    def test_a_node_is_in_play_when_the_edge_of_its_beam_is_on_the_board(self):
+        geometry = TwoSensorGeometry(method="tri")
+        # Both servos at 60: the left node's own point is 19 cm past the left
+        # edge, but its beam reaches to 67.5, and there the echo is 8 cm past
+        # it, inside the margin. So the left node is in play, and being the
+        # nearer, it places the player along its own aim (kept on the board).
+        d_left = math.hypot(60 - 25, 80) - BODY_RADIUS_CM
+        centre_x, _ = scanner_point(25.0, body_centre_cm(d_left, self.config), 60)
+        edge_x, _ = scanner_point(25.0, body_centre_cm(d_left, self.config), 67.5)
+        self.assertLess(centre_x, -PlayArea.EDGE_MARGIN_CM)
+        self.assertGreater(edge_x, -PlayArea.EDGE_MARGIN_CM)
+        sample = [(d_left, 60, 0), None, (math.hypot(60 - 125, 80) - BODY_RADIUS_CM, 60, 0)]
+        fix = self.scan(sample, geometry=geometry)
+        self.assertAlmostEqual(fix.x_cm, 5.0)   # off the left edge: kept on it
+
+    def test_trilateration_crosses_the_distances_in_a_far_square_across_the_board(self):
+        geometry = TwoSensorGeometry(method="tri")
+        # The player's middle 150 cm out in the right column: 180 cm from the
+        # left node, past the far edge plus its margin (160 + 15) as a depth,
+        # but the point along the left servo's line is on the board. Both
+        # distances count, and the crossing places the player.
+        d_left = math.hypot(125 - 25, 150)
+        self.assertGreater(d_left, PlayArea.default().far_cm + PlayArea.EDGE_MARGIN_CM)
+        fix = self.scan(scanner_sample(125.0, 150.0, aim_error_deg=5.0), geometry=geometry)
+        self.assertAlmostEqual(fix.x_cm, 125.0)
+        self.assertAlmostEqual(fix.y_cm, 150.0)
+
     def test_one_node_aimed_away_leaves_the_crossing_to_the_other(self):
-        # The right node looks 10 degrees past the player (furniture, say):
-        # the crossing is refused, and the left node - nearer, and aimed at
-        # the player - puts them where it sees them.
+        # The right node looks 25 degrees past the player (furniture, say),
+        # further than its beam and the player's width reach: with the aim
+        # tolerance off the crossing is refused, and the left node - nearer,
+        # and aimed at the player - puts them where it sees them. (On, 25
+        # degrees is inside the tolerance; see TriAimTolerance.)
+        self.config = FilterConfig(tri_aim_tolerance=False)
         geometry = TwoSensorGeometry(method="tri")
         sample = scanner_sample(60.0, 80.0)
-        sample[2] = (sample[2][0], sample[2][1] + 10.0, 0)
+        sample[2] = (sample[2][0], sample[2][1] - 25.0, 0)
         fix = self.scan(sample, geometry=geometry)
         self.assertAlmostEqual(fix.x_cm, 60.0)
         self.assertAlmostEqual(fix.y_cm, 80.0)
@@ -561,12 +1477,13 @@ class TwoSensorGeometryBehaviour(unittest.TestCase):
     def test_the_half_beam_is_tunable(self):
         geometry = TwoSensorGeometry(method="tri")
         sample = scanner_sample(60.0, 80.0, aim_error_deg=5.0)
-        narrow = FilterConfig(tri_beam_half_deg=4.0)
+        narrow = FilterConfig(tri_beam_half_deg=4.0, body_half_width_cm=0.0,
+                              tri_aim_tolerance=False)
         readings = geometry.channels(sample)
         geometry.track(readings, [True] * 3, 0.0, self.area, narrow)
         fix = geometry.locate(readings, self.area, narrow)
         # 5 degrees off is outside 4: the left node's own aim, not the crossing.
-        x, y = scanner_point(25.0, *sample[0][:2])
+        x, y = scanner_point(25.0, body_centre_cm(sample[0][0], narrow), sample[0][1])
         self.assertAlmostEqual(fix.x_cm, x)
         self.assertAlmostEqual(fix.y_cm, y)
 
@@ -577,6 +1494,17 @@ class TwoSensorGeometryBehaviour(unittest.TestCase):
             y = 100 * math.cos(math.radians(off_deg))
             self.assertEqual(in_beam(25.0, 90, x, y, 7.5), inside, off_deg)
         self.assertTrue(in_beam(25.0, None, 140.0, 5.0, 7.5))   # no angle, no check
+        self.assertFalse(in_beam(25.0, 90, 25.0, -10.0, 7.5))   # behind the node
+
+    def test_the_beam_is_widened_by_the_players_half_width(self):
+        # 100 cm straight out from x = 25 the beam's edge is 13.2 cm to the
+        # side; the middle of the player can be 20 cm past it when the beam
+        # found the edge of them.
+        edge = 100 * math.tan(math.radians(7.5))
+        for side, body, inside in ((edge + 19.0, 20.0, True), (edge + 21.0, 20.0, False),
+                                   (edge + 1.0, 0.0, False)):
+            for x in (25.0 + side, 25.0 - side):
+                self.assertEqual(in_beam(25.0, 90, x, 100.0, 7.5, body), inside, (side, body))
 
     def test_a_distance_outside_the_sensor_range_is_not_a_reading(self):
         self.assertFalse(in_sensor_range(None))
@@ -587,7 +1515,7 @@ class TwoSensorGeometryBehaviour(unittest.TestCase):
 
     def test_average_is_the_midpoint_of_the_other_two(self):
         sample = scanner_sample(80.0, 95.0)
-        sample[0] = (120.0, 60, 0)      # the left node aimed at something else
+        sample[0] = (120.0, 120, 0)     # the left node aimed at something else
         fixes = {}
         for method in ("los", "tri", "avg"):
             geometry = TwoSensorGeometry(method=method)
@@ -614,31 +1542,67 @@ class TwoSensorGeometryBehaviour(unittest.TestCase):
         # distances cross where the player is.
         truth = (75.0, 90.0)
         sample = scanner_sample(*truth, aim_error_deg=5.0)
-        off = max(math.dist(scanner_point(25.0, *sample[0][:2]), truth),
-                  math.dist(scanner_point(125.0, *sample[2][:2]), truth))
+        aimed = [scanner_point(node_x, body_centre_cm(sample[slot][0], self.config), sample[slot][1])
+                 for slot, node_x in ((0, 25.0), (2, 125.0))]
+        off = max(math.dist(point, truth) for point in aimed)
         self.assertGreater(off, 7.0)
+        # The line-of-sight track itself, not Dynamic (whose centre rule
+        # takes over in the centre column).
+        geometry = TwoSensorGeometry(method="los")
         for k in range(40):
-            fix = self.scan(sample, now_ms=50.0 * k)
+            fix = self.scan(sample, now_ms=50.0 * k, geometry=geometry)
         self.assertLess(math.dist((fix.x_cm, fix.y_cm), truth), 1.0)
 
     def test_readings_far_from_the_track_are_left_out_then_taken(self):
+        # The line-of-sight track itself, not Dynamic (the right node's last
+        # aim and the left node's new one cross in the centre column).
+        geometry = TwoSensorGeometry(method="los")
         for k in range(10):
-            self.scan(scanner_sample(40.0, 70.0), now_ms=50.0 * k)
+            self.scan(scanner_sample(40.0, 70.0), now_ms=50.0 * k, geometry=geometry)
         # One node's readings only, so each update is one outlier.
         relock = self.config.los_relock_readings
         for k in range(relock):
             fix = self.scan(scanner_sample(120.0, 60.0), now_ms=500.0 + 50.0 * k,
-                            fresh=(True, True, False))
+                            fresh=(True, True, False), geometry=geometry)
             if k < relock - 1:
                 self.assertLess(fix.x_cm, 60.0, f"outlier {k + 1} of {relock} moved the track")
         self.assertAlmostEqual(fix.x_cm, 120.0, delta=1.0)
 
+    def test_with_the_kalman_off_line_of_sight_takes_each_reading_at_once(self):
+        # No gate and no memory: the reading the gate above turns away five
+        # times is where the player is at once.
+        self.config = FilterConfig(kalman=False)
+        geometry = TwoSensorGeometry(method="los")
+        for k in range(10):
+            self.scan(scanner_sample(40.0, 70.0), now_ms=50.0 * k, geometry=geometry)
+        fix = self.scan(scanner_sample(120.0, 60.0), now_ms=500.0,
+                        fresh=(True, True, False), geometry=geometry)
+        self.assertAlmostEqual(fix.x_cm, 120.0, delta=1.0)
+
     def test_the_track_is_dropped_when_nothing_usable_arrives(self):
+        # The track's own timeout, so not the both-lost rule (out of bounds),
+        # which would otherwise end it at the same moment.
+        self.config = FilterConfig(lost_readings=LOST_READINGS_MAX)
         self.scan(scanner_sample(40.0, 70.0), now_ms=0.0)
         lost = [(None, 60, 2), None, (None, 120, 2)]
         timeout = self.config.los_track_timeout_ms
         self.assertEqual(self.scan(lost, now_ms=timeout).status, STATUS_OK)
         self.assertEqual(self.scan(lost, now_ms=timeout + 1).status, STATUS_NO_SIGNAL)
+
+    def test_one_nodes_readings_turned_away_restart_the_track(self):
+        # Both nodes report at once. When the player turns up somewhere else,
+        # the left node's new reading can still pass the gate on the slack
+        # across its line (the player's width) while the right node's distance
+        # says the track is far off. The right node's turned-away readings are
+        # counted on their own, so the track moves within a few updates. The
+        # line-of-sight track itself, not Dynamic (whose centre rule holds the
+        # centre for a moment after the lines leave it).
+        geometry = TwoSensorGeometry(method="los")
+        for k in range(20):
+            self.scan(scanner_sample(80.0, 95.0), now_ms=50.0 * k, geometry=geometry)
+        for k in range(self.config.los_relock_readings + 2):
+            fix = self.scan(scanner_sample(120.0, 60.0), now_ms=1000.0 + 50.0 * k, geometry=geometry)
+        self.assertLess(math.dist((fix.x_cm, fix.y_cm), (120.0, 60.0)), 5.0)
 
     def test_an_unknown_method_is_refused(self):
         with self.assertRaises(ValueError):
@@ -647,12 +1611,15 @@ class TwoSensorGeometryBehaviour(unittest.TestCase):
             self.geometry.method = "guess"
 
     def test_the_line_of_sight_is_tight_along_and_loose_across(self):
-        # Straight out from the left node: along is y, across is x.
+        # Straight out from the left node: along is y, across is x. Across, the
+        # aim's uncertainty at this distance and the player's half-width.
         x, y, cov = line_of_sight(25.0, 100.0, 90.0, 0, self.config)
         self.assertEqual((x, y), (25.0, 100.0))
         self.assertAlmostEqual(cov[1][1], self.config.los_range_sigma_cm ** 2)
-        across = 100.0 * math.radians(self.config.los_bearing_found_deg)
-        self.assertAlmostEqual(cov[0][0], across ** 2)
+        aim = 100.0 * math.radians(self.config.los_bearing_found_deg)
+        self.assertAlmostEqual(cov[0][0], aim ** 2 + self.config.body_half_width_cm ** 2)
+        _, _, point = line_of_sight(25.0, 100.0, 90.0, 0, FilterConfig(body_half_width_cm=0.0))
+        self.assertAlmostEqual(point[0][0], aim ** 2)
         # Half-found is less sure of its aim than found.
         _, _, half = line_of_sight(25.0, 100.0, 90.0, 1, self.config)
         self.assertGreater(half[0][0], cov[0][0])
@@ -668,6 +1635,211 @@ class TwoSensorGeometryBehaviour(unittest.TestCase):
         self.assertAlmostEqual(fix.y_cm, 80.0)
 
 
+class BothNodesLost(unittest.TestCase):
+    """Out of bounds, the only one there is: both nodes are lost. A node is
+    lost when its last lost_readings readings, scored found +1, half 0,
+    lost -1, add up to 0 or less, and not before it has had that many. No
+    hold."""
+
+    STEP_MS = 50.0
+    FOUND, HALF, LOST = 0, 1, 2
+
+    def node(self, state, slot):
+        """One node's reading in that scan state: the player at (75, 80) when
+        found, a stray echo when half, no echo when lost."""
+        if state == self.FOUND:
+            return scanner_sample(75.0, 80.0)[slot]
+        return (120.0 if state == self.HALF else None, 60 if slot == 0 else 120, state)
+
+    def both(self, state):
+        return [self.node(state, 0), None, self.node(state, 2)]
+
+    def feed(self, pipe, states, start=0, heard=None):
+        """One update per state, both nodes reading it; the results."""
+        return [pipe.update(self.both(state), (start + k) * self.STEP_MS, heard=heard)
+                for k, state in enumerate(states)]
+
+    def test_the_scores(self):
+        self.assertEqual([lost_score(s) for s in (self.FOUND, self.HALF, self.LOST)], [1, 0, -1])
+        # Far half: a half reading in the back row is +1, with the switch on.
+        self.assertEqual([lost_score(s, True, True) for s in (self.FOUND, self.HALF, self.LOST)],
+                         [1, 1, -1])
+        self.assertEqual(lost_score(self.HALF, True, False), 0)
+        self.assertEqual(lost_score(self.HALF, False, True), 0)
+
+    def test_the_default_is_21_readings(self):
+        # Aaron, 5 Oct: "the sweet spot".
+        self.assertEqual(FilterConfig().lost_readings, 21)
+
+    def test_lost_once_the_last_readings_add_up_to_0_or_less(self):
+        for method in ("dyn", "los", "tri", "avg"):
+            pipe = CoordinatePipeline(TwoSensorGeometry(method=method))
+            n = pipe.config.lost_readings
+            self.assertEqual(self.feed(pipe, [self.FOUND] * n)[-1].status, STATUS_OK, method)
+            # k lost after n found: the last n add up to n - 2k, 0 or less
+            # from k = ceil(n / 2).
+            k = (n + 1) // 2
+            results = self.feed(pipe, [self.LOST] * n, start=n)
+            self.assertNotEqual(results[k - 2].status, STATUS_OUT_OF_BOUNDS, method)
+            self.assertEqual(results[k - 1].status, STATUS_OUT_OF_BOUNDS, method)
+            self.assertFalse(results[k - 1].held, method)
+
+    def test_the_odd_found_or_half_does_not_stop_it(self):
+        pipe = CoordinatePipeline(TwoSensorGeometry())
+        n = pipe.config.lost_readings
+        pattern = [self.LOST, self.LOST, self.FOUND, self.LOST, self.HALF, self.LOST, self.LOST, self.LOST]
+        results = self.feed(pipe, pattern * 5)
+        self.assertTrue(all(r.status == STATUS_OUT_OF_BOUNDS for r in results[n - 1:]))
+
+    def test_half_in_the_back_row_counts_as_found(self):
+        # Far half (Aaron, 5 Oct): both nodes hear a player 130 cm out with one
+        # sensor each. On, nobody is lost; off, both are. With far priority
+        # off: on, its two far readings, which agree, keep the player in play
+        # either way (FarPriority).
+        n = FilterConfig().lost_readings
+        for far_half, want in ((True, STATUS_OK), (False, STATUS_OUT_OF_BOUNDS)):
+            pipe = CoordinatePipeline(TwoSensorGeometry(),
+                                      config=FilterConfig(far_half=far_half, far_priority=False))
+            results = [pipe.update(scanner_sample(75.0, 130.0, state=self.HALF), k * self.STEP_MS)
+                       for k in range(2 * n)]
+            self.assertEqual(results[-1].status, want, far_half)
+
+    def test_half_nearer_than_the_back_row_still_scores_0(self):
+        # 50 cm out, the front row: in an empty room the floor and furniture
+        # give half readings there.
+        pipe = CoordinatePipeline(TwoSensorGeometry())
+        n = pipe.config.lost_readings
+        results = [pipe.update(scanner_sample(75.0, 50.0, state=self.HALF), k * self.STEP_MS)
+                   for k in range(2 * n)]
+        self.assertEqual(results[-1].status, STATUS_OUT_OF_BOUNDS)
+
+    def test_the_back_row_follows_the_calibrated_rows(self):
+        # Rows 10-60 / 60-110 / 110-160: 105 cm out is the middle row.
+        area = PlayArea.calibrated([(10.0, 160.0)] * 3)
+        geometry = TwoSensorGeometry()
+        config = FilterConfig()
+        for depth, want in ((105.0, False), (115.0, True), (190.0, True), (195.0, False)):
+            filtered = geometry.channels(scanner_sample(75.0, depth, state=self.HALF))
+            self.assertEqual(geometry._in_back_row(0, filtered, area, config), want, depth)
+
+    def test_the_far_half_switch_changes_only_far_half(self):
+        pipeline = CoordinatePipeline(TwoSensorGeometry())
+        pipeline.set_far_half(False)
+        self.assertFalse(pipeline.config.far_half)
+        self.assertEqual(pipeline.config.lost_readings, 21)
+        pipeline.set_far_half(True)
+        self.assertTrue(pipeline.config.far_half)
+
+    def test_all_half_is_lost(self):
+        # On average half: 0, which is lost or half.
+        pipe = CoordinatePipeline(TwoSensorGeometry())
+        n = pipe.config.lost_readings
+        self.assertEqual(self.feed(pipe, [self.HALF] * n)[-1].status, STATUS_OUT_OF_BOUNDS)
+
+    def test_mostly_finding_the_player_is_never_out_of_bounds(self):
+        # Three found to one lost, and found off the board too, where the
+        # player is kept on the edge square.
+        for where in ((75.0, 80.0), (175.0, 80.0), (75.0, 230.0)):
+            pipe = CoordinatePipeline(TwoSensorGeometry())
+            for k in range(200):
+                sample = scanner_sample(*where) if k % 4 else self.both(self.LOST)
+                result = pipe.update(sample, k * self.STEP_MS)
+                self.assertNotEqual(result.status, STATUS_OUT_OF_BOUNDS, (where, k))
+
+    def test_one_node_still_finding_the_player_is_not_out_of_bounds(self):
+        pipe = CoordinatePipeline(TwoSensorGeometry())
+        sample = scanner_sample(100.0, 70.0)
+        sample[0] = self.node(self.LOST, 0)
+        result = None
+        for k in range(100):
+            result = pipe.update(sample, k * self.STEP_MS)
+        self.assertEqual(result.status, STATUS_OK)
+        self.assertFalse(result.held)
+
+    def test_not_before_a_node_has_had_that_many_readings(self):
+        pipe = CoordinatePipeline(TwoSensorGeometry())
+        n = pipe.config.lost_readings
+        results = self.feed(pipe, [self.LOST] * n)
+        self.assertNotEqual(results[n - 2].status, STATUS_OUT_OF_BOUNDS)
+        self.assertEqual(results[n - 1].status, STATUS_OUT_OF_BOUNDS)
+
+    def test_back_once_the_found_readings_outweigh_the_rest(self):
+        pipe = CoordinatePipeline(TwoSensorGeometry())
+        n = pipe.config.lost_readings
+        self.feed(pipe, [self.LOST] * n)
+        results = self.feed(pipe, [self.FOUND] * n, start=n)
+        # n/2 found and n/2 lost add up to 0: still lost. One more, back.
+        self.assertEqual(results[n // 2 - 1].status, STATUS_OUT_OF_BOUNDS)
+        self.assertEqual(results[n // 2].status, STATUS_OK)
+
+    def test_each_reading_counts_once(self):
+        # Turns: the right node finds the player, sends one lost reading, then
+        # waits while the left one sweeps. Its "no echo" is fresh in every
+        # update (a slot with no reading always is) but was heard once, so its
+        # last readings still mostly find the player.
+        pipe = CoordinatePipeline(TwoSensorGeometry())
+        n = pipe.config.lost_readings
+        self.feed(pipe, [self.FOUND] * n)
+        result = None
+        for k in range(3 * n):
+            result = pipe.update(self.both(self.LOST), (n + k) * self.STEP_MS,
+                                 fresh=[True, True, True], heard=[True, False, k == 0])
+        self.assertNotEqual(result.status, STATUS_OUT_OF_BOUNDS)
+
+    def test_a_node_waiting_for_its_turn_keeps_its_last_readings(self):
+        # The right node was lost on its last turn; now the left one is.
+        pipe = CoordinatePipeline(TwoSensorGeometry())
+        n = pipe.config.lost_readings
+        self.feed(pipe, [self.LOST] * n, heard=[False, False, True])
+        result = None
+        for k in range(n):
+            result = pipe.update(self.both(self.LOST), (n + k) * self.STEP_MS,
+                                 fresh=[True, True, True], heard=[True, False, False])
+        self.assertEqual(result.status, STATUS_OUT_OF_BOUNDS)
+
+    def test_the_number_of_readings_is_tunable(self):
+        pipe = CoordinatePipeline(TwoSensorGeometry(), config=FilterConfig(lost_readings=3))
+        self.feed(pipe, [self.FOUND] * 3)
+        results = self.feed(pipe, [self.LOST, self.LOST], start=3)
+        # found, lost, lost: -1.
+        self.assertNotEqual(results[0].status, STATUS_OUT_OF_BOUNDS)
+        self.assertEqual(results[1].status, STATUS_OUT_OF_BOUNDS)
+        for bad in (0, LOST_READINGS_MAX + 1):
+            with self.assertRaises(ValueError):
+                FilterConfig(lost_readings=bad)
+
+    def test_nodes_without_a_scan_state_never_count_as_lost(self):
+        pipe = CoordinatePipeline(TwoSensorGeometry())
+        result = None
+        for k in range(50):
+            result = pipe.update([(None, 60), None, (None, 120)], k * self.STEP_MS)
+        self.assertNotEqual(result.status, STATUS_OUT_OF_BOUNDS)
+
+    def test_short_of_out_of_bounds_the_player_stays_on_the_board(self):
+        # Off the side, past the far edge, in front of the near one, and a
+        # long run of no echo from nodes that send no scan state: the player
+        # stays on the board (the edge square, or the last one, held). In
+        # front of the near edge is the dead zone, too close with it on
+        # (DeadZone), so it is off here.
+        pipe = CoordinatePipeline(TwoSensorGeometry(), config=FilterConfig(dead_zone=False))
+        t = 0.0
+        for where, cell in (((-30.0, 80.0), (0, 1)), ((75.0, 220.0), (1, 2)),
+                            ((180.0, 40.0), (2, 0)), ((75.0, 5.0), (1, 0))):
+            pipe.reset()
+            result = None
+            for k in range(60):
+                result = pipe.update(scanner_sample(*where), t + k * self.STEP_MS)
+            self.assertEqual(result.status, STATUS_OK, where)
+            self.assertEqual((result.gx, result.gy), cell, where)
+            t += 4000.0
+        held = None
+        for k in range(400):
+            held = pipe.update([None, None, None], t + k * self.STEP_MS)
+        self.assertEqual(held.status, STATUS_OK)
+        self.assertTrue(held.held)
+        self.assertGreater(held.held_for, 300)
+
+
 class CartesianGeometryBehaviour(unittest.TestCase):
     """The entry point for a rig that reports (x, y) itself."""
 
@@ -680,10 +1852,12 @@ class CartesianGeometryBehaviour(unittest.TestCase):
         self.assertEqual((result.x_cm, result.y_cm), (120.0, 90.0))
         self.assertEqual((result.gx, result.gy), (2, 1))
 
-    def test_x_off_the_board_is_out_of_bounds(self):
+    def test_x_off_the_board_is_not_out_of_bounds(self):
+        # Only nobody found is out of bounds: a position off the board is an
+        # unusable reading, ridden out like any other (here nothing is held).
         self.pipe = CoordinatePipeline(CartesianGeometry(),
                                        config=FilterConfig(hold_readings=0))
-        self.assertEqual(self.pipe.update((-40.0, 80.0), 0).status, STATUS_OUT_OF_BOUNDS)
+        self.assertEqual(self.pipe.update((-40.0, 80.0), 0).status, STATUS_NO_SIGNAL)
 
     def test_depth_drives_the_proximity_alert(self):
         self.pipe = CoordinatePipeline(CartesianGeometry(),
@@ -694,6 +1868,444 @@ class CartesianGeometryBehaviour(unittest.TestCase):
         self.pipe = CoordinatePipeline(CartesianGeometry(),
                                        config=FilterConfig(hold_readings=0))
         self.assertEqual(self.pipe.update(None, 0).status, STATUS_NO_SIGNAL)
+
+
+class AngleLimit(unittest.TestCase):
+    """The angle limit (Aaron, 5 Oct): on the 150 x 160 cm grid, a node's
+    filtered distance further than its servo line runs on the grid (+5 cm)
+    is not a player; line of sight and Dynamic's node rules drop it, and
+    trilateration ignores it."""
+
+    def test_the_limit_is_where_the_servo_line_leaves_the_grid(self):
+        self.assertEqual(GRID_LENGTH_CM, 160.0)
+        self.assertEqual(angle_limit_cm(25.0, 90), 160.0)
+        self.assertEqual(angle_limit_cm(25.0, None), 160.0)
+        self.assertAlmostEqual(angle_limit_cm(25.0, 70), 73.1, places=1)    # left wall
+        self.assertAlmostEqual(angle_limit_cm(25.0, 40), 32.6, places=1)    # its servo's limit
+        self.assertAlmostEqual(angle_limit_cm(25.0, 120), 184.8, places=1)  # far edge
+        self.assertAlmostEqual(angle_limit_cm(25.0, 150), 144.3, places=1)  # right wall
+        corner = 90 + math.degrees(math.atan2(125.0, 160.0))                 # the far right corner
+        self.assertAlmostEqual(angle_limit_cm(25.0, corner), math.hypot(125.0, 160.0), places=6)
+        # The right node is the left one mirrored.
+        for angle in (30, 52, 75, 90, 99, 110, 140):
+            self.assertAlmostEqual(angle_limit_cm(125.0, angle), angle_limit_cm(25.0, 180 - angle),
+                                   places=9)
+
+    def test_a_reading_up_to_twenty_percent_past_it_still_counts(self):
+        # Aaron, 5 Oct: +20 percent at great distances (it was +5 cm).
+        area, config = PlayArea.default(), FilterConfig()
+        limit = angle_limit_cm(25.0, 70)
+        self.assertTrue(within_angle_limit(25.0, limit * 1.2 - 0.01, 70, area, config))
+        self.assertFalse(within_angle_limit(25.0, limit * 1.2 + 0.01, 70, area, config))
+        self.assertTrue(within_angle_limit(25.0, 191.9, 90, area, config))    # 160 straight out
+        self.assertFalse(within_angle_limit(25.0, 192.1, 90, area, config))
+        self.assertTrue(within_angle_limit(25.0, 400.0, 70, area, FilterConfig(angle_limit=False)))
+
+    def test_a_servo_line_past_the_limit_does_not_lock_the_centre(self):
+        # The 4 Oct centre-test angles (141 and 49) cross in the centre column.
+        # A left reading of 200 cm at 141 degrees is past its line's 160.8 cm
+        # (+20 %, 193 cm), so the left aim does not count and nothing locks
+        # the centre.
+        def placed(config):
+            geometry = TwoSensorGeometry()
+            area = PlayArea.default()
+            for k in range(3):
+                readings = geometry.channels([(200.0, 141, 0), None, (80.0, 49, 0)])
+                geometry.track(readings, [True] * 3, 100.0 * k, area, config)
+            return geometry.placed_by(readings, area)
+
+        self.assertEqual(placed(FilterConfig(angle_limit=False)), "centre")
+        self.assertNotEqual(placed(FilterConfig()), "centre")
+
+    def test_the_pipeline_switch_changes_only_the_angle_limit(self):
+        pipeline = CoordinatePipeline(TwoSensorGeometry(method="los"))
+        pipeline.set_angle_limit(False)
+        self.assertFalse(pipeline.config.angle_limit)
+        self.assertEqual(pipeline.config, FilterConfig(angle_limit=False))
+        pipeline.set_angle_limit(True)
+        self.assertTrue(pipeline.config.angle_limit)
+
+    def test_the_parity_runs_show_the_switch_doing_something(self):
+        with open(FIXTURE, encoding="utf-8") as fh:
+            trace = json.load(fh)
+        runs = trace["runs"]
+        at = trace["fields"].index("x")
+        changed = sum(1 for a, b in zip(runs["default"]["steps"], runs["angleLimitOff"]["steps"])
+                      if a[at] != b[at])
+        self.assertGreater(changed, 20, "line of sight should differ with the angle limit off")
+
+
+class TriAimTolerance(unittest.TestCase):
+    """The aim tolerance (5 Oct): with it on, trilateration's beam check lets a
+    crossing be tri_aim_tolerance_deg (20) further off each servo's aim than
+    the beam alone, so a servo that reports its angle about 20 degrees out, as
+    the left one did in the centre test (4 Oct), no longer throws the crossing
+    away; with it off, the beam alone, as before."""
+
+    # The centre test's C-120 spot, the player's middle at (75, 120): the
+    # median readings and servo angles. The left servo faced 134 degrees where
+    # the spot needs about 113.
+    C120 = [(117.0, 134, 0), None, (115.0, 55, 0)]
+
+    def placed(self, sample, config):
+        geometry = TwoSensorGeometry(method="tri")
+        area = PlayArea.default()
+        readings = geometry.channels(sample)
+        geometry.track(readings, [True] * 3, 0.0, area, config)
+        fix = geometry.locate(readings, area, config)
+        return fix.x_cm, fix.y_cm
+
+    def crossing(self, sample, config):
+        d_left = body_centre_cm(sample[0][0], config)
+        d_right = body_centre_cm(sample[2][0], config)
+        along = (d_left ** 2 - d_right ** 2 + 100.0 ** 2) / 200.0
+        return 25.0 + along, math.sqrt(d_left ** 2 - along ** 2)
+
+    def test_it_is_on_by_default_at_twenty_degrees(self):
+        config = FilterConfig()
+        self.assertTrue(config.tri_aim_tolerance)
+        self.assertEqual(config.tri_aim_tolerance_deg, 20.0)
+
+    def test_a_servo_twenty_degrees_off_keeps_the_crossing(self):
+        # On: the crossing, 3 cm from the spot. Off: the left servo is 21
+        # degrees off the crossing, past its beam and the player's width, so
+        # the nearer node (right, 130 cm to the player's middle) places them
+        # along its own aim - 28 cm off, on the edge of the left column.
+        on = FilterConfig()
+        x, y = self.placed(self.C120, on)
+        want = self.crossing(self.C120, on)
+        self.assertAlmostEqual(x, want[0], places=6)
+        self.assertAlmostEqual(y, want[1], places=6)
+        self.assertLess(math.hypot(x - 75.0, y - 120.0), 4.0)
+
+        off = FilterConfig(tri_aim_tolerance=False)
+        x, y = self.placed(self.C120, off)
+        own = scanner_point(125.0, body_centre_cm(115.0, off), 55)
+        self.assertAlmostEqual(x, own[0], places=6)
+        self.assertAlmostEqual(y, own[1], places=6)
+        self.assertGreater(math.hypot(x - 75.0, y - 120.0), 25.0)
+
+    def test_a_servo_forty_degrees_off_still_refuses_the_crossing(self):
+        # The left servo at 154: 41 degrees off the crossing, past the beam,
+        # the tolerance and the player's width. The right node places them.
+        sample = [(117.0, 154, 0), None, (115.0, 55, 0)]
+        config = FilterConfig()
+        x, y = self.placed(sample, config)
+        own = scanner_point(125.0, body_centre_cm(115.0, config), 55)
+        self.assertAlmostEqual(x, own[0], places=6)
+        self.assertAlmostEqual(y, own[1], places=6)
+
+    def test_the_tolerance_widens_only_the_beam_check(self):
+        # in_beam() with the beam plus the tolerance: 100 cm straight out, 27
+        # degrees off is in (with no body width), 28 is out.
+        half = FilterConfig().tri_beam_half_deg + FilterConfig().tri_aim_tolerance_deg
+        for off_deg, inside in ((27, True), (-27, True), (28, False), (-28, False)):
+            x = 25.0 - 100 * math.sin(math.radians(off_deg))
+            y = 100 * math.cos(math.radians(off_deg))
+            self.assertEqual(in_beam(25.0, 90, x, y, half), inside, off_deg)
+        # Whether a node is in play still follows its beam alone: the left
+        # servo at 50 hears nothing on the board (as in
+        # test_trilateration_prefers_a_node_whose_beam_reaches_the_board).
+        config = FilterConfig()
+        geometry = TwoSensorGeometry(method="tri")
+        area = PlayArea.default()
+        d_left = math.hypot(60 - 25, 80) - BODY_RADIUS_CM
+        d_right = math.hypot(60 - 125, 80) - BODY_RADIUS_CM
+        readings = geometry.channels([(d_left, 50, 0), None, (d_right, 50, 0)])
+        geometry.track(readings, [True] * 3, 0.0, area, config)
+        self.assertFalse(geometry._in_play_along(0, body_centre_cm(d_left, config), area, config))
+
+    def test_the_pipeline_switch_changes_only_the_aim_tolerance(self):
+        pipeline = CoordinatePipeline(TwoSensorGeometry(method="tri"))
+        pipeline.set_tri_aim_tolerance(False)
+        self.assertFalse(pipeline.config.tri_aim_tolerance)
+        self.assertEqual(pipeline.config, FilterConfig(tri_aim_tolerance=False))
+        pipeline.set_tri_aim_tolerance(True)
+        self.assertTrue(pipeline.config.tri_aim_tolerance)
+
+    def test_the_parity_runs_show_the_switch_doing_something(self):
+        with open(FIXTURE, encoding="utf-8") as fh:
+            trace = json.load(fh)
+        runs = trace["runs"]
+        at = trace["fields"].index("x")
+        changed = sum(1 for a, b in zip(runs["trilateration"]["steps"],
+                                        runs["triAimToleranceOff"]["steps"])
+                      if a[at] != b[at])
+        self.assertGreater(changed, 20, "trilateration should differ with the aim tolerance off")
+
+
+class FarPriority(unittest.TestCase):
+    """Far priority (Dynamic's rule F; Aaron, 6 Oct): when both nodes have
+    read past far_priority_cm (110) within far_seen_ms (1.5 s), found or half,
+    and the two readings agree - their distances cross inside both nodes'
+    beams, on the board - Dynamic places the player at that crossing and they
+    are not Out of bounds, whatever the readings in between. The nodes take
+    turns here, as on the rig: a node with nothing new is not fresh."""
+
+    STEP_MS = 100.0
+    FOUND, HALF, LOST = 0, 1, 2
+    FAR = (90.0, 140.0)                       # about 139 cm from the left node, 129 from the right
+
+    def setUp(self):
+        self.latest = [None, None, None]
+
+    def pipe(self, method="dyn", **config):
+        return CoordinatePipeline(TwoSensorGeometry(method=method), config=FilterConfig(**config))
+
+    def step(self, pipe, k, left=None, right=None):
+        """Update k (k * STEP_MS): the nodes given send that reading, the
+        other keeps its last one, not fresh."""
+        fresh = [False, False, False]
+        for slot, reading in ((0, left), (2, right)):
+            if reading is not None:
+                self.latest[slot] = reading
+                fresh[slot] = True
+        result = pipe.update(list(self.latest), k * self.STEP_MS, fresh=fresh, heard=fresh)
+        return result, pipe.geometry.placed_by(result.filtered, pipe.area)
+
+    def far(self, slot):
+        return scanner_sample(*self.FAR, state=self.HALF)[slot]
+
+    @staticmethod
+    def no_echo(angle=60):
+        return (None, angle, 2)
+
+    def test_it_is_on_by_default(self):
+        config = FilterConfig()
+        self.assertTrue(config.far_priority)
+        self.assertEqual((config.far_priority_cm, config.far_seen_ms), (110.0, 1500.0))
+        self.assertEqual(DYNAMIC_RULE_SWITCHES["farPriority"], "far_priority")
+
+    def test_two_far_readings_that_agree_hold_the_player_through_the_noise(self):
+        for on in (True, False):
+            self.latest = [None, None, None]
+            pipe = self.pipe(far_priority=on)
+            # The left node hears the player once, then nothing and a stray
+            # nearer half echo; then the right node's turn.
+            self.step(pipe, 0, left=self.far(0))
+            for k in range(1, 5):
+                self.step(pipe, k, left=(60.0, 70, self.HALF) if k == 3 else self.no_echo())
+            result, by = self.step(pipe, 5, right=self.far(2))
+            if not on:
+                self.assertNotEqual(by, "far")
+                continue
+            self.assertEqual(by, "far")
+            self.assertAlmostEqual(result.x_cm, self.FAR[0], places=6)
+            self.assertAlmostEqual(result.y_cm, self.FAR[1], places=6)
+            # The right node's no-echo and stray readings leave it there
+            # until the left node's far reading is 1.5 s old.
+            for k in range(6, 16):
+                result, by = self.step(pipe, k, right=(55.0, 100, self.HALF) if k == 8 else self.no_echo(120))
+                self.assertEqual(by, "far", k)
+                self.assertAlmostEqual(result.y_cm, self.FAR[1], places=6)
+            _, by = self.step(pipe, 16, right=self.no_echo(120))
+            self.assertNotEqual(by, "far")
+
+    def test_far_readings_that_do_not_agree_change_nothing(self):
+        # As on the rig on 6 Oct: the left node 113 cm off with its servo at
+        # its stop, the right one 135 cm straight out. They cross at about
+        # (44, 127), 60 degrees off where the left servo points.
+        pipe = self.pipe()
+        self.step(pipe, 0, left=(113.0, 160, self.HALF))
+        _, by = self.step(pipe, 1, right=(135.0, 85, self.HALF))
+        self.assertNotEqual(by, "far")
+        self.assertIsNone(pipe.geometry._far_fix(pipe.area))
+
+    def test_a_reading_at_110_cm_or_nearer_is_not_far(self):
+        pipe = self.pipe()
+        self.step(pipe, 0, left=(110.0, 112, self.HALF))
+        _, by = self.step(pipe, 1, right=(110.0, 68, self.HALF))
+        self.assertNotEqual(by, "far")
+
+    def test_finding_the_player_nearer_twice_in_a_row_ends_it(self):
+        pipe = self.pipe()
+        self.step(pipe, 0, left=self.far(0))
+        _, by = self.step(pipe, 1, right=self.far(2))
+        self.assertEqual(by, "far")
+        near = scanner_sample(75.0, 60.0)
+        _, by = self.step(pipe, 2, right=near[2])
+        self.assertEqual(by, "far", "one found reading nearer is not enough")
+        _, by = self.step(pipe, 3, right=near[2])
+        self.assertNotEqual(by, "far")
+        self.assertIsNone(pipe.geometry._far_seen[2])
+
+    def test_it_keeps_a_far_player_out_of_out_of_bounds_with_dynamic_only(self):
+        # Every node reading one in four hears the player far out, the rest
+        # are no echo: each node's last 21 add up to under 0, so both are
+        # lost. Dynamic keeps the player at the far readings' crossing; line
+        # of sight, with no far priority, says Out of bounds as before.
+        for method, want in (("dyn", STATUS_OK), ("los", STATUS_OUT_OF_BOUNDS)):
+            self.latest = [None, None, None]
+            pipe = self.pipe(method=method)
+            for k in range(60):
+                far = k % 4 == 0
+                result, _ = self.step(pipe, k, left=self.far(0) if far else self.no_echo(),
+                                      right=self.far(2) if far else self.no_echo(120))
+            self.assertTrue(pipe.geometry._nobody_found(FilterConfig()), method)
+            self.assertEqual(result.status, want, method)
+        self.assertAlmostEqual(result.y_cm if method == "dyn" else self.FAR[1], self.FAR[1])
+
+    def test_the_rule_switch_turns_it_off(self):
+        pipe = self.pipe()
+        self.step(pipe, 0, left=self.far(0))
+        _, by = self.step(pipe, 1, right=self.far(2))
+        self.assertEqual(by, "far")
+        pipe.config = replace(pipe.config, far_priority=False)
+        _, by = self.step(pipe, 2, right=self.far(2))
+        self.assertNotEqual(by, "far")
+
+    def test_the_parity_runs_show_the_rule(self):
+        with open(FIXTURE, encoding="utf-8") as fh:
+            trace = json.load(fh)
+        runs = trace["runs"]
+        # Segment 31, the last 360 steps: 200 of the far player in turns, 100
+        # of far readings that do not agree, 60 of the player found nearer.
+        # The far player's last readings count for 1.5 s (75 steps) into the
+        # second part; after that, nothing is far.
+        on, off = runs["dynamic"]["placedBy"], runs["farPriorityOff"]["placedBy"]
+        self.assertGreater(on[-360:-160].count("far"), 100)
+        self.assertNotIn("far", on[-160 + 75:])
+        self.assertNotIn("far", off)
+        self.assertNotIn("far", runs["dynamicRulesOff"]["placedBy"])
+
+
+class DeadZone(unittest.TestCase):
+    """The dead zone (Aaron, 5 Oct): too close when a raw reading's point along
+    its node's servo line is less than 10 cm out, the strip across the front
+    of the grid; with the switch off, when the raw reading itself is."""
+
+    STEP_MS = 50.0
+
+    def settle(self, sample, config=None):
+        """Two updates of the same sample, enough to confirm too close."""
+        pipe = CoordinatePipeline(TwoSensorGeometry(), config=config)
+        result = None
+        for k in range(2):
+            result = pipe.update(sample, k * self.STEP_MS)
+        return result
+
+    def test_turned_in_a_reading_over_10_cm_is_too_close(self):
+        # The right node at 31 degrees reads 14 cm: 14 cos 59 = 7.2 cm out.
+        # The left one sees the player's back half, 60 cm out.
+        sample = [(60.0, 150, 0), None, (14.0, 31, 0)]
+        result = self.settle(sample)
+        self.assertEqual(result.status, STATUS_TOO_CLOSE)
+        self.assertAlmostEqual(result.y_cm, 14.0 * math.cos(math.radians(59)))
+        self.assertNotEqual(self.settle(sample, FilterConfig(dead_zone=False)).status,
+                            STATUS_TOO_CLOSE)
+
+    def test_the_distance_into_the_dead_zone_follows_the_servo_angle(self):
+        # 10 / cos(phi): 10 cm straight out, 15.6 at 40 and 140, 29.2 at 160.
+        for angle, edge in ((90, 10.0), (40, 15.557), (140, 15.557), (160, 29.238)):
+            inside = self.settle([(edge - 0.1, angle, 0), None, None])
+            outside = self.settle([(edge + 0.1, angle, 0), None, None])
+            self.assertEqual(inside.status, STATUS_TOO_CLOSE, angle)
+            self.assertNotEqual(outside.status, STATUS_TOO_CLOSE, angle)
+
+    def test_off_only_the_reading_itself_counts(self):
+        off = FilterConfig(dead_zone=False)
+        self.assertNotEqual(self.settle([(25.0, 160, 0), None, None], off).status, STATUS_TOO_CLOSE)
+        result = self.settle([(9.0, 160, 0), None, None], off)
+        self.assertEqual(result.status, STATUS_TOO_CLOSE)
+        self.assertEqual(result.y_cm, 9.0)
+
+    def test_one_close_reading_is_not_enough(self):
+        pipe = CoordinatePipeline(TwoSensorGeometry())
+        result = pipe.update([(20.0, 150, 0), None, None], 0.0)
+        self.assertNotEqual(result.status, STATUS_TOO_CLOSE)
+
+    def test_the_rows_start_behind_the_dead_zone(self):
+        area = PlayArea.default()
+        self.assertEqual(area.per_column, ((10.0, 160.0),) * 3)
+        self.assertEqual([area.row_for(0, y) for y in (11, 59, 61, 109, 111, 159)],
+                         [0, 0, 1, 1, 2, 2])
+        self.assertEqual(area.alert_threshold_cm, 10.0)
+
+    def test_the_pipeline_switch_changes_only_the_dead_zone(self):
+        pipeline = CoordinatePipeline(TwoSensorGeometry(method="los"))
+        pipeline.set_dead_zone(False)
+        self.assertFalse(pipeline.config.dead_zone)
+        self.assertEqual(pipeline.config, FilterConfig(dead_zone=False))
+        pipeline.set_dead_zone(True)
+        self.assertTrue(pipeline.config.dead_zone)
+
+    def test_the_parity_runs_show_the_switch_doing_something(self):
+        with open(FIXTURE, encoding="utf-8") as fh:
+            trace = json.load(fh)
+        runs = trace["runs"]
+        at = trace["fields"].index("status")
+        close = [sum(1 for step in runs[name]["steps"] if step[at] == STATUS_TOO_CLOSE)
+                 for name in ("default", "deadZoneOff")]
+        self.assertGreater(close[0], close[1] + 50, "too close more often with the dead zone on")
+
+
+class ConfidenceLevel(unittest.TestCase):
+    """Dynamic's first rule (Aaron, 5 Oct): a node whose confidence from the
+    server (handover.py) is at the confidence level places the player on its
+    own reading, and the other node is left out."""
+
+    def placed(self, left, right, config=None, frames=3):
+        """placed_by and position after a few updates of these sample
+        entries, each (x, y, confidence) for a node finding something at
+        (x, y), or None for no reading."""
+        config = config or FilterConfig()
+        geometry = TwoSensorGeometry()
+        area = PlayArea.default()
+
+        def entry(slot, spec):
+            if spec is None:
+                return None
+            x, y, confidence = spec
+            return tuple(scanner_sample(x, y)[slot]) + (confidence,)
+
+        readings = None
+        for k in range(frames):
+            readings = geometry.channels([entry(0, left), None, entry(2, right)])
+            geometry.track(readings, [True] * 3, 100.0 * k, area, config)
+        return geometry.placed_by(readings, area), geometry.position(readings, area)
+
+    def test_a_node_at_the_level_places_the_player_alone(self):
+        by, where = self.placed((25.0, 70.0, 0.9), (90.0, 50.0, 0.3))
+        self.assertEqual(by, "conf-left")
+        self.assertAlmostEqual(where[0], 25.0, places=6)
+        self.assertAlmostEqual(where[1], 70.0, places=6)
+        by, where = self.placed((60.0, 50.0, 0.3), (125.0, 70.0, 0.95))
+        self.assertEqual(by, "conf-right")
+        self.assertAlmostEqual(where[0], 125.0, places=6)
+
+    def test_the_level_is_inclusive_and_settable(self):
+        self.assertEqual(self.placed((25.0, 70.0, 0.8), (90.0, 50.0, 0.3))[0], "conf-left")
+        config = FilterConfig(confidence_level_pct=95)
+        self.assertNotEqual(self.placed((25.0, 70.0, 0.9), (90.0, 50.0, 0.3), config)[0], "conf-left")
+
+    def test_both_at_the_level_the_higher_one_places_the_player(self):
+        self.assertEqual(self.placed((25.0, 70.0, 0.85), (125.0, 70.0, 0.9))[0], "conf-right")
+        by = self.placed((75.0, 90.0, 0.85), (75.0, 90.0, 0.85))[0]
+        self.assertNotIn(by, ("conf-left", "conf-right"))
+
+    def test_no_confidence_yet_or_the_switch_off_leaves_it_to_the_other_rules(self):
+        self.assertNotIn(self.placed((25.0, 70.0, None), (90.0, 50.0, None))[0],
+                         ("conf-left", "conf-right"))
+        off = FilterConfig(confidence_node=False)
+        self.assertNotIn(self.placed((25.0, 70.0, 0.9), (90.0, 50.0, 0.3), off)[0],
+                         ("conf-left", "conf-right"))
+
+    def test_a_reading_off_the_board_does_not_count(self):
+        # The left node is sure, but of something past the left edge.
+        self.assertNotEqual(self.placed((-30.0, 70.0, 0.95), (90.0, 50.0, 0.3))[0], "conf-left")
+
+    def test_a_confident_node_may_reach_20_percent_past_the_far_edge(self):
+        # A lone left node finds the player 180 cm out in the left column, past
+        # the default far edge (160) but inside 160 + 20 % (192): it places
+        # them in A1 on its own. Without the leeway it does not; nor at 195.
+        lone = dict(right=None, frames=4)
+        self.assertEqual(self.placed((25.0, 180.0, None), **lone)[0], "corner-left")
+        self.assertNotEqual(self.placed((25.0, 180.0, None), config=FilterConfig(far_leeway=0.0),
+                                        **lone)[0], "corner-left")
+        self.assertNotEqual(self.placed((25.0, 195.0, None), **lone)[0], "corner-left")
+
+    def test_the_rule_switch_has_its_control_panel_name(self):
+        self.assertEqual(DYNAMIC_RULE_SWITCHES["confidenceNode"], "confidence_node")
 
 
 if __name__ == "__main__":

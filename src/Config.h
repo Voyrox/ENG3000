@@ -55,6 +55,16 @@ constexpr int32_t SERVER_ATTEMPT_TIMEOUT_MS = 1000;
 constexpr uint32_t SOCKET_READ_TIMEOUT_SECONDS = 1;
 
 // --- Pins -----------------------------------------------------------------
+// Every signal is on one header of the 30-pin ESP32 board (Aaron, 6 Oct): the
+// one with VIN, D13 ... D34, VN, VP and EN, on the right with the USB port up
+// and the chip facing you. Each sensor's two pins sit side by side, with a free
+// pin between groups:
+//   D13 left echo, D12 left trigger | D14 free |
+//   D27 right echo, D26 right trigger | D25 free | D33 servo, D32 buzzer
+// D12 is a strapping pin: if the sensor holds it high at power-up the board
+// does not boot. D35, D34, VN and VP are input-only, so nothing that drives a
+// pin can go there. 3V3 is only on the other header, so the sensors' power
+// stays there.
 // Two ultrasonic sensors side by side on the servo horn.
 constexpr uint8_t LEFT_TRIG_PIN = 13;
 constexpr uint8_t LEFT_ECHO_PIN = 12;
@@ -74,16 +84,19 @@ constexpr double SOUND_CM_PER_US = 0.034;
 
 // A reading inside this range is taken to be the player; outside it there is no
 // target.
-constexpr float MIN_TARGET_CM = 10;
-constexpr float MAX_TARGET_CM = 230;
+constexpr float MIN_TARGET_CM = 0;
+constexpr float MAX_TARGET_CM = 228;  // 190 + 20 % (Aaron, 5 Oct)
 
 // How long a reading may wait for its echo. pulseIn() counts from the trigger,
-// not from the start of the echo pulse, and the HC-SR04 only raises ECHO about
-// half a millisecond after its trigger. So the timeout is the round trip to
+// not from the start of the echo pulse, and the rig's sensors only raise ECHO
+// about 2.2 ms after their trigger. So the timeout is the round trip to
 // MAX_TARGET_CM plus that start: the old flat 9000 us left room for only
 // ~145 cm, and nothing past it - the far edge of the play area included - was
-// ever heard.
-constexpr unsigned long ECHO_START_US = 600;
+// ever heard. The start was taken as 600 us at first, and the rig's serial
+// logs (4-5 Oct) then stopped dead about 28 cm short of MAX_TARGET_CM at every
+// setting: at most 152 cm with 180, 162 with 190 and 203 with 230. Each of
+// those puts the start at 2.21-2.24 ms; 2.5 ms leaves some room.
+constexpr unsigned long ECHO_START_US = 2500;
 constexpr unsigned long ECHO_TIMEOUT_US =
     static_cast<unsigned long>(MAX_TARGET_CM * 2 / SOUND_CM_PER_US) + ECHO_START_US;
 
@@ -99,6 +112,11 @@ constexpr unsigned long SIDE_GAP_MS = 50;
 // anything is read through it. A reading taken while the horn is still
 // travelling describes some angle the rig was never at.
 constexpr unsigned long SERVO_SETTLE_MS = 40;
+// The server's LOOK <deg> can swing the servo much further than a scan step, so
+// after one, no pair is read for this long per degree swung. An SG90 is quoted
+// at about 1.7 ms per degree at 4.8 V; it is slower on the 3.3 V the PCB gives
+// it, hence the margin.
+constexpr unsigned long LOOK_SETTLE_MS_PER_DEG = 4;
 
 // The servo is centred at boot and given this long to get there.
 constexpr unsigned long BOOT_SETTLE_MS = 5000;
@@ -112,6 +130,26 @@ constexpr int STEER_STEP_DEG = 3;
 
 // Lost: a large sweep step, reversing at each servo limit.
 constexpr int SWEEP_STEP_DEG = 14;
+
+// Far range (Aaron, 6 Oct). A player far out is a small target, and the rig's
+// serial logs (5-6 Oct, 00:46-00:56) show the scan losing them there: after the
+// right node heard someone 100-140 cm out, its next pair was lost 51 % of the
+// time, 82-84 % past 140 cm, against 14 % under 60 cm. Each of those lost pairs
+// swung the servo a whole sweep step off them.
+//   Far hold: after an echo at least FAR_RANGE_CM out, a lost pair keeps the
+//   servo where it is, for up to FAR_HOLD_PAIRS lost pairs in a row; only then
+//   does the sweep start.
+//   Far steer: a half-found echo at least FAR_RANGE_CM out steers by
+//   FAR_STEER_STEP_DEG instead of STEER_STEP_DEG, so a node with one weak
+//   sensor - which always steers the same way - drifts off a far player more
+//   slowly (3 degrees is 8 cm across at 150 cm).
+// Both are on until the server says otherwise (FARHOLD 0 / FARSTEER 0, the
+// control panel's switches).
+constexpr float FAR_RANGE_CM = 100;
+constexpr int FAR_HOLD_PAIRS = 3;
+constexpr int FAR_STEER_STEP_DEG = 1;
+constexpr bool DEFAULT_FAR_HOLD = true;
+constexpr bool DEFAULT_FAR_STEER = true;
 
 // --- Multi-pulse ----------------------------------------------------------
 // In found or half-found, take this many pulse pairs at one angle and average
@@ -149,6 +187,28 @@ constexpr float ROOM_MARGIN_CM = 15;
 // ROOM_STEP_DEG of it - is within this of it. One stray echo would otherwise
 // hide everything behind it in that direction for good.
 constexpr float ROOM_MATCH_CM = 10;
+
+// --- Dead zone --------------------------------------------------------------
+// The buzzer sounds while the player is less than DEAD_ZONE_CM in front of the
+// line the nodes stand on. That is measured straight out from the line, not
+// along the beam, so it takes the servo angle into account: see DeadZoneAlarm.h.
+// The brief's dead zone ends 60 cm from the wall, so this is 60 minus how far
+// the nodes stand from the wall: 10 for nodes 50 cm out.
+constexpr float DEAD_ZONE_CM = 10;
+// Pairs in a row with an echo in the dead zone before the buzzer sounds, so one
+// stray echo does not.
+constexpr int DEAD_ZONE_PAIRS = 2;
+// Once it sounds, the nearest echo must be this much further out than
+// DEAD_ZONE_CM to silence it, so a player standing on the line does not make it
+// chatter.
+constexpr float DEAD_ZONE_CLEAR_CM = 3;
+// It stops by itself this long after the last pair in the dead zone. A node
+// reads nothing while the other node has the scanning turn (1 s), so this is
+// longer than a turn and the buzzer sounds on through it.
+constexpr unsigned long DEAD_ZONE_HOLD_MS = 1500;
+// 0 for an active buzzer, which beeps by itself on a steady HIGH. A passive one
+// only clicks on that: give it a tone in Hz instead (2000-4000 is loudest).
+constexpr unsigned int BUZZER_TONE_HZ = 0;
 
 // --- Servo ----------------------------------------------------------------
 // 90 points straight out into the play area; larger turns towards screen-left.
