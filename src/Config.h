@@ -21,7 +21,7 @@
 #define NODE_WIFI_PASSWORD "bruh12345"
 #endif
 #ifndef NODE_SERVER_IP
-#define NODE_SERVER_IP "192.168.137.1"
+#define NODE_SERVER_IP "192.168.59.99"
 #endif
 
 namespace config {
@@ -66,13 +66,11 @@ constexpr uint32_t SOCKET_READ_TIMEOUT_SECONDS = 1;
 // pin can go there. 3V3 is only on the other header, so the sensors' power
 // stays there.
 // Two ultrasonic sensors side by side on the servo horn.
-constexpr uint8_t LEFT_TRIG_PIN = 12;
-constexpr uint8_t LEFT_ECHO_PIN = 13;
+constexpr uint8_t LEFT_TRIG_PIN = 13;
+constexpr uint8_t LEFT_ECHO_PIN = 12;
 constexpr uint8_t RIGHT_TRIG_PIN = 26;
 constexpr uint8_t RIGHT_ECHO_PIN = 27;
 constexpr uint8_t SERVO_PIN = 33;
-// The dead-zone buzzer.
-constexpr uint8_t BUZZER_PIN = 32;
 
 // --- Ultrasonic sensors ---------------------------------------------------
 // Returned when no echo came back. Distinct from a reading of 0 cm, which is
