@@ -1050,6 +1050,79 @@ kbd .icon {
 .score-message[data-tone="good"] { color: #ffcf4a; font-size: 24px; }
 .score-message[data-tone="fault"] { color: #ff9a8a; }
 
+/* The finishing screen's leaderboard, inside the wooden panel game.js draws
+   beside the card. */
+
+.score-board {
+  position: fixed;
+  z-index: 5;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  list-style: none;
+  color: #fff6dc;
+  font: 19px/1 "Lilita One", "Figtree", system-ui, sans-serif;
+  text-shadow: -1.5px 0 #4a2a10, 1.5px 0 #4a2a10, 0 -1.5px #4a2a10, 0 1.5px #4a2a10, 0 2.5px #4a2a10;
+}
+
+.score-board[hidden] {
+  display: none;
+}
+
+.score-board li {
+  display: grid;
+  grid-template-columns: 30px minmax(0, 1fr) 52px 36px;
+  gap: 8px;
+  align-items: center;
+  min-height: 32px;
+  padding: 0 10px;
+  border-radius: 999px;
+  background: rgba(74, 42, 16, 0.28);
+}
+
+.score-board .fb-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.score-board .fb-score {
+  text-align: right;
+  color: #ffcf4a;
+}
+
+.score-board .fb-level {
+  text-align: right;
+  font-size: 15px;
+  opacity: 0.85;
+}
+
+.score-board .is-top1 .fb-rank { color: #ffcf4a; }
+.score-board .is-top2 .fb-rank { color: #e6edf5; }
+.score-board .is-top3 .fb-rank { color: #f0b27a; }
+
+.score-board li.is-mine {
+  background: #5ccf4a;
+  box-shadow: 0 0 0 3px #4a2a10, 0 0 14px rgba(255, 220, 80, 0.7);
+}
+
+.score-board li.is-mine .fb-score {
+  color: #fff6dc;
+}
+
+.score-board li.fb-note {
+  display: block;
+  min-height: 0;
+  padding: 6px 4px;
+  background: none;
+  text-align: center;
+  font-size: 17px;
+  line-height: 1.25;
+}
+
 .visually-hidden {
   position: absolute;
   width: 1px;

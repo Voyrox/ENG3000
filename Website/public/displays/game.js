@@ -1420,26 +1420,50 @@
     return x >= r.x && x <= r.x + r.width && y >= r.y && y <= r.y + r.height;
   }
 
+  // The finishing screen: the card, and beside it the leaderboard when the
+  // screen is wide enough for both (the pair is centred together).
+  const GAME_OVER_CARD_W = 480;
+  const GAME_OVER_BOARD_W = 340;
+  const GAME_OVER_GAP = 24;
+
   function getGameOverLayout(canvas) {
     const width = canvas.clientWidth || canvas.width;
     const height = canvas.clientHeight || canvas.height;
-    const centerX = width / 2;
+    const withBoard = width >= GAME_OVER_CARD_W + GAME_OVER_GAP + GAME_OVER_BOARD_W + 40;
+    const centerX = withBoard ? width / 2 - (GAME_OVER_GAP + GAME_OVER_BOARD_W) / 2 : width / 2;
     const buttonWidth = 200;
     const buttonHeight = 52;
+    const top = height / 2 - 172;
+    const bottom = height / 2 + 116 + buttonHeight + 26;
+    const board = withBoard
+      ? { x: centerX + GAME_OVER_CARD_W / 2 + GAME_OVER_GAP, y: top, width: GAME_OVER_BOARD_W, height: bottom - top }
+      : null;
 
     return {
+      centerX,
+      top,
+      bottom,
       restartButton: { x: centerX - buttonWidth - 10, y: height / 2 + 116, width: buttonWidth, height: buttonHeight },
       returnButton: { x: centerX + 10, y: height / 2 + 116, width: buttonWidth, height: buttonHeight },
       // Left free on the card for the leaderboard's name box (leaderboard.js,
       // HTML over the canvas): between the level reached and the buttons.
       entrySlot: { x: centerX - 210, y: height / 2 + 38, width: 420, height: 64 },
+      // The leaderboard panel, and inside it, under its title, the room left
+      // for leaderboard.js's list. Null on a narrow screen.
+      board,
+      boardSlot: board ? { x: board.x + 18, y: board.y + 62, width: board.width - 36, height: board.height - 78 } : null,
     };
   }
 
-  // Where the game-over card leaves room for the leaderboard's name box, in
-  // CSS pixels from the canvas's top-left.
+  // Where the game-over screen leaves room for the leaderboard's name box
+  // and its list (null on a narrow screen), in CSS pixels from the canvas's
+  // top-left.
   window.getScoreEntryRect = function getScoreEntryRect(canvas) {
     return getGameOverLayout(canvas).entrySlot;
+  };
+
+  window.getScoreBoardRect = function getScoreBoardRect(canvas) {
+    return getGameOverLayout(canvas).boardSlot;
   };
 
   window.resetGame = function resetGame() {
@@ -4710,16 +4734,19 @@
   function renderGameOverOverlay(ctx, canvas) {
     const width = canvas.clientWidth || canvas.width;
     const height = canvas.clientHeight || canvas.height;
-    const centerX = width / 2;
     const layout = getGameOverLayout(canvas);
+    const centerX = layout.centerX;
 
     ctx.fillStyle = "rgba(20, 40, 10, 0.55)";
     ctx.fillRect(0, 0, width, height);
 
-    const cardWidth = Math.min(480, width - 40);
-    const cardTop = height / 2 - 172;
-    const cardBottom = layout.restartButton.y + layout.restartButton.height + 26;
-    drawWoodSign(ctx, centerX - cardWidth / 2, cardTop, cardWidth, cardBottom - cardTop, 22);
+    const cardWidth = Math.min(GAME_OVER_CARD_W, width - 40);
+    drawWoodSign(ctx, centerX - cardWidth / 2, layout.top, cardWidth, layout.bottom - layout.top, 22);
+    if (layout.board) {
+      const b = layout.board;
+      drawWoodSign(ctx, b.x, b.y, b.width, b.height, 22);
+      cartoonText(ctx, "Leaderboard", b.x + b.width / 2, b.y + 44, 32, { fill: "gold" });
+    }
 
     cartoonText(ctx, isOutOfLives() ? "Out of lives!" : "Time's up!", centerX, height / 2 - 114, 50, { fill: "gold" });
     cartoonText(ctx, "Final score", centerX, height / 2 - 74, 20);

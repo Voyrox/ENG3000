@@ -1,6 +1,22 @@
 [
   {
     "name": "Josh",
+    "score": 35,
+    "level": 8,
+    "board": "random",
+    "input": "mouse",
+    "at": 1791865057.8354619
+  },
+  {
+    "name": "hi",
+    "score": 15,
+    "level": 4,
+    "board": "random",
+    "input": "mouse",
+    "at": 1791865491.161092
+  },
+  {
+    "name": "Josh",
     "score": 9,
     "level": 4,
     "board": "random",
@@ -8,11 +24,19 @@
     "at": 1791864808.6285791
   },
   {
+    "name": "Ewen",
+    "score": 8,
+    "level": 3,
+    "board": "random",
+    "input": "mouse",
+    "at": 1791865116.893641
+  },
+  {
     "name": "joshua",
     "score": 5,
     "level": 2,
     "board": "random",
-    "input": null,
+    "input": "mouse",
     "at": 1791864467.033584
   }
 ]

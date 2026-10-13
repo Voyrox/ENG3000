@@ -1,10 +1,11 @@
-// leaderboard.js - the leaderboard: the name box on the game-over card, and
-// the Leaderboard screen (the "leaderboard" section in index.html). The scores
+// leaderboard.js - the leaderboard: the name box on the game-over card, the
+// leaderboard panel beside it, and the Leaderboard screen (the "leaderboard" section in index.html). The scores
 // live on the server in leaderboard.json (leaderboard.py), through
 // /api/leaderboard.
 //
 //   window.syncScoreEntry(canvas, state) - call every draw: shows the name box
-//                                          over the game-over card, hides it
+//                                          over the game-over card and the list
+//                                          in the panel beside it, hides them
 //                                          everywhere else
 //   window.updateLeaderboardScreen()     - fill the Leaderboard screen
 //   window.leaderboardSummary()          - the best score in a line, for the
@@ -25,6 +26,8 @@
   const saveButton = document.getElementById("scoreSave");
   const message = document.getElementById("scoreMessage");
   const rows = document.getElementById("leaderboardRows");
+  const finishList = document.getElementById("scoreBoard");
+  const FINISH_ROWS = 7; // rows the finishing screen's panel has room for
   const note = document.getElementById("leaderboardNote");
 
   let shownRound = null; // the round the box was last set up for
@@ -32,6 +35,8 @@
   let lastSaved = null;  // { name, at } of the entry saved here, highlighted on the screen
   let board = { entries: null, error: null, at: 0, loading: false };
   let renderedFor = null; // the board (and saved entry) the rows were last built from
+  // The finishing screen's list: fetched fresh for each finished round.
+  let finish = { entries: null, error: null, mine: null };
 
   function rememberedName() {
     try {
@@ -52,6 +57,76 @@
   function say(text, tone) {
     message.textContent = text;
     message.dataset.tone = tone || "";
+  }
+
+  // --- The finishing screen's leaderboard ----------------------------------
+
+  // Where a score would land among entries (ties go below those already
+  // there, as the server ranks them).
+  function wouldPlace(entries, score, level) {
+    return 1 + entries.filter((e) => e.score > score || (e.score === score && e.level >= level)).length;
+  }
+
+  function finishRow(rank, name, score, level, classes) {
+    const li = document.createElement("li");
+    classes.forEach((c) => li.classList.add(c));
+    li.append(cell(`${rank}`, "fb-rank"), cell(name, "fb-name"), cell(`${score}`, "fb-score"), cell(`L${level}`, "fb-level"));
+    return li;
+  }
+
+  function renderFinish() {
+    finishList.replaceChildren();
+    const { entries, error, mine } = finish;
+    const note = (text) => {
+      const li = document.createElement("li");
+      li.className = "fb-note";
+      li.textContent = text;
+      finishList.append(li);
+    };
+    if (!entries) {
+      note(error ? "Could not load the leaderboard" : "Loading...");
+      return;
+    }
+    if (!entries.length && !mine) note("No scores yet. Save yours to be first!");
+
+    const isMine = (e) => mine && mine.at !== undefined && e.name === mine.name && e.at === mine.at;
+    // Saved below the rows shown: two rows give way to a gap and the
+    // player's own row, so it always fits in the panel.
+    const mineBelow = Boolean(mine && mine.at !== undefined && mine.rank > FINISH_ROWS);
+    entries.slice(0, mineBelow ? FINISH_ROWS - 2 : FINISH_ROWS).forEach((e) => {
+      const classes = [];
+      if (e.rank <= 3) classes.push(`is-top${e.rank}`);
+      if (isMine(e)) classes.push("is-mine");
+      finishList.append(finishRow(e.rank, e.name, e.score, e.level, classes));
+    });
+
+    if (mineBelow) {
+      note("\u22ef");
+      finishList.append(finishRow(mine.rank, mine.name, mine.score, mine.level, ["is-mine"]));
+    } else if (pending) {
+      const place = wouldPlace(entries, pending.score, pending.level);
+      note(`Your ${pending.score} would place #${place}. Save it!`);
+    }
+  }
+
+  function fetchFinish(round) {
+    finish = { entries: null, error: null, mine: null };
+    renderFinish();
+    fetch("/api/leaderboard?limit=100")
+      .then((response) => {
+        if (!response.ok) throw new Error(`the server said ${response.status}`);
+        return response.json();
+      })
+      .then((result) => {
+        if (shownRound !== round || finish.mine) return;
+        finish = { entries: result.entries || [], error: null, mine: null };
+        renderFinish();
+      })
+      .catch((err) => {
+        if (shownRound !== round || finish.mine) return;
+        finish = { entries: null, error: err.message, mine: null };
+        renderFinish();
+      });
   }
 
   // A finished round: offer the name box, or say why this one is not saved.
@@ -76,11 +151,21 @@
       input.focus({ preventScroll: true });
       input.select();
     }
+    fetchFinish(state.round);
   }
 
   window.syncScoreEntry = function syncScoreEntry(canvas, state) {
     const show = Boolean(canvas && state && state.status === "gameover");
     box.hidden = !show;
+    const boardSlot = show ? window.getScoreBoardRect(canvas) : null;
+    finishList.hidden = !boardSlot;
+    if (boardSlot) {
+      const at = canvas.getBoundingClientRect();
+      finishList.style.left = `${at.left + boardSlot.x}px`;
+      finishList.style.top = `${at.top + boardSlot.y}px`;
+      finishList.style.width = `${boardSlot.width}px`;
+      finishList.style.height = `${boardSlot.height}px`;
+    }
     if (!show) {
       if (document.activeElement === input) input.blur();
       return;
@@ -126,9 +211,11 @@
       lastSaved = { name: result.entry.name, at: result.entry.at };
       board = { entries: result.entries, error: null, at: Date.now(), loading: false };
       pending = null;
+      finish = { entries: result.entries, error: null, mine: result.entry };
+      renderFinish();
       form.hidden = true;
       input.blur();
-      say(`Saved! ${result.entry.name} is #${result.entry.rank} of ${result.total}`, "good");
+      say(`Saved! You're #${result.entry.rank} of ${result.total}`, "good");
       window.GameSounds?.play("levelUp");
     } catch (err) {
       if (shownRound !== round) return;

@@ -9,20 +9,20 @@
     <link rel="preload" href="/static/fonts/sora-latin.woff2" as="font" type="font/woff2" crossorigin>
     <link rel="preload" href="/static/fonts/figtree-latin.woff2" as="font" type="font/woff2" crossorigin>
     <link rel="preload" href="/static/fonts/lilita-one-latin.woff2" as="font" type="font/woff2" crossorigin>
-    <link rel="stylesheet" href="/static/ui.css?v=55">
-    <script defer src="/static/displays/sounds.js?v=55"></script>
-    <script defer src="/static/displays/ui.js?v=55"></script>
-    <script defer src="/static/displays/menu.js?v=55"></script>
-    <script defer src="/static/displays/calibrate.js?v=55"></script>
-    <script defer src="/static/displays/callibrate_corners.js?v=55"></script>
-    <script defer src="/static/displays/alert.js?v=55"></script>
-    <script defer src="/static/displays/logs.js?v=55"></script>
-    <script defer src="/static/displays/options.js?v=55"></script>
-    <script defer src="/static/displays/positionSolver.js?v=55"></script>
-    <script defer src="/static/displays/gameStats.js?v=55"></script>
-    <script defer src="/static/displays/leaderboard.js?v=55"></script>
-    <script defer src="/static/displays/game.js?v=55"></script>
-    <script defer src="/static/canvas.js?v=55"></script>
+    <link rel="stylesheet" href="/static/ui.css?v=57">
+    <script defer src="/static/displays/sounds.js?v=57"></script>
+    <script defer src="/static/displays/ui.js?v=57"></script>
+    <script defer src="/static/displays/menu.js?v=57"></script>
+    <script defer src="/static/displays/calibrate.js?v=57"></script>
+    <script defer src="/static/displays/callibrate_corners.js?v=57"></script>
+    <script defer src="/static/displays/alert.js?v=57"></script>
+    <script defer src="/static/displays/logs.js?v=57"></script>
+    <script defer src="/static/displays/options.js?v=57"></script>
+    <script defer src="/static/displays/positionSolver.js?v=57"></script>
+    <script defer src="/static/displays/gameStats.js?v=57"></script>
+    <script defer src="/static/displays/leaderboard.js?v=57"></script>
+    <script defer src="/static/displays/game.js?v=57"></script>
+    <script defer src="/static/canvas.js?v=57"></script>
 </head>
 
 <body>
@@ -290,6 +290,8 @@
         </form>
         <p class="score-message" id="scoreMessage" role="status"></p>
     </div>
+    <!-- The top scores, in the panel game.js draws beside the game-over card. -->
+    <ol class="score-board" id="scoreBoard" aria-label="Leaderboard" hidden></ol>
 </body>
 
 </html>
