@@ -717,29 +717,41 @@ test("the angle limit is on until the control panel turns it off, and follows th
 
 // --- Too close (Aaron, 5 Oct) -------------------------------------------------------
 
-test("the dead zone: turned in, a reading over 10 cm is too close; with it off, only the reading itself counts", () => {
+test("too close goes by the player's calculated y: the front of them inside 10 cm, whatever the raw readings", () => {
   const w = loadWindow();
-  assert.strictEqual(w.getDeadZone(), true, "on by default");
   w.setGameInputMode("sensor");
   w.resetGame();
-  // The right node turned in to 31 degrees reads 14 cm: 14 cos 59 = 7.2 cm
-  // out from the nodes, inside the 10 cm strip. The left one reads 60 cm.
-  const close = scanners({ avg: 60, angle: 150, scanState: 0 }, { avg: 14, angle: 31, scanState: 0 });
-  run(w, close, 10);
+  // The middle of the player 22 cm out: the front of them is 7 cm out, inside
+  // the 10 cm threshold - though each node's raw reading is about 40 cm.
+  const close = scannersSeeing(75, 22);
+  run(w, close, 60);
   let sensor = w.getGameState().sensor;
   assert.strictEqual(sensor.status, "too-close");
-  const depth = 14 * Math.cos((59 * Math.PI) / 180);
-  assert.ok(Math.abs(sensor.distanceCm - depth) < 1e-9, `distance was ${sensor.distanceCm}`);
+  assert.ok(sensor.raw[0] > 35 && sensor.raw[2] > 35, `raw was ${sensor.raw}`);
+  assert.ok(Math.abs(sensor.distanceCm - 7) < 1.5, `distance was ${sensor.distanceCm}`);
   assert.strictEqual(w.isGameAlertActive(), true);
-  assert.strictEqual(w.getGameAlertInfo().distanceCm, sensor.distanceCm, "the alert shows the depth");
+  assert.strictEqual(w.getGameAlertInfo().distanceCm, sensor.distanceCm, "the alert shows the front of the player");
 
-  assert.strictEqual(w.setDeadZone(false), false);
-  run(w, close, 10);
+  // A step back, the middle 32 cm out: the front 17 cm out, clear of it.
+  run(w, scannersSeeing(75, 32), 120);
   sensor = w.getGameState().sensor;
-  assert.notStrictEqual(sensor.status, "too-close", "14 cm is over 10 cm");
+  assert.strictEqual(sensor.status, "ok");
   assert.strictEqual(w.isGameAlertActive(), false);
-  run(w, scanners({ avg: 9, angle: 31, scanState: 0 }, { avg: 9, angle: 31, scanState: 0 }), 10);
-  assert.strictEqual(w.getGameState().sensor.status, "too-close", "9 cm is under it");
+
+  // The dead zone switch no longer changes it.
+  assert.strictEqual(w.setDeadZone(false), false);
+  run(w, close, 120);
+  assert.strictEqual(w.getGameState().sensor.status, "too-close", "dead zone off");
+});
+
+test("no position, no too-close alert", () => {
+  const w = loadWindow();
+  w.setGameInputMode("sensor");
+  w.resetGame();
+  const none = [1, 2, 3].map((id) => ({ id, online: true, latest: JSON.stringify({ avg: -1 }) }));
+  run(w, none, 30);
+  assert.notStrictEqual(w.getGameState().sensor.status, "too-close");
+  assert.strictEqual(w.isGameAlertActive(), false);
 });
 
 test("the control panel's held alert is up in any mode, and holds the round until it is let go", () => {

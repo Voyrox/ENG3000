@@ -295,12 +295,11 @@
     // reach (ownPoint()), are both this much further out. Python: FilterConfig
     // far_leeway.
     farLeeway: 0.2,
-    // The dead zone (Aaron, 5 Oct): the strip across the front of the grid,
-    // the alert threshold (10 cm) deep, where the nodes sit. On, a node's raw
-    // reading is too close when its point along the servo line is in it
-    // (closeDepthCm()): 10 cm straight out, 29 cm with the servo turned 70
-    // degrees. Off, the raw reading itself is checked, whatever the angle.
-    // Switched on the control panel. Python: FilterConfig dead_zone.
+    // The dead zone (Aaron, 5 Oct) once chose how a node's RAW reading was
+    // checked for too close. The alert now goes by the player's calculated
+    // position instead (frontDepthCm()), so this switch no longer changes
+    // anything; it is kept so the control panel and the server, which still
+    // send it, keep working. Python: FilterConfig dead_zone.
     deadZone: true,
     // The smoothing after each sensor's median (see conditionSensor()).
     // kalmanSigmaA: the player's acceleration noise, cm/s^2 - higher follows a
@@ -2584,22 +2583,14 @@
     return false;
   }
 
-  // What the too-close check compares with the alert threshold: the nearest
-  // RAW reading (the front of the body), or null with none. With
-  // tuning.deadZone on, each reading counts as its depth, its point along the
-  // node's servo line: the dead zone is a strip across the front of the grid,
-  // so turned phi off straight out, a reading is in it under
-  // threshold / cos(phi) - 10 cm straight out, 15.6 at 40 or 140 degrees, 29.2
-  // at 160. Off, the reading itself, whatever the angle. filterRules.py
-  // Geometry.nearest_depth_cm().
-  function closeDepthCm(raw, angles) {
-    let closest = null;
-    for (const slot of [LEFT_SENSOR, RIGHT_SENSOR]) {
-      if (raw[slot] === null) continue;
-      const cm = tuning.deadZone ? scannerPoint(columnCentreCm(slot), raw[slot], angles[slot]).y : raw[slot];
-      if (closest === null || cm < closest) closest = cm;
-    }
-    return closest;
+  // What the too-close check compares with the alert threshold: how far the
+  // front of the player is from the screen, by their calculated position -
+  // its y is the middle of them, tuning.bodyRadiusCm behind the front. Never
+  // below 0, so a position closer than that still counts as too close. Null
+  // with no position. filterRules.py TwoSensorGeometry.front_depth_cm().
+  function frontDepthCm(position) {
+    if (!position || !Number.isFinite(position.y)) return null;
+    return Math.max(0, position.y - tuning.bodyRadiusCm);
   }
 
   // How far the servo line of the node at nodeX runs before it leaves the
@@ -3530,8 +3521,8 @@
     return angleLimitCm(columnCentreCm(slot), angle);
   };
 
-  // The dead zone switch, on by default; see tuning.deadZone. Takes effect
-  // from the next update.
+  // The dead zone switch, on by default; see tuning.deadZone (it no longer
+  // changes the too-close alert).
   window.getDeadZone = function getDeadZone() {
     return tuning.deadZone;
   };
@@ -3718,12 +3709,15 @@
       column: null, distanceCm: null, xCm: null, yCm: null, source: null,
     };
 
-    // Safety runs on the RAW readings, never the filtered ones: a median window
-    // full of safe distances would smooth away the very spike the alert exists
-    // to catch. Two consecutive frames (100 ms at 20 Hz) are required so that
-    // crosstalk between the two sensors cannot raise a false alarm. With the
-    // dead zone on, each reading is first turned into its depth (closeDepthCm()).
-    const closest = closeDepthCm(raw, angles);
+    // Safety goes by the player's calculated position, not the raw readings:
+    // the y of the method in use is the middle of the player, so less
+    // tuning.bodyRadiusCm it is the front of them, which the alert threshold
+    // measures to. Taken before y is brought onto the board below, so a
+    // player in front of the near edge still counts. Two consecutive frames
+    // are required so one stray position cannot raise a false alarm. No
+    // position, no alert. filterRules.py front_depth_cm().
+    const position = fixes[positioning.method];
+    const closest = frontDepthCm(position);
     if (closest !== null && window.isTooClose(closest)) {
       closeStreak += 1;
     } else {
@@ -3731,7 +3725,6 @@
     }
     const tooClose = closeStreak >= TOO_CLOSE_FRAMES;
 
-    const position = fixes[positioning.method];
     const x = position ? Math.max(EDGE_INSET_X_CM, Math.min(PLAY_WIDTH_CM - EDGE_INSET_X_CM, position.x)) : null;
 
     // Safety outranks every other state, including loss of signal. The column

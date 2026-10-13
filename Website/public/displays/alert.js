@@ -1,9 +1,8 @@
 // alert.js - Full-screen "too close to the screen" alert.
 //
-// This screen covers one condition only: a raw reading has dropped below
-// ALERT_DISTANCE_CM - with the dead zone on (tuning.deadZone in game.js), its
-// depth along the node's servo line, so the 10 cm strip across the front of
-// the grid. It owns that threshold so the game and the calibration screens
+// This screen covers one condition only: the player's calculated position
+// puts the front of them closer to the screen than ALERT_DISTANCE_CM (their
+// y less the body radius; frontDepthCm() in game.js). It owns that threshold so the game and the calibration screens
 // all agree on what "too close" means. The control panel's hold button puts
 // the same screen up on demand (setAlertHeld() in game.js).
 //

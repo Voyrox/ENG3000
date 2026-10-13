@@ -121,11 +121,12 @@ class FilterConfig:
     # point may reach (TwoSensorGeometry._own_point()), are this much further.
     far_leeway: float = 0.2
 
-    # The dead zone (tuning.deadZone; Aaron, 5 Oct): the strip across the
-    # front of the grid, the alert threshold (10 cm) deep. True: a raw reading
-    # is too close when its point along the node's servo line is in it
-    # (Geometry.nearest_depth_cm()). False: the raw reading itself is checked,
-    # whatever the angle. CoordinatePipeline.set_dead_zone() flips it live.
+    # The dead zone (tuning.deadZone; Aaron, 5 Oct): only for a geometry
+    # with no calculated position, whose too-close check still goes by its raw
+    # readings (Geometry.front_depth_cm()). True: a reading is too close when
+    # its point along the node's servo line is within the alert threshold;
+    # False: the reading itself. TwoSensorGeometry (the rig) goes by the
+    # player's position and ignores it. set_dead_zone() flips it live.
     dead_zone: bool = True
 
     # Smoothing after the median (tuning.kalmanSigmaA, tuning.kalmanSigmaR,
@@ -670,11 +671,12 @@ class ChannelFilter:
 # =============================================================================
 
 class ProximityGuard:
-    """Too-close detection on RAW readings, confirmed over N consecutive frames.
+    """Too-close detection, confirmed over N consecutive frames.
 
-    This must never be fed filtered values. A median window full of safe
-    distances smooths away the very spike the alert exists to catch. The frame
-    confirmation is what stops crosstalk between sensors raising false alarms.
+    It is fed how far the front of the player is from the screen
+    (Geometry.front_depth_cm()): by the player's calculated position where the
+    geometry works one out, else by the nearest raw reading. The frame
+    confirmation stops one stray value raising a false alarm.
     """
 
     def __init__(self, config: FilterConfig):
@@ -684,9 +686,9 @@ class ProximityGuard:
     def reset(self) -> None:
         self._streak = 0
 
-    def update(self, nearest_raw_cm: Optional[float], threshold_cm: float) -> bool:
-        close = (nearest_raw_cm is not None and math.isfinite(nearest_raw_cm)
-                 and 0 <= nearest_raw_cm < threshold_cm)
+    def update(self, front_cm: Optional[float], threshold_cm: float) -> bool:
+        close = (front_cm is not None and math.isfinite(front_cm)
+                 and 0 <= front_cm < threshold_cm)
         self._streak = self._streak + 1 if close else 0
         return self._streak >= self._frames
 
@@ -716,10 +718,20 @@ class Geometry(ABC):
         """The raw distance from the screen that the proximity guard checks."""
 
     def nearest_depth_cm(self, raw_channels: Sequence[Optional[float]]) -> Optional[float]:
-        """What the proximity guard checks with the dead zone on: the nearest
-        raw reading's depth out from the nodes. A geometry with no servo
-        angles reads straight out, so its distance is the depth."""
+        """The nearest raw reading's depth out from the nodes. A geometry with
+        no servo angles reads straight out, so its distance is the depth."""
         return self.nearest_raw_cm(raw_channels)
+
+    def front_depth_cm(self, raw_channels: Sequence[Optional[float]],
+                       filtered: Sequence[Optional[float]], area: "PlayArea",
+                       config: "FilterConfig") -> Optional[float]:
+        """What the proximity guard checks: how far the front of the player is
+        from the screen. A geometry that works out the player's position
+        overrides this to go by it (TwoSensorGeometry); this default, for one
+        that does not, goes by the nearest raw reading - its depth with the
+        dead zone on."""
+        return (self.nearest_depth_cm(raw_channels) if config.dead_zone
+                else self.nearest_raw_cm(raw_channels))
 
     @abstractmethod
     def locate(self, filtered: Sequence[Optional[float]], area: PlayArea,
@@ -1719,6 +1731,16 @@ class TwoSensorGeometry(Geometry):
             return None
         return area.column_at(_clamp(where[0], 0.0, area.width_cm))
 
+    def front_depth_cm(self, raw_channels, filtered, area, config) -> Optional[float]:
+        """frontDepthCm() in game.js: the too-close check goes by the player's
+        calculated position, not the raw readings. Its y is the middle of the
+        player, so less body_radius_cm it is the front of them; never below 0.
+        Taken before y is brought onto the board, and None with no position."""
+        where = self.position(filtered, area)
+        if where is None or where[1] is None or not math.isfinite(where[1]):
+            return None
+        return max(0.0, where[1] - config.body_radius_cm)
+
     def locate(self, filtered, area, config) -> Fix:
         # Neither node has found the player for a while: nobody is on the
         # board, whatever any method still makes of old or stray readings.
@@ -2309,10 +2331,10 @@ class CoordinatePipeline:
                     for ch, v, a, is_fresh in zip(self._channels, raw, angles, fresh)]
         self.geometry.track(filtered, fresh, now_ms, self.area, self.config, heard=heard)
 
-        # Safety first, on raw values, before anything is smoothed. With the
-        # dead zone on, each reading counts as its depth along its servo line.
-        nearest = (self.geometry.nearest_depth_cm(raw) if self.config.dead_zone
-                   else self.geometry.nearest_raw_cm(raw))
+        # Safety first: how far the front of the player is from the screen, by
+        # their calculated position where the geometry has one
+        # (Geometry.front_depth_cm()).
+        nearest = self.geometry.front_depth_cm(raw, filtered, self.area, self.config)
         too_close = self._guard.update(nearest, self.area.alert_threshold_cm)
 
         if too_close:

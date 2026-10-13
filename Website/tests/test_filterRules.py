@@ -1816,15 +1816,14 @@ class BothNodesLost(unittest.TestCase):
         self.assertNotEqual(result.status, STATUS_OUT_OF_BOUNDS)
 
     def test_short_of_out_of_bounds_the_player_stays_on_the_board(self):
-        # Off the side, past the far edge, in front of the near one, and a
-        # long run of no echo from nodes that send no scan state: the player
-        # stays on the board (the edge square, or the last one, held). In
-        # front of the near edge is the dead zone, too close with it on
-        # (DeadZone), so it is off here.
-        pipe = CoordinatePipeline(TwoSensorGeometry(), config=FilterConfig(dead_zone=False))
+        # Off the side, past the far edge, and a long run of no echo from
+        # nodes that send no scan state: the player stays on the board (the
+        # edge square, or the last one, held). In front of the near edge the
+        # player is too close (TooCloseByPosition), so that is not tried here.
+        pipe = CoordinatePipeline(TwoSensorGeometry())
         t = 0.0
         for where, cell in (((-30.0, 80.0), (0, 1)), ((75.0, 220.0), (1, 2)),
-                            ((180.0, 40.0), (2, 0)), ((75.0, 5.0), (1, 0))):
+                            ((180.0, 40.0), (2, 0))):
             pipe.reset()
             result = None
             for k in range(60):
@@ -2169,52 +2168,59 @@ class FarPriority(unittest.TestCase):
         self.assertNotIn("far", runs["dynamicRulesOff"]["placedBy"])
 
 
-class DeadZone(unittest.TestCase):
-    """The dead zone (Aaron, 5 Oct): too close when a raw reading's point along
-    its node's servo line is less than 10 cm out, the strip across the front
-    of the grid; with the switch off, when the raw reading itself is."""
+class TooCloseByPosition(unittest.TestCase):
+    """Too close goes by the player's calculated position (frontDepthCm() in
+    game.js, TwoSensorGeometry.front_depth_cm()): their y less body_radius_cm,
+    the front of them, inside the alert threshold - not by the raw readings.
+    The dead zone switch no longer changes it on the rig's geometry."""
 
     STEP_MS = 50.0
 
-    def settle(self, sample, config=None):
-        """Two updates of the same sample, enough to confirm too close."""
+    def settle(self, where, config=None, frames=40):
+        """Enough updates of a player whose middle is at `where` for the
+        filters to settle and too close to be confirmed."""
         pipe = CoordinatePipeline(TwoSensorGeometry(), config=config)
         result = None
-        for k in range(2):
-            result = pipe.update(sample, k * self.STEP_MS)
+        for k in range(frames):
+            result = pipe.update(scanner_sample(*where), k * self.STEP_MS)
         return result
 
-    def test_turned_in_a_reading_over_10_cm_is_too_close(self):
-        # The right node at 31 degrees reads 14 cm: 14 cos 59 = 7.2 cm out.
-        # The left one sees the player's back half, 60 cm out.
-        sample = [(60.0, 150, 0), None, (14.0, 31, 0)]
-        result = self.settle(sample)
+    def test_the_front_of_the_player_inside_10_cm_is_too_close(self):
+        # Middle 22 cm out: the front 7 cm out, though each raw reading is ~40.
+        result = self.settle((75.0, 22.0))
         self.assertEqual(result.status, STATUS_TOO_CLOSE)
-        self.assertAlmostEqual(result.y_cm, 14.0 * math.cos(math.radians(59)))
-        self.assertNotEqual(self.settle(sample, FilterConfig(dead_zone=False)).status,
-                            STATUS_TOO_CLOSE)
+        self.assertAlmostEqual(result.y_cm, 7.0, delta=1.5)
+        self.assertTrue(all(r is None or r > 35 for r in result.raw), result.raw)
 
-    def test_the_distance_into_the_dead_zone_follows_the_servo_angle(self):
-        # 10 / cos(phi): 10 cm straight out, 15.6 at 40 and 140, 29.2 at 160.
-        for angle, edge in ((90, 10.0), (40, 15.557), (140, 15.557), (160, 29.238)):
-            inside = self.settle([(edge - 0.1, angle, 0), None, None])
-            outside = self.settle([(edge + 0.1, angle, 0), None, None])
-            self.assertEqual(inside.status, STATUS_TOO_CLOSE, angle)
-            self.assertNotEqual(outside.status, STATUS_TOO_CLOSE, angle)
+    def test_a_step_back_is_clear(self):
+        # Middle 32 cm out: the front 17 cm out.
+        self.assertEqual(self.settle((75.0, 32.0)).status, STATUS_OK)
 
-    def test_off_only_the_reading_itself_counts(self):
+    def test_the_dead_zone_switch_no_longer_changes_it(self):
         off = FilterConfig(dead_zone=False)
-        self.assertNotEqual(self.settle([(25.0, 160, 0), None, None], off).status, STATUS_TOO_CLOSE)
-        result = self.settle([(9.0, 160, 0), None, None], off)
-        self.assertEqual(result.status, STATUS_TOO_CLOSE)
-        self.assertEqual(result.y_cm, 9.0)
+        for where in ((75.0, 22.0), (75.0, 32.0), (40.0, 18.0)):
+            self.assertEqual(self.settle(where).status, self.settle(where, off).status, where)
 
-    def test_one_close_reading_is_not_enough(self):
+    def test_no_position_no_alert(self):
         pipe = CoordinatePipeline(TwoSensorGeometry())
-        result = pipe.update([(20.0, 150, 0), None, None], 0.0)
+        for k in range(5):
+            result = pipe.update([None, None, None], k * self.STEP_MS)
         self.assertNotEqual(result.status, STATUS_TOO_CLOSE)
 
-    def test_the_rows_start_behind_the_dead_zone(self):
+    def test_one_close_frame_is_not_enough(self):
+        pipe = CoordinatePipeline(TwoSensorGeometry())
+        result = pipe.update(scanner_sample(75.0, 20.0), 0.0)
+        self.assertNotEqual(result.status, STATUS_TOO_CLOSE)
+
+    def test_a_geometry_without_a_position_still_goes_by_its_raw_readings(self):
+        pipe = CoordinatePipeline(UltrasonicArrayGeometry())
+        result = None
+        for k in range(2):
+            result = pipe.update([5.0, None, None], k * self.STEP_MS)
+        self.assertEqual(result.status, STATUS_TOO_CLOSE)
+        self.assertEqual(result.y_cm, 5.0)
+
+    def test_the_rows_start_behind_the_alert_threshold(self):
         area = PlayArea.default()
         self.assertEqual(area.per_column, ((10.0, 160.0),) * 3)
         self.assertEqual([area.row_for(0, y) for y in (11, 59, 61, 109, 111, 159)],
@@ -2229,14 +2235,15 @@ class DeadZone(unittest.TestCase):
         pipeline.set_dead_zone(True)
         self.assertTrue(pipeline.config.dead_zone)
 
-    def test_the_parity_runs_show_the_switch_doing_something(self):
+    def test_the_parity_runs_are_too_close_alike_with_the_dead_zone_on_or_off(self):
         with open(FIXTURE, encoding="utf-8") as fh:
             trace = json.load(fh)
         runs = trace["runs"]
         at = trace["fields"].index("status")
         close = [sum(1 for step in runs[name]["steps"] if step[at] == STATUS_TOO_CLOSE)
                  for name in ("default", "deadZoneOff")]
-        self.assertGreater(close[0], close[1] + 50, "too close more often with the dead zone on")
+        self.assertGreater(close[0], 0, "the runs do get too close")
+        self.assertEqual(close[0], close[1])
 
 
 class ConfidenceLevel(unittest.TestCase):
