@@ -38,5 +38,13 @@
     "board": "random",
     "input": "mouse",
     "at": 1791864467.033584
+  },
+  {
+    "name": "bye",
+    "score": 3,
+    "level": 2,
+    "board": "random",
+    "input": "mouse",
+    "at": 1791865933.151787
   }
 ]
