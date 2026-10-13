@@ -1,7 +1,9 @@
 """The game's leaderboard, kept in leaderboard.json next to this file.
 
 Every saved round is one entry: the player's name, their score, the level they
-reached, the board they played (classic or random) and when. The file is a
+reached, the board they played (classic or random), how they played it (the
+mouse or the sensors) and when. Entries saved before the input was recorded
+have none (null). The file is a
 plain JSON list, so it can be read, backed up or cleared by hand; delete it to
 start the leaderboard again.
 
@@ -24,6 +26,7 @@ NAME_MAX = 16
 SCORE_MAX = 100000
 LEVEL_MAX = 10          # game.js MAX_LEVEL
 BOARDS = ("classic", "random")
+INPUTS = ("mouse", "sensor")  # game.js getGameInputMode()
 KEEP_ENTRIES = 500      # only the best this many are kept, so the file stays small
 TOP_DEFAULT = 10
 
@@ -81,6 +84,7 @@ class Leaderboard:
                     "score": _whole_number(item["score"], "score", 0, SCORE_MAX),
                     "level": _whole_number(item["level"], "level", 1, LEVEL_MAX),
                     "board": item.get("board") if item.get("board") in BOARDS else "classic",
+                    "input": item.get("input") if item.get("input") in INPUTS else None,
                     "at": float(item.get("at", 0)),
                 })
             except (KeyError, TypeError, ValueError):
@@ -108,7 +112,7 @@ class Leaderboard:
             entries = self._read()
         return [dict(entry, rank=i + 1) for i, entry in enumerate(entries[:limit])]
 
-    def add(self, name, score, level, board="classic", now=None):
+    def add(self, name, score, level, board="classic", input_method=None, now=None):
         """Save one round. Returns the saved entry with its rank, and how many
         entries there are. Raises LeaderboardError for a bad name or numbers."""
         entry = {
@@ -116,6 +120,7 @@ class Leaderboard:
             "score": _whole_number(score, "score", 0, SCORE_MAX),
             "level": _whole_number(level, "level", 1, LEVEL_MAX),
             "board": board if board in BOARDS else "classic",
+            "input": input_method if input_method in INPUTS else None,
             "at": time.time() if now is None else float(now),
         }
         with self._lock:

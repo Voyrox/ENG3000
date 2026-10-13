@@ -1,9 +1,18 @@
 [
   {
+    "name": "Josh",
+    "score": 9,
+    "level": 4,
+    "board": "random",
+    "input": "mouse",
+    "at": 1791864808.6285791
+  },
+  {
     "name": "joshua",
     "score": 5,
     "level": 2,
     "board": "random",
+    "input": null,
     "at": 1791864467.033584
   }
 ]

@@ -883,7 +883,7 @@ kbd .icon {
 .board-head,
 .board-rows li {
   display: grid;
-  grid-template-columns: 44px minmax(0, 1fr) 80px 64px 88px 80px;
+  grid-template-columns: 44px minmax(0, 1fr) 80px 64px 88px 80px 80px;
   gap: var(--space-3);
   align-items: center;
   padding: 10px var(--space-5);
@@ -938,6 +938,7 @@ kbd .icon {
 }
 
 .board-style,
+.board-input,
 .board-date {
   color: var(--muted);
   font-size: 15px;

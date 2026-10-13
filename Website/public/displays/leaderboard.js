@@ -16,6 +16,8 @@
 (function () {
   const NAME_KEY = "eng3000.playerName";
   const STALE_MS = 5000; // the Leaderboard screen fetches again after this long
+  // How the round was played; entries saved before this was recorded have none.
+  const INPUT_LABELS = { mouse: "Mouse", sensor: "Sensors" };
 
   const box = document.getElementById("scoreEntry");
   const form = document.getElementById("scoreForm");
@@ -26,7 +28,7 @@
   const note = document.getElementById("leaderboardNote");
 
   let shownRound = null; // the round the box was last set up for
-  let pending = null;    // { round, score, level, board } waiting to be saved
+  let pending = null;    // { round, score, level, board, input } waiting to be saved
   let lastSaved = null;  // { name, at } of the entry saved here, highlighted on the screen
   let board = { entries: null, error: null, at: 0, loading: false };
   let renderedFor = null; // the board (and saved entry) the rows were last built from
@@ -62,7 +64,10 @@
     } else if (state.score <= 0) {
       say("Score a point to get on the leaderboard");
     } else {
-      pending = { round: state.round, score: state.score, level: state.peakLevel, board: settings.boardStyle };
+      pending = {
+        round: state.round, score: state.score, level: state.peakLevel, board: settings.boardStyle,
+        input: window.getGameInputMode ? window.getGameInputMode() : null,
+      };
       form.hidden = false;
       saveButton.disabled = false;
       saveButton.textContent = "Save";
@@ -110,7 +115,9 @@
       const response = await fetch("/api/leaderboard", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name, score: pending.score, level: pending.level, board: pending.board }),
+        body: JSON.stringify({
+          name, score: pending.score, level: pending.level, board: pending.board, input: pending.input,
+        }),
       });
       const result = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(result.error || `the server said ${response.status}`);
@@ -182,6 +189,7 @@
         cell(`${entry.score}`, "board-score"),
         cell(`${entry.level}`, "board-level"),
         cell(entry.board === "random" ? "Random" : "Classic", "board-style"),
+        cell(INPUT_LABELS[entry.input] || "\u2014", "board-input"),
         cell(when.toLocaleDateString([], { day: "numeric", month: "short" }), "board-date"),
       );
       rows.append(li);

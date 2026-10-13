@@ -31,11 +31,12 @@ class LeaderboardTest(unittest.TestCase):
         self.assertEqual(self.board.top(), [])
 
     def test_saves_to_the_json_file_and_reads_it_back(self):
-        saved = self.board.add("Ada", 12, 3, "random", now=100)
+        saved = self.board.add("Ada", 12, 3, "random", "sensor", now=100)
         self.assertEqual(saved["entry"]["rank"], 1)
         self.assertEqual(saved["total"], 1)
         on_disk = json.loads(self.path.read_text())
-        self.assertEqual(on_disk, [{"name": "Ada", "score": 12, "level": 3, "board": "random", "at": 100.0}])
+        self.assertEqual(on_disk, [{"name": "Ada", "score": 12, "level": 3, "board": "random",
+                                    "input": "sensor", "at": 100.0}])
         # A fresh reader sees the same.
         self.assertEqual(Leaderboard(self.path).top()[0]["name"], "Ada")
 
@@ -80,6 +81,21 @@ class LeaderboardTest(unittest.TestCase):
     def test_unknown_board_counts_as_classic(self):
         self.board.add("Ada", 5, 1, board="hexagons", now=1)
         self.assertEqual(self.board.top()[0]["board"], "classic")
+
+    def test_input_method_is_kept(self):
+        self.board.add("Mouse", 5, 1, input_method="mouse", now=1)
+        self.board.add("Floor", 6, 1, input_method="sensor", now=2)
+        self.board.add("Odd", 4, 1, input_method="joystick", now=3)
+        inputs = {e["name"]: e["input"] for e in self.board.top()}
+        self.assertEqual(inputs, {"Mouse": "mouse", "Floor": "sensor", "Odd": None})
+
+    def test_entries_from_before_the_input_was_recorded_have_none(self):
+        self.path.write_text(json.dumps([{"name": "joshua", "score": 5, "level": 2, "board": "random", "at": 1}]))
+        self.assertIsNone(self.board.top()[0]["input"])
+        # Saving another keeps the old entry as it was.
+        self.board.add("Ada", 9, 2, input_method="mouse", now=2)
+        old = next(e for e in json.loads(self.path.read_text()) if e["name"] == "joshua")
+        self.assertIsNone(old["input"])
 
     def test_a_damaged_file_is_survived(self):
         self.path.write_text("{ not json")
@@ -139,11 +155,13 @@ class LeaderboardApiTest(unittest.TestCase):
 
     def test_post_saves_and_answers_with_rank_and_top(self):
         self.client.post("/api/leaderboard", json={"name": "Ada", "score": 30, "level": 6, "board": "random"})
-        response = self.client.post("/api/leaderboard", json={"name": " Bo ", "score": 12, "level": 3, "board": "classic"})
+        response = self.client.post("/api/leaderboard", json={"name": " Bo ", "score": 12, "level": 3,
+                                                               "board": "classic", "input": "mouse"})
         self.assertEqual(response.status_code, 201)
         body = response.get_json()
         self.assertEqual(body["entry"]["name"], "Bo")
         self.assertEqual(body["entry"]["rank"], 2)
+        self.assertEqual(body["entry"]["input"], "mouse")
         self.assertEqual(body["total"], 2)
         self.assertEqual([e["name"] for e in body["entries"]], ["Ada", "Bo"])
 

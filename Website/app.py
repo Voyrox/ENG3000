@@ -1215,7 +1215,7 @@ leaderboard = Leaderboard()
 
 @app.route("/api/leaderboard")
 def api_leaderboard():
-    """The best scores: {"entries": [{rank, name, score, level, board, at}]}.
+    """The best scores: {"entries": [{rank, name, score, level, board, input, at}]}.
     ?limit= sets how many (default 10, at most 100)."""
     try:
         limit = int(request.args.get("limit", TOP_DEFAULT))
@@ -1226,11 +1226,12 @@ def api_leaderboard():
 
 @app.route("/api/leaderboard", methods=["POST"])
 def api_leaderboard_add():
-    """Save a round: {"name", "score", "level", "board"}. Answers with the
+    """Save a round: {"name", "score", "level", "board", "input"}. Answers with the
     saved entry and its rank, how many entries there are, and the top 10."""
     body = request.get_json(silent=True) or {}
     try:
-        saved = leaderboard.add(body.get("name"), body.get("score"), body.get("level"), body.get("board"))
+        saved = leaderboard.add(body.get("name"), body.get("score"), body.get("level"),
+                                body.get("board"), body.get("input"))
     except LeaderboardError as err:
         return jsonify({"error": str(err)}), 400
     return jsonify({**saved, "entries": leaderboard.top()}), 201
