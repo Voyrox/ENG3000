@@ -69,11 +69,31 @@
   const HIT_FEEDBACK_MS = 200; // how long the "hit" flash lasts
   const SUPER_MOLE_POINTS = 3; // score awarded for hitting a super mole
   const BOMB_PENALTY = 3; // score lost for hitting a bomb
+  // A bomb is something to stay away from, so leaving it alone should not mean
+  // waiting out a full mole timer. It stays up for this share of the current
+  // mole window, but never less than BOMB_MIN_MS.
+  const BOMB_DURATION_FACTOR = 0.4;
+  const BOMB_MIN_MS = 1500;
   const BOMB_SPAWN_CHANCE = 0.2; // share of spawns that are bombs
   const SUPER_SPAWN_CHANCE = 0.15; // share of spawns that are super moles
   const DEFAULT_LIVES = 5;
   const DURATION_OPTIONS_MS = [30000, 60000, 90000];
   const LIVES_OPTIONS = [1, 3, 5, 7, 9];
+  // "classic" is the familiar 3 x 3; "random" deals a new shape every round
+  // and again at every level up (randomBoardRows()).
+  const BOARD_STYLE_OPTIONS = ["classic", "random"];
+  // Holes shrink as the player climbs levels: this share of the full size per
+  // level, but never below MIN_HOLE_SCALE of it, so they always stay hittable.
+  // HOLE_SCALE_EASE_MS eases each step in rather than snapping.
+  const HOLE_SHRINK_PER_LEVEL = 0.06;
+  const MIN_HOLE_SCALE = 0.55;
+  const HOLE_SCALE_EASE_MS = 400;
+  // After a random board is dealt anew, how long before the next mole comes
+  // up, so the player sees the new layout (and, on the sensors, can find it).
+  const BOARD_DEAL_PAUSE_MS = 1200;
+  // 3, 2, 1 before every round, then "Go!" for GO_SHOW_MS as it starts.
+  const COUNTDOWN_MS = 3000;
+  const GO_SHOW_MS = 700;
   // Time constant for easing the remote cursor towards the finger. Touch
   // events arrive in uneven bursts over the network, so this smooths the jumps
   // without making the cursor feel laggy.
@@ -568,6 +588,8 @@
     // Test mode: no bombs spawn and lives are never lost, so a run can be used
     // to exercise the sensor pipeline without the round ending underneath you.
     testMode: false,
+    // The board's shape, one of BOARD_STYLE_OPTIONS.
+    boardStyle: "random",
     // Multi-pulse, switched with the Pulses button on the game screen: in found
     // or half-found the scanner nodes take this many pulse pairs at one angle
     // and average them before moving. 1 is off. canvas.js passes it on to the
@@ -599,6 +621,7 @@
 
   window.DURATION_OPTIONS_MS = DURATION_OPTIONS_MS;
   window.LIVES_OPTIONS = LIVES_OPTIONS;
+  window.BOARD_STYLE_OPTIONS = BOARD_STYLE_OPTIONS;
 
   const moleImages = {};
   ["hole", "mole", "bomb", "dead_mole", "super_mole", "super_mole_hit", "dead_super_mole"].forEach((name) => {
@@ -615,6 +638,545 @@
 
   function isImageReady(img) {
     return img && img.complete && img.naturalWidth > 0;
+  }
+
+  // A mole (or bomb) rising out of a hole whose pit is the ellipse at (cx,
+  // pitY): clipped to everything above the pit's middle plus the pit itself,
+  // so its bottom disappears down the hole rather than over the front lip.
+  // r is the hole's radius, which sets the size; rise (0-1) how far up it is.
+  function drawRisingFromPit(ctx, img, isBomb, cx, pitY, pitRx, pitRy, r, rise = 1) {
+    const height = r * (isBomb ? 1.1 : 1.5);
+    const centreY = pitY - height * (isBomb ? 0.4 : 0.38) + (1 - rise) * height * 0.95;
+
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(cx - r * 2, pitY - r * 3, r * 4, r * 3);
+    ctx.moveTo(cx + pitRx, pitY); // a fresh subpath, not a line on from the rect
+    ctx.ellipse(cx, pitY, pitRx, pitRy, 0, 0, Math.PI * 2);
+    ctx.clip();
+    if (isImageReady(img)) {
+      drawImageCentered(ctx, img, cx, centreY, height);
+    } else {
+      // Flat stand-in until the artwork loads.
+      const radius = height * 0.42;
+      ctx.fillStyle = isBomb ? "#1f2937" : "#8b5e3c";
+      ctx.beginPath();
+      ctx.ellipse(cx, centreY, radius, radius * 1.1, 0, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.restore();
+  }
+
+  // --- Cartoon look --------------------------------------------------------------
+  // The game board only (the menus are HTML, ui.css): a sunny meadow, holes
+  // in dirt mounds, wooden signs with chunky outlined lettering, a mallet for
+  // the cursor, and a little feedback on every whack. The operator panels
+  // (LIVE STATS, the sensor readout, Pulses, Room) keep the plain dark
+  // drawHudPanel() look, so their numbers stay easy to read.
+
+  const DISPLAY_FONT = '"Lilita One", "Figtree", system-ui, sans-serif';
+  const INK = "#4a2a10";       // outlines and dark text
+  const CREAM = "#fff6dc";
+  const WOOD_LIGHT = "#d39457";
+  const WOOD_DARK = "#a5642c";
+
+  // A canvas never asks for a font itself: load the display face (ui.css)
+  // up front. Until it arrives the fallbacks draw.
+  if (typeof document !== "undefined" && document.fonts && document.fonts.load) {
+    document.fonts.load(`32px ${DISPLAY_FONT}`).catch(() => {});
+  }
+
+  const easeOutCubic = (t) => 1 - Math.pow(1 - t, 3);
+  const easeOutBack = (t) => 1 + 2.4 * Math.pow(t - 1, 3) + 1.4 * Math.pow(t - 1, 2);
+  const clamp01 = (t) => Math.max(0, Math.min(1, t));
+
+  // Chunky outlined lettering. fill "gold" is the score's yellow gradient.
+  function cartoonText(ctx, text, x, y, size, opts = {}) {
+    const { fill = CREAM, stroke = INK, align = "center", alpha = 1 } = opts;
+    ctx.save();
+    ctx.globalAlpha *= alpha;
+    ctx.font = `${Math.round(size)}px ${DISPLAY_FONT}`;
+    ctx.textAlign = align;
+    ctx.textBaseline = "alphabetic";
+    ctx.lineJoin = "round";
+    ctx.lineWidth = Math.max(3, size * 0.2);
+    ctx.strokeStyle = stroke;
+    ctx.shadowColor = "rgba(0, 0, 0, 0.3)";
+    ctx.shadowOffsetY = Math.max(2, size * 0.07);
+    ctx.strokeText(text, x, y);
+    ctx.shadowColor = "transparent";
+    if (fill === "gold") {
+      const g = ctx.createLinearGradient(0, y - size * 0.75, 0, y);
+      g.addColorStop(0, "#fff4a3");
+      g.addColorStop(1, "#ffbf1f");
+      ctx.fillStyle = g;
+    } else {
+      ctx.fillStyle = fill;
+    }
+    ctx.fillText(text, x, y);
+    ctx.restore();
+  }
+
+  // A wooden sign: planks with a dark outline, a lighter top edge, and a
+  // soft shadow under it.
+  function drawWoodSign(ctx, x, y, w, h, radius = 14) {
+    ctx.save();
+    ctx.shadowColor = "rgba(40, 25, 5, 0.35)";
+    ctx.shadowOffsetY = 5;
+    ctx.shadowBlur = 8;
+    const g = ctx.createLinearGradient(0, y, 0, y + h);
+    g.addColorStop(0, WOOD_LIGHT);
+    g.addColorStop(1, WOOD_DARK);
+    ctx.fillStyle = g;
+    ctx.beginPath();
+    ctx.roundRect(x, y, w, h, radius);
+    ctx.fill();
+    ctx.restore();
+
+    ctx.save();
+    ctx.beginPath();
+    ctx.roundRect(x, y, w, h, radius);
+    ctx.clip();
+    // Plank seams and a little grain.
+    const plankH = Math.max(18, h / Math.max(1, Math.round(h / 26)));
+    ctx.strokeStyle = "rgba(90, 45, 10, 0.35)";
+    ctx.lineWidth = 2;
+    for (let py = y + plankH; py < y + h - 4; py += plankH) {
+      ctx.beginPath();
+      ctx.moveTo(x, py);
+      ctx.lineTo(x + w, py);
+      ctx.stroke();
+    }
+    ctx.strokeStyle = "rgba(90, 45, 10, 0.12)";
+    ctx.lineWidth = 1;
+    for (let gx = x + 18; gx < x + w - 10; gx += 37) {
+      ctx.beginPath();
+      ctx.moveTo(gx, y + 4);
+      ctx.bezierCurveTo(gx + 6, y + h * 0.35, gx - 6, y + h * 0.65, gx + 2, y + h - 4);
+      ctx.stroke();
+    }
+    ctx.fillStyle = "rgba(255, 235, 190, 0.35)";
+    ctx.fillRect(x, y, w, 3);
+    ctx.restore();
+
+    ctx.strokeStyle = INK;
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.roundRect(x, y, w, h, radius);
+    ctx.stroke();
+  }
+
+  // A bright cartoon button with a darker base, as if it could be pressed.
+  function drawCartoonButton(ctx, rect, label, colour, edge) {
+    const { x, y, width: w, height: h } = rect;
+    ctx.save();
+    ctx.shadowColor = "rgba(0, 0, 0, 0.3)";
+    ctx.shadowOffsetY = 4;
+    ctx.shadowBlur = 6;
+    ctx.fillStyle = edge;
+    ctx.beginPath();
+    ctx.roundRect(x, y, w, h, h / 2);
+    ctx.fill();
+    ctx.restore();
+    const g = ctx.createLinearGradient(0, y, 0, y + h - 6);
+    g.addColorStop(0, "rgba(255, 255, 255, 0.35)");
+    g.addColorStop(0.5, "rgba(255, 255, 255, 0)");
+    ctx.fillStyle = colour;
+    ctx.beginPath();
+    ctx.roundRect(x, y, w, h - 6, h / 2);
+    ctx.fill();
+    ctx.fillStyle = g;
+    ctx.fill();
+    ctx.strokeStyle = INK;
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.roundRect(x, y, w, h, h / 2);
+    ctx.stroke();
+    cartoonText(ctx, label, x + w / 2, y + h / 2 + 5, 22);
+  }
+
+  function drawHeart(ctx, cx, cy, size, filled = true) {
+    const s = size / 2;
+    ctx.save();
+    ctx.translate(cx, cy);
+    ctx.beginPath();
+    ctx.moveTo(0, s * 0.85);
+    ctx.bezierCurveTo(-s * 1.25, -s * 0.05, -s * 0.7, -s * 1.15, 0, -s * 0.45);
+    ctx.bezierCurveTo(s * 0.7, -s * 1.15, s * 1.25, -s * 0.05, 0, s * 0.85);
+    ctx.closePath();
+    ctx.fillStyle = filled ? "#ef3b3b" : "rgba(74, 42, 16, 0.35)";
+    ctx.fill();
+    ctx.lineWidth = Math.max(2, size * 0.1);
+    ctx.lineJoin = "round";
+    ctx.strokeStyle = INK;
+    ctx.stroke();
+    if (filled) {
+      ctx.fillStyle = "rgba(255, 255, 255, 0.6)";
+      ctx.beginPath();
+      ctx.ellipse(-s * 0.42, -s * 0.38, s * 0.18, s * 0.11, -0.6, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.restore();
+  }
+
+  // A five-pointed star, for the burst when a mole is whacked.
+  function drawStar(ctx, cx, cy, r, colour) {
+    ctx.beginPath();
+    for (let i = 0; i < 10; i++) {
+      const a = -Math.PI / 2 + (i * Math.PI) / 5;
+      const rr = i % 2 ? r * 0.45 : r;
+      ctx.lineTo(cx + Math.cos(a) * rr, cy + Math.sin(a) * rr);
+    }
+    ctx.closePath();
+    ctx.fillStyle = colour;
+    ctx.fill();
+    ctx.lineWidth = 1.5;
+    ctx.strokeStyle = INK;
+    ctx.stroke();
+  }
+
+  // --- The meadow --------------------------------------------------------------
+  // Sky, rolling hills with trees, a picket fence on the horizon and a mowed
+  // lawn with tufts and flowers. Everything but the drifting clouds stays
+  // put, so it is painted once per size into a cached canvas.
+
+  // Small seeded generator, so the tufts and flowers stay where they are.
+  function seededRandom(seed) {
+    let a = seed >>> 0;
+    return () => {
+      a = (a + 0x6d2b79f5) >>> 0;
+      let t = a;
+      t = Math.imul(t ^ (t >>> 15), t | 1);
+      t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+
+  function hillY(x, base, amp, freq, phase) {
+    return base - amp * (0.6 + 0.4 * Math.sin(x * freq + phase)) - amp * 0.25 * Math.sin(x * freq * 2.7 + phase * 1.7);
+  }
+
+  function paintHills(ctx, width, base, amp, freq, phase, colour) {
+    ctx.fillStyle = colour;
+    ctx.beginPath();
+    ctx.moveTo(0, base + 2);
+    for (let x = 0; x <= width + 8; x += 8) ctx.lineTo(x, hillY(x, base, amp, freq, phase));
+    ctx.lineTo(width, base + 2);
+    ctx.closePath();
+    ctx.fill();
+  }
+
+  function paintTree(ctx, x, groundY, size) {
+    ctx.fillStyle = "#7a4a22";
+    ctx.fillRect(x - size * 0.08, groundY - size * 0.55, size * 0.16, size * 0.55);
+    ctx.fillStyle = "#3e9a3b";
+    ctx.beginPath();
+    ctx.arc(x, groundY - size * 0.75, size * 0.42, 0, Math.PI * 2);
+    ctx.arc(x - size * 0.28, groundY - size * 0.55, size * 0.3, 0, Math.PI * 2);
+    ctx.arc(x + size * 0.28, groundY - size * 0.55, size * 0.3, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = "rgba(255, 255, 255, 0.18)";
+    ctx.beginPath();
+    ctx.arc(x - size * 0.12, groundY - size * 0.88, size * 0.16, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  function paintFence(ctx, width, groundY) {
+    const postW = 12;
+    const gap = 26;
+    const h = 30;
+    ctx.fillStyle = "#f6ead0";
+    ctx.strokeStyle = "#9b7445";
+    ctx.lineWidth = 1.5;
+    // Two rails, then the pickets over them.
+    [groundY - h * 0.7, groundY - h * 0.3].forEach((ry) => {
+      ctx.fillRect(0, ry - 3, width, 6);
+      ctx.strokeRect(-2, ry - 3, width + 4, 6);
+    });
+    for (let x = 6; x < width; x += gap) {
+      ctx.beginPath();
+      ctx.moveTo(x, groundY);
+      ctx.lineTo(x, groundY - h + 6);
+      ctx.lineTo(x + postW / 2, groundY - h);
+      ctx.lineTo(x + postW, groundY - h + 6);
+      ctx.lineTo(x + postW, groundY);
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+    }
+  }
+
+  function paintFlower(ctx, x, y, size, petal) {
+    ctx.fillStyle = petal;
+    for (let i = 0; i < 5; i++) {
+      const a = (i * Math.PI * 2) / 5;
+      ctx.beginPath();
+      ctx.arc(x + Math.cos(a) * size * 0.5, y + Math.sin(a) * size * 0.5, size * 0.42, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.fillStyle = "#ffcc2e";
+    ctx.beginPath();
+    ctx.arc(x, y, size * 0.36, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  function paintTuft(ctx, x, y, size) {
+    ctx.strokeStyle = "rgba(40, 95, 25, 0.55)";
+    ctx.lineWidth = 2;
+    ctx.lineCap = "round";
+    [-0.5, 0, 0.5].forEach((lean) => {
+      ctx.beginPath();
+      ctx.moveTo(x + lean * size * 0.3, y);
+      ctx.quadraticCurveTo(x + lean * size * 0.4, y - size * 0.5, x + lean * size * 0.9, y - size);
+      ctx.stroke();
+    });
+  }
+
+  // board is the board's square ({ x, y, size }): the flowers keep off it, so
+  // they never sit under a hole.
+  function paintScenery(ctx, width, height, horizonY, boardRect) {
+    const sky = ctx.createLinearGradient(0, 0, 0, horizonY);
+    sky.addColorStop(0, "#47b3ea");
+    sky.addColorStop(1, "#b4e6fb");
+    ctx.fillStyle = sky;
+    ctx.fillRect(0, 0, width, horizonY + 4);
+
+    // Sun, with a soft glow.
+    const sunX = width * 0.66;
+    const sunY = Math.max(36, horizonY * 0.38);
+    const glow = ctx.createRadialGradient(sunX, sunY, 10, sunX, sunY, 90);
+    glow.addColorStop(0, "rgba(255, 244, 170, 0.8)");
+    glow.addColorStop(1, "rgba(255, 244, 170, 0)");
+    ctx.fillStyle = glow;
+    ctx.fillRect(sunX - 90, sunY - 90, 180, 180);
+    ctx.fillStyle = "#ffe066";
+    ctx.beginPath();
+    ctx.arc(sunX, sunY, 24, 0, Math.PI * 2);
+    ctx.fill();
+
+    paintHills(ctx, width, horizonY, 46, 0.006, 1.3, "#9fd46e");
+    const rand = seededRandom(3000);
+    for (let i = 0; i < 9; i++) {
+      const x = rand() * width;
+      paintTree(ctx, x, hillY(x, horizonY, 46, 0.006, 1.3) + 10, 34 + rand() * 18);
+    }
+    paintHills(ctx, width, horizonY, 22, 0.011, 4.1, "#82c653");
+    paintFence(ctx, width, horizonY + 2);
+
+    const lawn = ctx.createLinearGradient(0, horizonY, 0, height);
+    lawn.addColorStop(0, "#86cc4e");
+    lawn.addColorStop(1, "#4f9a2c");
+    ctx.fillStyle = lawn;
+    ctx.fillRect(0, horizonY + 2, width, height - horizonY - 2);
+    // Mowing stripes.
+    ctx.fillStyle = "rgba(255, 255, 255, 0.05)";
+    for (let y = horizonY + 2; y < height; y += 64) ctx.fillRect(0, y, width, 32);
+
+    const offBoard = (x, y, pad) => x < boardRect.x - pad || x > boardRect.x + boardRect.size + pad ||
+      y < boardRect.y - pad || y > boardRect.y + boardRect.size + pad;
+    for (let i = 0; i < 90; i++) {
+      const x = rand() * width;
+      const y = horizonY + 14 + rand() * (height - horizonY - 14);
+      if (offBoard(x, y, 0)) paintTuft(ctx, x, y, 8 + rand() * 6);
+    }
+    const petals = ["#ffffff", "#ffd6e8", "#fff3a6", "#d7c6ff"];
+    for (let i = 0; i < 40; i++) {
+      const x = rand() * width;
+      const y = horizonY + 18 + rand() * (height - horizonY - 18);
+      if (offBoard(x, y, 12)) paintFlower(ctx, x, y, 5 + rand() * 3, petals[i % petals.length]);
+    }
+  }
+
+  let sceneryCache = null; // { key, canvas }
+
+  function drawScenery(ctx, width, height, horizonY, boardRect) {
+    if (typeof document === "undefined") {
+      paintScenery(ctx, width, height, horizonY, boardRect);
+      return;
+    }
+    const dpr = window.devicePixelRatio || 1;
+    const key = [width, height, horizonY, boardRect.x, boardRect.y, boardRect.size, dpr].join(",");
+    if (!sceneryCache || sceneryCache.key !== key) {
+      const canvas = document.createElement("canvas");
+      canvas.width = Math.round(width * dpr);
+      canvas.height = Math.round(height * dpr);
+      const g = canvas.getContext("2d");
+      g.scale(dpr, dpr);
+      paintScenery(g, width, height, horizonY, boardRect);
+      sceneryCache = { key, canvas };
+    }
+    ctx.drawImage(sceneryCache.canvas, 0, 0, width, height);
+  }
+
+  // Slow clouds across the sky, wrapping round.
+  function drawClouds(ctx, width, horizonY, now) {
+    const clouds = [
+      { y: 0.25, s: 1.0, speed: 0.008, x: 0.1 },
+      { y: 0.5, s: 0.7, speed: 0.012, x: 0.45 },
+      { y: 0.2, s: 0.85, speed: 0.006, x: 0.8 },
+    ];
+    ctx.fillStyle = "rgba(255, 255, 255, 0.92)";
+    clouds.forEach((c) => {
+      const span = width + 240;
+      const x = ((c.x * span + now * c.speed) % span) - 120;
+      const y = Math.max(24, horizonY * c.y);
+      const s = 30 * c.s;
+      ctx.beginPath();
+      ctx.arc(x, y, s, 0, Math.PI * 2);
+      ctx.arc(x + s * 1.1, y - s * 0.35, s * 1.15, 0, Math.PI * 2);
+      ctx.arc(x + s * 2.2, y, s * 0.9, 0, Math.PI * 2);
+      ctx.rect(x, y - s * 0.2, s * 2.2, s * 0.9);
+      ctx.fill();
+    });
+  }
+
+  // --- Whack feedback ------------------------------------------------------------
+  // The mallet swings on every whack (whackAt), and each hit floats its points
+  // up from the hole (popups: { u, v, text, kind, at }, the hole's place on
+  // the board, so a new deal does not move them).
+  const POPUP_MS = 900;
+  const STAR_BURST_MS = 380;
+  const popups = [];
+  let whackAt = -Infinity;
+
+  function addPopup(holeIndex, text, kind, now) {
+    const slot = board.slots[holeIndex];
+    if (!slot) return;
+    popups.push({ u: slot.u, v: slot.v, text, kind, at: now });
+    if (popups.length > 8) popups.shift();
+  }
+
+  // A board place (u, v; 0-1 across and down the play area) on the canvas,
+  // as getGameGridLayout() places hole centres.
+  function boardPoint(layout, u, v) {
+    const pitch = layout.cellSize + layout.cellGap;
+    return {
+      x: layout.gridLeft + layout.cellSize / 2 + (u * 3 - 0.5) * pitch,
+      y: layout.gridTop + layout.cellSize / 2 + (v * 3 - 0.5) * pitch,
+    };
+  }
+
+  function drawPopups(ctx, layout, now) {
+    for (let i = popups.length - 1; i >= 0; i--) {
+      if (now - popups[i].at > POPUP_MS) popups.splice(i, 1);
+    }
+    popups.forEach((p) => {
+      const t = (now - p.at) / POPUP_MS;
+      const at = boardPoint(layout, p.u, p.v);
+      const pop = easeOutBack(clamp01(t * 4));
+      let fill = "gold";
+      if (p.kind === "bomb") fill = "#ff5a4a";
+      else if (p.kind === "wounded") fill = "#ffe08a";
+      const size = (p.kind === "super" ? 46 : p.kind === "wounded" ? 26 : 38) * pop;
+      cartoonText(ctx, p.text, at.x, at.y - 30 - easeOutCubic(t) * 50, Math.max(1, size),
+        { fill, alpha: 1 - clamp01((t - 0.6) / 0.4) });
+    });
+  }
+
+  // Stars bursting out of a whacked mole, or a puff of smoke from a bomb.
+  function drawBurst(ctx, cx, cy, r, type, t) {
+    const e = easeOutCubic(t);
+    ctx.save();
+    ctx.globalAlpha = 1 - t;
+    if (type === "bomb") {
+      ["#ffd166", "#ff8c42", "#6b6b6b"].forEach((colour, i) => {
+        ctx.fillStyle = colour;
+        for (let k = 0; k < 6; k++) {
+          const a = (k * Math.PI) / 3 + i;
+          ctx.beginPath();
+          ctx.arc(cx + Math.cos(a) * r * 0.6 * e, cy + Math.sin(a) * r * 0.6 * e, r * (0.35 - i * 0.08) * (0.5 + e), 0, Math.PI * 2);
+          ctx.fill();
+        }
+      });
+    } else {
+      for (let k = 0; k < 7; k++) {
+        const a = -Math.PI / 2 + ((k - 3) * Math.PI) / 7;
+        drawStar(ctx, cx + Math.cos(a) * r * 1.1 * e, cy + Math.sin(a) * r * 1.1 * e, r * 0.16, k % 2 ? "#fff3a6" : "#ffd23f");
+      }
+    }
+    ctx.restore();
+  }
+
+  // The mallet: its head comes down on (x, y). swing is 0 raised, 1 down.
+  function drawMallet(ctx, x, y, scale, swing) {
+    const L = 92 * scale;                 // pivot (the hand) to the head's centre
+    const rest = 0.6;                     // raised, radians clockwise
+    const handAngle = Math.atan2(-60, -70); // the hand sits down-right of the target
+    ctx.save();
+    ctx.translate(x - Math.cos(handAngle) * L, y - Math.sin(handAngle) * L);
+    ctx.rotate(handAngle + rest * (1 - swing));
+
+    ctx.lineJoin = "round";
+    ctx.lineWidth = 2.5;
+    ctx.strokeStyle = INK;
+    // Handle, from the hand to the head.
+    ctx.fillStyle = "#e0a96b";
+    ctx.beginPath();
+    ctx.roundRect(-8 * scale, -5 * scale, L, 10 * scale, 5 * scale);
+    ctx.fill();
+    ctx.stroke();
+    // Grip.
+    ctx.fillStyle = "#c0392b";
+    ctx.beginPath();
+    ctx.roundRect(-10 * scale, -6.5 * scale, 28 * scale, 13 * scale, 5 * scale);
+    ctx.fill();
+    ctx.stroke();
+    // Head, across the handle's end.
+    const hw = 34 * scale;
+    const hl = 60 * scale;
+    const head = ctx.createLinearGradient(L - hw / 2, 0, L + hw / 2, 0);
+    head.addColorStop(0, "#c7743a");
+    head.addColorStop(0.5, "#e6a160");
+    head.addColorStop(1, "#b0602a");
+    ctx.fillStyle = head;
+    ctx.beginPath();
+    ctx.roundRect(L - hw / 2, -hl / 2, hw, hl, 8 * scale);
+    ctx.fill();
+    ctx.stroke();
+    // Iron bands at both striking ends.
+    ctx.fillStyle = "#6f7782";
+    [-hl / 2, hl / 2 - 10 * scale].forEach((by) => {
+      ctx.beginPath();
+      ctx.roundRect(L - hw / 2, by, hw, 10 * scale, 4 * scale);
+      ctx.fill();
+      ctx.stroke();
+    });
+    ctx.restore();
+  }
+
+  // 0 at rest, quickly down to 1 on a whack, then back up.
+  function malletSwing(now) {
+    const t = now - whackAt;
+    if (t < 0 || t > 260) return 0;
+    return t < 70 ? t / 70 : 1 - (t - 70) / 190;
+  }
+
+  // Which hole the mole came up in, and when it was first drawn there, for
+  // its rise out of the hole.
+  const moleRise = { hole: -1, at: 0 };
+  const MOLE_RISE_MS = 160;
+
+  // A level-up ribbon across the middle of the board, for a moment.
+  const LEVEL_BANNER_MS = 1500;
+
+  function drawLevelBanner(ctx, layout, width, now) {
+    const t = (now - gameState.levelUpAt) / LEVEL_BANNER_MS;
+    if (!(t >= 0 && t < 1) || gameState.status !== "playing") return;
+    const alpha = 1 - clamp01((t - 0.75) / 0.25);
+    const pop = easeOutBack(clamp01(t * 5));
+    const cy = layout.gridTop + layout.gridSize / 2;
+    const w = Math.min(width - 40, 460) * pop;
+    const h = 92 * pop;
+
+    ctx.save();
+    ctx.globalAlpha = alpha;
+    drawWoodSign(ctx, width / 2 - w / 2, cy - h / 2, w, h, 18);
+    let detail = null;
+    if (settings.boardStyle === "random") detail = "New layout!";
+    else if (!settings.testMode && targetHoleScale() > MIN_HOLE_SCALE) detail = "Holes shrink!";
+    cartoonText(ctx, `Level ${gameState.peakLevel}!`, width / 2, cy + (detail ? 4 : 16) * pop, 44 * pop, { fill: "gold" });
+    if (detail) cartoonText(ctx, detail, width / 2, cy + 34 * pop, 20 * pop);
+    ctx.restore();
   }
 
   const emptySensorState = () => ({
@@ -645,10 +1207,17 @@
     remainingMs: GAME_DURATION_MS,
     lastTickTime: null,
     activeHole: -1, // -1 means no mole currently up
+    lastSpawnHole: -1, // where the last mole or hat mole came up (bombs never count); -1 before the first of a round
     moleType: "mole", // "mole" | "bomb" | "super"
     moleWounded: false, // true once a hat (super) mole has taken its first of two hits
     moleSpawnedAt: 0,
     moleDurationMs: BASE_MOLE_MS,
+    holeScale: 1, // the holes' size as a share of full size, eased towards targetHoleScale()
+    levelUpAt: -Infinity, // when the last new peak level was reached, for the banner
+    countdownMs: 0, // left of the 3-2-1 before the round starts; 0 once it has
+    goAt: -Infinity, // when the countdown ended, for the "Go!"
+    countdownBeeped: null, // the last number of the countdown beeped for
+    boardPending: false, // a level up is waiting to deal a new random board
     nextSpawnAt: 0,
     pausedAt: 0,
     hitFlash: { hole: -1, until: 0, type: null },
@@ -686,6 +1255,12 @@
     return rampedMoleDuration(level);
   }
 
+  // How long the thing currently up stays before it goes back down.
+  function visibleDurationMs() {
+    if (gameState.moleType !== "bomb") return gameState.moleDurationMs;
+    return Math.max(BOMB_MIN_MS, Math.round(gameState.moleDurationMs * BOMB_DURATION_FACTOR));
+  }
+
   // Always reports the real difficulty curve, regardless of the current mode.
   window.getMoleDurationTable = function getMoleDurationTable() {
     return Array.from({ length: MAX_LEVEL }, (_, i) => ({
@@ -703,19 +1278,122 @@
   // Grants bonus lives as the player reaches new peak levels. Tracked against a
   // peak (rather than the current, occasionally-dipping level) so a bomb penalty
   // dropping the score - and with it the current level - never claws lives back.
+  // A new peak level is also a level up: it gets the banner (levelUpAt), and
+  // a random board is dealt anew (boardPending, dealt in updateGame()).
   function grantLevelBonus(currentLevel) {
     if (currentLevel > gameState.peakLevel) {
       gameState.lives += levelLivesBonus(currentLevel) - levelLivesBonus(gameState.peakLevel);
       gameState.peakLevel = currentLevel;
+      gameState.levelUpAt = performance.now();
+      sound("levelUp");
+      // Test mode keeps the board, as it keeps the holes' size.
+      if (settings.boardStyle === "random" && !settings.testMode) gameState.boardPending = true;
     }
   }
 
-  function pickRandomHole(excludeHole) {
-    let hole;
+  // Full size at level 1, HOLE_SHRINK_PER_LEVEL smaller each level after,
+  // down to MIN_HOLE_SCALE. Follows the peak level, so a bomb dropping the
+  // score never hands the bigger holes back. Test mode keeps them full size,
+  // as it keeps the mole window fixed.
+  function targetHoleScale() {
+    if (settings.testMode) return 1;
+    return Math.max(MIN_HOLE_SCALE, 1 - HOLE_SHRINK_PER_LEVEL * (gameState.peakLevel - 1));
+  }
+
+  // --- Board shape -------------------------------------------------------------
+  // The board is a list of rows, top row first, each the number of holes in
+  // it. Every row is spread evenly across the play area and the rows evenly
+  // down it, so the holes always sit over the same floor the sensors cover:
+  // the classic 3 x 3 is CLASSIC_ROWS, and a random board just has more or
+  // fewer holes in a row. Only the classic board's holes are the sensors'
+  // cells, which is what the cell lock holds to (board.classic).
+  // Always three rows, so a random board's rows are the sensors' rows too:
+  // only how many holes sit across each one changes.
+  const CLASSIC_ROWS = [3, 3, 3];
+  const RANDOM_ROWS = 3;
+  const RANDOM_HOLES_PER_ROW = [2, 3, 4];
+
+  function pickOne(list) {
+    return list[Math.floor(Math.random() * list.length)];
+  }
+
+  function isClassicShape(rows) {
+    return rows.length === CLASSIC_ROWS.length && rows.every((n, i) => n === CLASSIC_ROWS[i]);
+  }
+
+  // 3 rows of 2-4 holes each, e.g. [3, 4, 2] - never the classic 3 x 3, nor
+  // the shape in play now (avoid), so a new deal always looks new.
+  function randomBoardRows(avoid) {
+    let rows;
     do {
-      hole = Math.floor(Math.random() * 9);
-    } while (hole === excludeHole);
-    return hole;
+      rows = Array.from({ length: RANDOM_ROWS }, () => pickOne(RANDOM_HOLES_PER_ROW));
+    } while (isClassicShape(rows) || (avoid && rows.every((n, i) => n === avoid[i])));
+    return rows;
+  }
+
+  // Each hole as { index, row, col, u, v, neighbours }: u and v its centre as
+  // a share of the play area's width and depth (0-1, from the top-left), and
+  // neighbours the holes one step away (neighboursOf()). Holes are numbered
+  // row by row from the top-left, the same order as getGameGridLayout().
+  // span is the full hole size in classic hole pitches: the tightest of the
+  // row and column spacing, so the holes never touch on the busiest row.
+  function buildBoard(rows) {
+    const slots = [];
+    rows.forEach((count, row) => {
+      for (let col = 0; col < count; col++) {
+        slots.push({ index: slots.length, row, col, u: (col + 0.5) / count, v: (row + 0.5) / rows.length });
+      }
+    });
+    slots.forEach((slot) => { slot.neighbours = neighboursOf(slot, slots); });
+    const span = Math.min(3 / rows.length, ...rows.map((count) => 3 / count));
+    return { rows: rows.slice(), classic: isClassicShape(rows), slots, span };
+  }
+
+  // One step away: next along the same row, or the closest hole (or the two
+  // equally close) in the row above and below. On the classic board that is
+  // exactly up, down, left and right.
+  function neighboursInRow(slot, slots, row) {
+    const inRow = slots.filter((s) => s.row === row);
+    if (!inRow.length) return [];
+    const nearest = Math.min(...inRow.map((s) => Math.abs(s.u - slot.u)));
+    return inRow.filter((s) => Math.abs(s.u - slot.u) - nearest < 1e-6);
+  }
+
+  function neighboursOf(slot, slots) {
+    return [
+      ...slots.filter((s) => s.row === slot.row && Math.abs(s.col - slot.col) === 1),
+      ...neighboursInRow(slot, slots, slot.row - 1),
+      ...neighboursInRow(slot, slots, slot.row + 1),
+    ].map((s) => s.index);
+  }
+
+  // The board in play. Classic until a round deals another (resetGame()).
+  let board = buildBoard(CLASSIC_ROWS);
+  let boardDealtAt = -Infinity; // when it was dealt, for the holes popping up
+
+  // Deals a new random board mid-round. The next mole steps out from the new
+  // hole nearest where the last one came up, so the player is not sent
+  // across the floor just because the layout changed.
+  function dealNewBoard(now) {
+    const last = board.slots[gameState.lastSpawnHole];
+    board = buildBoard(randomBoardRows(board.rows));
+    boardDealtAt = now;
+    gameState.boardPending = false;
+    gameState.lastSpawnHole = last ? nearestSlot(last.u, last.v).index : -1;
+  }
+
+  function nearestSlot(u, v) {
+    return board.slots.reduce((best, s) =>
+      (Math.hypot(s.u - u, s.v - v) < Math.hypot(best.u - u, best.v - v) ? s : best));
+  }
+
+  // The first mole of a round can come up anywhere. After that each mole comes
+  // up one hole away from the last (neighboursOf()), so the player only ever
+  // has to take a single step.
+  function pickSpawnHole(lastHole) {
+    const from = board.slots[lastHole];
+    if (!from) return Math.floor(Math.random() * board.slots.length);
+    return pickOne(from.neighbours);
   }
 
   function pickRandomMoleType() {
@@ -765,23 +1443,50 @@
     gameState.remainingMs = settings.durationMs;
     gameState.lastTickTime = null;
     gameState.activeHole = -1;
+    gameState.lastSpawnHole = -1;
     gameState.moleType = "mole";
     gameState.moleWounded = false;
     gameState.moleSpawnedAt = 0;
     gameState.moleDurationMs = computeMoleDuration(gameState.level);
+    gameState.holeScale = 1;
+    gameState.levelUpAt = -Infinity;
+    gameState.countdownMs = COUNTDOWN_MS;
+    gameState.goAt = -Infinity;
+    gameState.countdownBeeped = null;
+    gameState.boardPending = false;
     gameState.nextSpawnAt = 0;
     gameState.hitFlash = { hole: -1, until: 0, type: null };
     gameState.cursor = { x: null, y: null, inBounds: true };
     sensorCursor = { x: null, y: null, inBounds: true };
     gameState.sensor = emptySensorState();
+    // Random deals a fresh shape every round, Restart included.
+    board = buildBoard(settings.boardStyle === "random" ? randomBoardRows() : CLASSIC_ROWS);
+    boardDealtAt = performance.now();
+    popups.length = 0;
     resetSensorFilters();
-    roundStats()?.reset(gameState.inputMode);
+    // A random board is dealt anew mid-round, so its hits are counted against
+    // the most holes one can have (3 rows of 4).
+    const holeCount = settings.boardStyle === "random"
+      ? RANDOM_ROWS * Math.max(...RANDOM_HOLES_PER_ROW)
+      : board.slots.length;
+    roundStats()?.reset(gameState.inputMode, holeCount);
   };
 
   // The live statistics (gameStats.js). Optional: the headless parity run loads
   // game.js without it, so every report goes through this and may be skipped.
   function roundStats() {
     return window.GameStats || null;
+  }
+
+  // The sound effects (sounds.js). Optional, like the statistics: the
+  // headless tests load game.js without them.
+  function sound(name) {
+    window.GameSounds?.play(name);
+  }
+
+  function endRound() {
+    gameState.status = "gameover";
+    sound("gameOver");
   }
 
   window.getGameState = function getGameState() {
@@ -904,6 +1609,26 @@
 
     const elapsed = now - gameState.lastTickTime;
     gameState.lastTickTime = now;
+
+    // The 3-2-1 before the round: no clock, no moles, no statistics. It waits
+    // while the round would be held (nobody on the floor, too close), so the
+    // player is in place when it says Go.
+    if (gameState.countdownMs > 0) {
+      if (isSensorBlocked()) return;
+      gameState.countdownMs = Math.max(0, gameState.countdownMs - elapsed);
+      const after = Math.ceil(gameState.countdownMs / 1000);
+      const beeped = gameState.countdownBeeped;
+      gameState.countdownBeeped = after;
+      if (after === 0) {
+        gameState.goAt = now;
+        gameState.nextSpawnAt = now + randomBetween(MIN_SPAWN_DELAY_MS, MAX_SPAWN_DELAY_MS);
+        sound("go");
+      } else if (after !== beeped) {
+        sound("count");
+      }
+      return;
+    }
+
     roundStats()?.onTick(elapsed, statsFrame(canvas));
 
     // Hold the round while the player is too close, out of bounds, or invisible
@@ -922,14 +1647,14 @@
 
       if (gameState.remainingMs <= 0) {
         gameState.remainingMs = 0;
-        gameState.status = "gameover";
+        endRound();
         gameState.activeHole = -1;
         return;
       }
     }
 
     // Mole timed out without being hit -> remove it and schedule the next one.
-    if (gameState.activeHole !== -1 && now - gameState.moleSpawnedAt >= gameState.moleDurationMs) {
+    if (gameState.activeHole !== -1 && now - gameState.moleSpawnedAt >= visibleDurationMs()) {
       const missedMole = gameState.moleType !== "bomb"; // letting a bomb expire is fine, missing a mole costs a life
       roundStats()?.onExpire(gameState.moleType);
       gameState.activeHole = -1;
@@ -937,9 +1662,10 @@
       gameState.nextSpawnAt = now + randomBetween(MIN_SPAWN_DELAY_MS, MAX_SPAWN_DELAY_MS);
 
       if (missedMole) {
+        sound("miss");
         loseLife();
         if (isOutOfLives()) {
-          gameState.status = "gameover";
+          endRound();
           return;
         }
       }
@@ -948,14 +1674,29 @@
     gameState.level = computeLevel(gameState.score);
     gameState.moleDurationMs = computeMoleDuration(gameState.level);
     grantLevelBonus(gameState.level);
+    const ease = 1 - Math.exp(-elapsed / HOLE_SCALE_EASE_MS);
+    gameState.holeScale += (targetHoleScale() - gameState.holeScale) * ease;
+
+    // A level up on a random board deals a new one, once the hit that earned
+    // it has finished flashing and nothing is up, and gives the player a
+    // moment to see it before the next mole.
+    if (gameState.boardPending && gameState.activeHole === -1 && now >= gameState.hitFlash.until) {
+      dealNewBoard(now);
+      gameState.nextSpawnAt = Math.max(gameState.nextSpawnAt, now + BOARD_DEAL_PAUSE_MS);
+    }
 
     // Spawn a mole if none is up and it's time (only one hole active at once).
     if (gameState.activeHole === -1 && now >= gameState.nextSpawnAt) {
-      gameState.activeHole = pickRandomHole(-1);
-      gameState.moleSpawnedAt = now;
+      // Spawns step out from the last real mole. A bomb still comes up next to
+      // that mole, but it never becomes the new anchor, so the mole after a bomb
+      // is one step from the previous mole rather than from the bomb.
       gameState.moleType = pickRandomMoleType();
+      gameState.activeHole = pickSpawnHole(gameState.lastSpawnHole);
+      if (gameState.moleType !== "bomb") gameState.lastSpawnHole = gameState.activeHole;
+      gameState.moleSpawnedAt = now;
       gameState.moleWounded = false;
       roundStats()?.onSpawn(gameState.moleType);
+      sound({ mole: "pop", super: "popSuper", bomb: "fuse" }[gameState.moleType]);
     }
   };
 
@@ -967,8 +1708,10 @@
     return boardRow(gy) * 3 + gx;
   }
 
+  // Holes are round: a point scores only inside the circle, not the corners
+  // of the square around it.
   function holeAtPoint(layout, x, y) {
-    return layout.holes.find((h) => x >= h.x && x <= h.x + h.size && y >= h.y && y <= h.y + h.size) || null;
+    return layout.holes.find((h) => Math.hypot(x - h.cx, y - h.cy) <= h.r) || null;
   }
 
   // What GameStats.onTick() needs about this frame. positionCm puts both input
@@ -1110,9 +1853,7 @@
     const y = layout.gridTop + gameState.remotePos.ny * layout.gridSize;
     gameState.cursor = { x, y, inBounds: true };
 
-    const hole = layout.holes.find(
-      (h) => x >= h.x && x <= h.x + h.size && y >= h.y && y <= h.y + h.size
-    );
+    const hole = holeAtPoint(layout, x, y);
     gameState.remoteHole = hole ? hole.index : -1;
     window.handleGameHover(canvas, x, y);
   }
@@ -1204,6 +1945,13 @@
     return out;
   }
 
+  // The board on the canvas. gridLeft/gridTop/gridSize, cellSize and cellGap
+  // are always the classic 3 x 3's, whatever the board: the sensor mapping
+  // (worldToCanvasPoint(), gridToCanvasPoint()) is built on them. The holes
+  // are the board in play (buildBoard()), each { index, cx, cy, r } - a circle,
+  // its centre placed by the same mapping, so a hole a third of the way across
+  // the play area is drawn a third of the way across the board - plus x, y
+  // and size, the square around it, for drawing.
   window.getGameGridLayout = function getGameGridLayout(canvas) {
     const width = canvas.clientWidth || canvas.width;
     const height = canvas.clientHeight || canvas.height;
@@ -1213,17 +1961,18 @@
     const gridLeft = width / 2 - gridSize / 2;
     const gridTop = height / 2 - gridSize / 2 + 20;
 
-    const holes = [];
-    for (let row = 0; row < 3; row++) {
-      for (let col = 0; col < 3; col++) {
-        holes.push({
-          index: row * 3 + col,
-          x: gridLeft + col * (cellSize + cellGap),
-          y: gridTop + row * (cellSize + cellGap),
-          size: cellSize,
-        });
-      }
-    }
+    // Classic hole pitch, and the centre of the classic top-left hole, which
+    // sits at u = v = 1/6 (half a column in).
+    const pitch = cellSize + cellGap;
+    const firstX = gridLeft + cellSize / 2;
+    const firstY = gridTop + cellSize / 2;
+    const size = (board.span * pitch - cellGap) * gameState.holeScale;
+
+    const holes = board.slots.map((slot) => {
+      const cx = firstX + (slot.u * 3 - 0.5) * pitch;
+      const cy = firstY + (slot.v * 3 - 0.5) * pitch;
+      return { index: slot.index, cx, cy, r: size / 2, x: cx - size / 2, y: cy - size / 2, size };
+    });
 
     return { holes, cellSize, cellGap, gridLeft, gridTop, gridSize };
   };
@@ -1240,11 +1989,14 @@
 
     // Hat (super) moles take two hits to defeat. The first hit just wounds it and
     // refreshes its timer for the finishing blow - no score/life change yet.
+    whackAt = now;
     if (hitType === "super" && !gameState.moleWounded) {
       roundStats()?.onFirstHit("super", reactionMs);
       gameState.moleWounded = true;
       gameState.moleSpawnedAt = now;
       gameState.hitFlash = { hole: holeIndex, until: now + HIT_FEEDBACK_MS, type: "wounded" };
+      addPopup(holeIndex, "1 more!", "wounded", now);
+      sound("clang");
       return true;
     }
 
@@ -1252,8 +2004,13 @@
       gameState.score = Math.max(0, gameState.score - BOMB_PENALTY);
       loseLife();
       roundStats()?.onBombHit();
+      addPopup(holeIndex, `-${BOMB_PENALTY}`, "bomb", now);
+      sound("bomb");
     } else {
-      gameState.score += hitType === "super" ? SUPER_MOLE_POINTS : 1;
+      const points = hitType === "super" ? SUPER_MOLE_POINTS : 1;
+      addPopup(holeIndex, `+${points}`, hitType, now);
+      sound(hitType === "super" ? "superHit" : "whack");
+      gameState.score += points;
       if (hitType === "mole") roundStats()?.onFirstHit("mole", reactionMs);
       roundStats()?.onDefeat(hitType, holeIndex);
     }
@@ -1267,7 +2024,7 @@
     gameState.nextSpawnAt = now + randomBetween(MIN_SPAWN_DELAY_MS, MAX_SPAWN_DELAY_MS);
 
     if (isOutOfLives()) {
-      gameState.status = "gameover";
+      endRound();
     }
     return true;
   }
@@ -1276,24 +2033,19 @@
   // Returns true only if it actually hit the currently active mole.
   window.handleGameClick = function handleGameClick(canvas, x, y) {
     if (gameState.status !== "playing") return false;
+    whackAt = performance.now(); // the mallet swings, hit or miss
 
-    const layout = window.getGameGridLayout(canvas);
-    const hole = layout.holes.find(
-      (h) => x >= h.x && x <= h.x + h.size && y >= h.y && y <= h.y + h.size
-    );
-
-    if (!hole) return false; // missed the grid entirely - no score change
-    return awardPointForHole(hole.index);
+    const hole = holeAtPoint(window.getGameGridLayout(canvas), x, y);
+    // Missing every hole, or an empty one, changes no score: just a swish.
+    const hit = hole ? awardPointForHole(hole.index) : false;
+    if (!hit) sound("swish");
+    return hit;
   };
 
   window.handleGameHover = function handleGameHover(canvas, x, y) {
     if (gameState.status !== "playing") return false;
 
-    const layout = window.getGameGridLayout(canvas);
-    const hole = layout.holes.find(
-      (h) => x >= h.x && x <= h.x + h.size && y >= h.y && y <= h.y + h.size
-    );
-
+    const hole = holeAtPoint(window.getGameGridLayout(canvas), x, y);
     if (!hole) return false;
     return awardPointForHole(hole.index);
   };
@@ -3105,14 +3857,22 @@
   function moveCursor(canvas, world, column, dt, cell) {
     let target = worldToCanvasPoint(canvas, world.x, world.y, column);
     if (!target) return null;
-    if (tuning.cellLock && cell) target = lockedToCell(canvas, target, cell);
+    if (cellLockApplies(cell)) target = lockedToCell(canvas, target, cell);
     const point = cursorSmoother.step(target, dt);
     if (!point) return null;
     gameState.cursor = { x: point.x, y: point.y, inBounds: true };
     return point;
   }
 
-  // The hole of a cell ({ gx, gy }) on the board, or null.
+  // The cell lock only means something on the classic board, where each cell
+  // is a hole. A random board's holes do not line up with the cells, so there
+  // the cursor goes wherever the position does and scores whichever hole it
+  // is over, as with the lock off.
+  function cellLockApplies(cell) {
+    return tuning.cellLock && Boolean(cell) && board.classic;
+  }
+
+  // The hole of a cell ({ gx, gy }) on the classic board, or null.
   function holeOfCell(canvas, cell) {
     const index = holeForCell(cell.gx, cell.gy);
     return window.getGameGridLayout(canvas).holes.find((h) => h.index === index) || null;
@@ -3521,7 +4281,7 @@
   // the cursor easing from one hole to the next never whacks a third.
   function hoverFromSensors(canvas, point, cell) {
     if (gameState.remoteActive) return;
-    if (tuning.cellLock && cell) {
+    if (cellLockApplies(cell)) {
       const hole = holeOfCell(canvas, cell);
       const over = holeAtPoint(window.getGameGridLayout(canvas), point.x, point.y);
       if (!hole || !over || over.index !== hole.index) return;
@@ -3729,7 +4489,11 @@
       return;
     }
 
-    const point = window.gridToCanvasPoint(canvas, c.gx, c.gy);
+    // A cell's centre is a hole's on the classic board only; on a random one
+    // the cursor goes to the server's position instead, so it can reach every
+    // hole.
+    const free = board.classic ? null : worldToCanvasPoint(canvas, c.x, c.y, c.column);
+    const point = free || window.gridToCanvasPoint(canvas, c.gx, c.gy);
     gameState.cursor = { x: point.x, y: point.y, inBounds: true };
     hoverFromSensors(canvas, point);
   }
@@ -3808,10 +4572,18 @@
       x: pauseLayout.x + pauseLayout.width + 10,
       y: pauseLayout.y,
       w: Math.max(190, Math.min(260, width * 0.2)),
-      h: scoreFontSize + livesFontSize + 40,
+      h: 96,
       scoreFontSize,
       livesFontSize,
     };
+  }
+
+  // Level sign, top-right, with the Stats toggle, Pulses and Room stacked
+  // under it.
+  function getLevelPanelLayout(canvas) {
+    const width = canvas.clientWidth || canvas.width;
+    const w = 130;
+    return { x: width - 12 - w, y: 12, width: w, height: 52 };
   }
 
   // The How to Play legend, right-hand side: a header and three entries.
@@ -3826,7 +4598,7 @@
     return {
       x: width - 12 - w,
       // Below the Room button, the last of the top-right stack.
-      y: Math.max(188, height * 0.22),
+      y: Math.max(getRoomButtonLayout(canvas).y + getRoomButtonLayout(canvas).height + 12, height * 0.22),
       w,
       h: LEGEND_HEADER_H + LEGEND_ENTRIES * LEGEND_ENTRY_H + 14,
     };
@@ -3930,57 +4702,21 @@
     const centerX = width / 2;
     const layout = getGameOverLayout(canvas);
 
-    ctx.fillStyle = "rgba(0, 0, 0, 0.55)";
+    ctx.fillStyle = "rgba(20, 40, 10, 0.55)";
     ctx.fillRect(0, 0, width, height);
 
     const cardWidth = Math.min(480, width - 40);
-    const cardTop = height / 2 - 130;
+    const cardTop = height / 2 - 150;
     const cardBottom = layout.restartButton.y + layout.restartButton.height + 26;
-    ctx.save();
-    ctx.shadowColor = "rgba(0, 0, 0, 0.5)";
-    ctx.shadowBlur = 30;
-    ctx.fillStyle = "#1a1b26";
-    ctx.beginPath();
-    ctx.roundRect(centerX - cardWidth / 2, cardTop, cardWidth, cardBottom - cardTop, 18);
-    ctx.fill();
-    ctx.restore();
-    ctx.strokeStyle = "rgba(255, 255, 255, 0.08)";
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    ctx.roundRect(centerX - cardWidth / 2, cardTop, cardWidth, cardBottom - cardTop, 18);
-    ctx.stroke();
+    drawWoodSign(ctx, centerX - cardWidth / 2, cardTop, cardWidth, cardBottom - cardTop, 22);
 
-    ctx.textAlign = "center";
-    ctx.fillStyle = "#f4f4f5";
-    ctx.font = "bold 40px monospace";
-    ctx.fillText("Game Over", centerX, height / 2 - 60);
+    cartoonText(ctx, isOutOfLives() ? "Out of lives!" : "Time's up!", centerX, height / 2 - 92, 50, { fill: "gold" });
+    cartoonText(ctx, "Final score", centerX, height / 2 - 52, 20);
+    cartoonText(ctx, `${gameState.score}`, centerX, height / 2 + 10, 60, { fill: "gold" });
+    cartoonText(ctx, `Level ${gameState.peakLevel} reached`, centerX, height / 2 + 44, 20);
 
-    ctx.fillStyle = "#9298aa";
-    ctx.font = "18px monospace";
-    ctx.fillText(`Score: ${gameState.score}   Level reached: ${gameState.level}`, centerX, height / 2 - 20);
-    if (isOutOfLives()) {
-      ctx.fillStyle = "#ef4444";
-      ctx.fillText("Out of lives", centerX, height / 2 + 8);
-    }
-
-    ctx.save();
-    ctx.shadowColor = "rgba(34, 197, 94, 0.4)";
-    ctx.shadowBlur = 10;
-    ctx.fillStyle = "#22c55e";
-    ctx.beginPath();
-    ctx.roundRect(layout.restartButton.x, layout.restartButton.y, layout.restartButton.width, layout.restartButton.height, 10);
-    ctx.fill();
-    ctx.restore();
-    ctx.fillStyle = "#13131c";
-    ctx.font = "bold 16px monospace";
-    ctx.fillText("Restart", layout.restartButton.x + layout.restartButton.width / 2, layout.restartButton.y + layout.restartButton.height / 2 + 6);
-
-    ctx.fillStyle = "#3a3f52";
-    ctx.beginPath();
-    ctx.roundRect(layout.returnButton.x, layout.returnButton.y, layout.returnButton.width, layout.returnButton.height, 10);
-    ctx.fill();
-    ctx.fillStyle = "#fff";
-    ctx.fillText("Return to Start", layout.returnButton.x + layout.returnButton.width / 2, layout.returnButton.y + layout.returnButton.height / 2 + 6);
+    drawCartoonButton(ctx, layout.restartButton, "Play again", "#5ccf4a", "#2f8a22");
+    drawCartoonButton(ctx, layout.returnButton, "Main menu", "#ffb02e", "#b8700c");
     ctx.textAlign = "start";
   }
 
@@ -3990,57 +4726,18 @@
     const centerX = width / 2;
     const layout = getPauseMenuLayout(canvas);
 
-    ctx.fillStyle = "rgba(0, 0, 0, 0.55)";
+    ctx.fillStyle = "rgba(20, 40, 10, 0.55)";
     ctx.fillRect(0, 0, width, height);
 
     const cardWidth = Math.min(360, width - 40);
-    const cardTop = layout.resumeButton.y - 90;
-    const cardBottom = layout.menuButton.y + layout.menuButton.height + 24;
-    ctx.save();
-    ctx.shadowColor = "rgba(0, 0, 0, 0.5)";
-    ctx.shadowBlur = 30;
-    ctx.fillStyle = "#1a1b26";
-    ctx.beginPath();
-    ctx.roundRect(centerX - cardWidth / 2, cardTop, cardWidth, cardBottom - cardTop, 18);
-    ctx.fill();
-    ctx.restore();
-    ctx.strokeStyle = "rgba(255, 255, 255, 0.08)";
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    ctx.roundRect(centerX - cardWidth / 2, cardTop, cardWidth, cardBottom - cardTop, 18);
-    ctx.stroke();
+    const cardTop = layout.resumeButton.y - 96;
+    const cardBottom = layout.menuButton.y + layout.menuButton.height + 26;
+    drawWoodSign(ctx, centerX - cardWidth / 2, cardTop, cardWidth, cardBottom - cardTop, 22);
+    cartoonText(ctx, "Paused", centerX, layout.resumeButton.y - 34, 48, { fill: "gold" });
 
-    ctx.textAlign = "center";
-    ctx.fillStyle = "#f4f4f5";
-    ctx.font = "bold 32px monospace";
-    ctx.fillText("Paused", centerX, layout.resumeButton.y - 40);
-
-    ctx.save();
-    ctx.shadowColor = "rgba(34, 197, 94, 0.4)";
-    ctx.shadowBlur = 10;
-    ctx.fillStyle = "#22c55e";
-    ctx.beginPath();
-    ctx.roundRect(layout.resumeButton.x, layout.resumeButton.y, layout.resumeButton.width, layout.resumeButton.height, 10);
-    ctx.fill();
-    ctx.restore();
-    ctx.fillStyle = "#13131c";
-    ctx.font = "bold 16px monospace";
-    ctx.fillText("Resume", layout.resumeButton.x + layout.resumeButton.width / 2, layout.resumeButton.y + layout.resumeButton.height / 2 + 6);
-
-    ctx.fillStyle = "#3b82f6";
-    ctx.beginPath();
-    ctx.roundRect(layout.restartButton.x, layout.restartButton.y, layout.restartButton.width, layout.restartButton.height, 10);
-    ctx.fill();
-    ctx.fillStyle = "#13131c";
-    ctx.fillText("Restart", layout.restartButton.x + layout.restartButton.width / 2, layout.restartButton.y + layout.restartButton.height / 2 + 6);
-
-    ctx.fillStyle = "#3a3f52";
-    ctx.beginPath();
-    ctx.roundRect(layout.menuButton.x, layout.menuButton.y, layout.menuButton.width, layout.menuButton.height, 10);
-    ctx.fill();
-    ctx.fillStyle = "#fff";
-    ctx.fillText("Main Menu", layout.menuButton.x + layout.menuButton.width / 2, layout.menuButton.y + layout.menuButton.height / 2 + 6);
-
+    drawCartoonButton(ctx, layout.resumeButton, "Resume", "#5ccf4a", "#2f8a22");
+    drawCartoonButton(ctx, layout.restartButton, "Restart", "#41b0f5", "#1d6fb0");
+    drawCartoonButton(ctx, layout.menuButton, "Main Menu", "#ffb02e", "#b8700c");
     ctx.textAlign = "start";
   }
 
@@ -4087,21 +4784,18 @@
     }
     if (!message) return;
 
-    ctx.fillStyle = "rgba(0, 0, 0, 0.55)";
+    ctx.fillStyle = "rgba(20, 40, 10, 0.55)";
     ctx.fillRect(0, 0, width, height);
 
+    const cardW = Math.min(640, width - 40);
+    drawWoodSign(ctx, width / 2 - cardW / 2, height / 2 - 78, cardW, 170, 22);
+    cartoonText(ctx, message, width / 2, height / 2 - 14, Math.max(30, Math.min(50, width * 0.045)), { fill: "#ffcf4a" });
+
     ctx.textAlign = "center";
-    ctx.fillStyle = "#f59e0b";
-    ctx.font = `bold ${Math.max(30, Math.min(58, width * 0.055))}px monospace`;
-    ctx.fillText(message, width / 2, height / 2 - 10);
-
-    ctx.fillStyle = "#f4f4f5";
-    ctx.font = `${Math.max(14, Math.min(20, width * 0.017))}px monospace`;
-    ctx.fillText(detail, width / 2, height / 2 + 32);
-
-    ctx.fillStyle = "#9298aa";
-    ctx.font = `${Math.max(12, Math.min(16, width * 0.013))}px monospace`;
-    ctx.fillText("Timer paused", width / 2, height / 2 + 62);
+    ctx.fillStyle = CREAM;
+    ctx.font = `600 ${Math.max(14, Math.min(19, width * 0.016))}px Figtree, system-ui, sans-serif`;
+    ctx.fillText(detail, width / 2, height / 2 + 26);
+    cartoonText(ctx, "Timer paused", width / 2, height / 2 + 66, 18);
 
     ctx.textAlign = "start";
   }
@@ -4307,7 +5001,8 @@
   function getStatsToggleLayout(canvas) {
     const width = canvas.clientWidth || canvas.width;
     const w = 130; // the level panel's width, so the two line up
-    return { x: width - 12 - w, y: 60, width: w, height: 32 };
+    const level = getLevelPanelLayout(canvas);
+    return { x: width - 12 - w, y: level.y + level.height + 8, width: w, height: 32 };
   }
 
   window.getStatsToggleAtPoint = function getStatsToggleAtPoint(canvas, x, y) {
@@ -4379,87 +5074,318 @@
     }
   }
 
+  // --- The board's HUD -----------------------------------------------------------
+
+  function drawPauseButton(ctx) {
+    const p = getGamePauseLayout();
+    drawWoodSign(ctx, p.x, p.y, p.width, p.height, 12);
+    const barW = p.width * 0.15;
+    const barH = p.height * 0.46;
+    const gap = p.width * 0.1;
+    const cx = p.x + p.width / 2;
+    const cy = p.y + p.height / 2;
+    ctx.fillStyle = CREAM;
+    ctx.strokeStyle = INK;
+    ctx.lineWidth = 2;
+    [cx - gap - barW, cx + gap].forEach((bx) => {
+      ctx.beginPath();
+      ctx.roundRect(bx, cy - barH / 2, barW, barH, 2);
+      ctx.fill();
+      ctx.stroke();
+    });
+  }
+
+  // Score, and the lives as hearts underneath (one heart and a count when
+  // they no longer fit).
+  function drawScoreSign(ctx, canvas) {
+    const r = getScorePanelRect(canvas);
+    drawWoodSign(ctx, r.x, r.y, r.w, r.h, 14);
+    cartoonText(ctx, "Score", r.x + 16, r.y + 34, 20, { align: "left" });
+    cartoonText(ctx, `${gameState.score}`, r.x + r.w - 16, r.y + 40, r.scoreFontSize * 1.35, { align: "right", fill: "gold" });
+
+    const heartY = r.y + r.h - 24;
+    if (settings.testMode) {
+      drawHeart(ctx, r.x + 28, heartY, 26);
+      cartoonText(ctx, "∞", r.x + 52, heartY + 10, 30, { align: "left" });
+      return;
+    }
+    const lives = Math.max(0, gameState.lives);
+    const step = 30;
+    const fits = Math.floor((r.w - 24) / step);
+    if (lives <= fits) {
+      for (let i = 0; i < Math.max(lives, 1); i++) drawHeart(ctx, r.x + 28 + i * step, heartY, 26, lives > 0);
+    } else {
+      drawHeart(ctx, r.x + 28, heartY, 26);
+      cartoonText(ctx, `× ${lives}`, r.x + 50, heartY + 9, 26, { align: "left" });
+    }
+  }
+
+  function drawTimerSign(ctx, width, now) {
+    const secondsLeft = Math.ceil(gameState.remainingMs / 1000);
+    const size = Math.max(32, Math.min(50, width * 0.042));
+    const w = size * 3.3;
+    const h = size * 1.4;
+    const x = width / 2 - w / 2;
+    drawWoodSign(ctx, x, 8, w, h, h / 2);
+
+    // A little stopwatch on the left.
+    const iconX = x + h * 0.55;
+    const iconY = 8 + h / 2 + 2;
+    const ir = h * 0.24;
+    ctx.fillStyle = CREAM;
+    ctx.strokeStyle = INK;
+    ctx.lineWidth = 2.5;
+    ctx.beginPath();
+    ctx.roundRect(iconX - ir * 0.25, iconY - ir * 1.45, ir * 0.5, ir * 0.4, 1);
+    ctx.fill();
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(iconX, iconY, ir, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+    const sweep = settings.testMode ? 0 : (1 - gameState.remainingMs / settings.durationMs) * Math.PI * 2;
+    ctx.beginPath();
+    ctx.moveTo(iconX, iconY);
+    ctx.lineTo(iconX + Math.sin(sweep) * ir * 0.7, iconY - Math.cos(sweep) * ir * 0.7);
+    ctx.stroke();
+
+    const urgent = !settings.testMode && secondsLeft <= 10;
+    const pulse = urgent ? 1 + 0.08 * Math.max(0, Math.sin(now / 160)) : 1;
+    let fill = CREAM;
+    if (settings.testMode) fill = "#ffcf4a";
+    else if (urgent) fill = "#ff5a4a";
+    cartoonText(ctx, settings.testMode ? "∞" : `${secondsLeft}`, x + w / 2 + h * 0.22, 8 + h / 2 + size * 0.36, size * pulse, { fill });
+  }
+
+  // Level, with how far the player is through it.
+  function drawLevelSign(ctx, canvas) {
+    const r = getLevelPanelLayout(canvas);
+    drawWoodSign(ctx, r.x, r.y, r.width, r.height, 12);
+    cartoonText(ctx, `Level ${gameState.level}`, r.x + r.width / 2, r.y + 27, 22);
+    const atMax = gameState.level >= MAX_LEVEL;
+    const progress = atMax ? 1 : (gameState.score % HITS_PER_LEVEL) / HITS_PER_LEVEL;
+    const bx = r.x + 14;
+    const by = r.y + r.height - 16;
+    const bw = r.width - 28;
+    ctx.fillStyle = "rgba(74, 42, 16, 0.45)";
+    ctx.beginPath();
+    ctx.roundRect(bx, by, bw, 8, 4);
+    ctx.fill();
+    if (progress > 0) {
+      ctx.fillStyle = atMax ? "#ffcf4a" : "#7ddc4a";
+      ctx.beginPath();
+      ctx.roundRect(bx, by, Math.max(8, bw * progress), 8, 4);
+      ctx.fill();
+    }
+    ctx.strokeStyle = INK;
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.roundRect(bx, by, bw, 8, 4);
+    ctx.stroke();
+  }
+
+  function drawTestBadge(ctx, width) {
+    const w = 168;
+    const h = 30;
+    const x = width / 2 - w / 2;
+    const y = 86;
+    ctx.fillStyle = "#ffb703";
+    ctx.beginPath();
+    ctx.roundRect(x, y, w, h, h / 2);
+    ctx.fill();
+    ctx.strokeStyle = INK;
+    ctx.lineWidth = 2.5;
+    ctx.stroke();
+    cartoonText(ctx, "TEST MODE", width / 2, y + 22, 18);
+  }
+
+  // How to Play, on a parchment card.
+  function drawLegend(ctx, canvas) {
+    const r = getLegendRect(canvas);
+    ctx.save();
+    ctx.shadowColor = "rgba(40, 25, 5, 0.3)";
+    ctx.shadowOffsetY = 5;
+    ctx.shadowBlur = 8;
+    ctx.fillStyle = "#fdf0cf";
+    ctx.beginPath();
+    ctx.roundRect(r.x, r.y, r.w, r.h, 14);
+    ctx.fill();
+    ctx.restore();
+    ctx.strokeStyle = INK;
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.roundRect(r.x, r.y, r.w, r.h, 14);
+    ctx.stroke();
+
+    cartoonText(ctx, "How to Play", r.x + 16, r.y + 30, 22, { align: "left", fill: "gold" });
+    const entries = [
+      { imgKey: "mole", title: "Mole", lines: ["Whack it for", "+1 point."] },
+      { imgKey: "super_mole", title: "Hat Mole", lines: ["2 hits to defeat,", `worth +${SUPER_MOLE_POINTS} points.`] },
+      { imgKey: "bomb", title: "Bomb", lines: [`Avoid! -${BOMB_PENALTY} points`, "and a lost life."] },
+    ];
+    const icon = 34;
+    entries.forEach((entry, index) => {
+      const y = r.y + LEGEND_HEADER_H + index * LEGEND_ENTRY_H;
+      const img = moleImages[entry.imgKey];
+      if (isImageReady(img)) drawImageCentered(ctx, img, r.x + 16 + icon / 2, y + icon / 2, icon);
+      ctx.textAlign = "left";
+      ctx.fillStyle = INK;
+      ctx.font = `19px ${DISPLAY_FONT}`;
+      ctx.fillText(entry.title, r.x + 16 + icon + 10, y + icon / 2 + 7);
+      ctx.fillStyle = "#7a5432";
+      ctx.font = "600 13px Figtree, system-ui, sans-serif";
+      entry.lines.forEach((line, i) => ctx.fillText(line, r.x + 16, y + icon + 16 + i * 16));
+    });
+  }
+
+  // One hole: just the hole, and whatever is coming out of it. The circle
+  // that scores is not drawn.
+  function drawHole(ctx, hole, now) {
+    const { cx, cy, r } = hole;
+    // Each hole pops up in turn when a board is dealt.
+    const appear = easeOutBack(clamp01((now - boardDealtAt - hole.index * 35) / 420));
+    if (appear <= 0) return;
+    ctx.save();
+    ctx.translate(cx, cy);
+    ctx.scale(appear, appear);
+    ctx.translate(-cx, -cy);
+
+    // The pit sits a little below the circle's centre, so a mole rising out
+    // of it fills the circle - the circle is exactly what scores.
+    const pitY = cy + r * 0.3;
+    const pitRx = r * 0.73;
+    const pitRy = r * 0.18;
+
+    const holeImg = moleImages.hole;
+    if (isImageReady(holeImg)) {
+      const groundW = r * 1.9;
+      const groundH = groundW * (holeImg.height / holeImg.width);
+      ctx.drawImage(holeImg, cx - groundW / 2, pitY - groundH / 2, groundW, groundH);
+    } else {
+      ctx.fillStyle = "#c2621a";
+      ctx.beginPath();
+      ctx.ellipse(cx, pitY, r * 0.95, r * 0.36, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = "#3b2a1a";
+      ctx.beginPath();
+      ctx.ellipse(cx, pitY, pitRx, pitRy, 0, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    const flash = gameState.hitFlash;
+    const flashStart = flash.until - HIT_FEEDBACK_MS;
+    const isFlashing = flash.hole === hole.index && now < flash.until;
+    if (isFlashing) {
+      let flashColor = "rgba(255, 240, 150, 0.4)";
+      if (flash.type === "bomb") flashColor = "rgba(239, 68, 68, 0.4)";
+      else if (flash.type === "wounded") flashColor = "rgba(234, 179, 8, 0.4)";
+      // Only over the hole itself, not the whole circle that scores.
+      ctx.fillStyle = flashColor;
+      ctx.beginPath();
+      ctx.ellipse(cx, pitY, r * 0.95, r * 0.4, 0, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    if (hole.index === gameState.activeHole) {
+      if (moleRise.hole !== hole.index) {
+        moleRise.hole = hole.index;
+        moleRise.at = now;
+      }
+      const type = gameState.moleType;
+      let imgKey = "mole";
+      if (type === "bomb") imgKey = "bomb";
+      else if (type === "super") imgKey = gameState.moleWounded ? "super_mole_hit" : "super_mole";
+      const rise = easeOutBack(clamp01((now - moleRise.at) / MOLE_RISE_MS));
+      drawRisingFromPit(ctx, moleImages[imgKey], type === "bomb", cx, pitY, pitRx, pitRy, r, rise);
+    } else if (isFlashing && flash.type !== "bomb" && flash.type !== "wounded") {
+      // The whacked mole, dazed, sinking back down.
+      const sink = clamp01((now - flashStart) / HIT_FEEDBACK_MS);
+      const img = moleImages[flash.type === "super" ? "dead_super_mole" : "dead_mole"];
+      drawRisingFromPit(ctx, img, false, cx, pitY, pitRx, pitRy, r, 1 - sink * 0.35);
+    }
+
+    if (flash.hole === hole.index && now >= flashStart && now < flashStart + STAR_BURST_MS) {
+      drawBurst(ctx, cx, pitY - r * 0.65, r, flash.type, (now - flashStart) / STAR_BURST_MS);
+    }
+    ctx.restore();
+  }
+
+  function drawCursor(ctx, layout, width, height, now) {
+    const cursor = gameState.cursor;
+    if (cursor.x === null) return;
+    if (!cursor.inBounds) {
+      // Sensor mode gets the full-screen status overlay instead.
+      if (gameState.inputMode !== "mouse") return;
+      drawWoodSign(ctx, width / 2 - 110, height - 62, 220, 46, 14);
+      cartoonText(ctx, "Out of bounds", width / 2, height - 31, 22, { fill: "#ff8a7a" });
+      return;
+    }
+    // A reticle on the exact point that scores, then the mallet over it.
+    ctx.save();
+    ctx.shadowColor = "rgba(255, 220, 60, 0.9)";
+    ctx.shadowBlur = 10;
+    ctx.strokeStyle = "#ffe14d";
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.arc(cursor.x, cursor.y, 9, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.restore();
+    ctx.strokeStyle = INK;
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.arc(cursor.x, cursor.y, 11, 0, Math.PI * 2);
+    ctx.stroke();
+    const scale = Math.max(0.7, Math.min(1.15, layout.gridSize / 430));
+    drawMallet(ctx, cursor.x, cursor.y, scale, malletSwing(now));
+  }
+
+  // 3, 2, 1 over the board, each number popping in, then "Go!".
+  function drawCountdown(ctx, layout, width, height, now) {
+    if (gameState.status !== "playing") return;
+    const cx = width / 2;
+    const cy = layout.gridTop + layout.gridSize / 2;
+    if (gameState.countdownMs > 0) {
+      const n = Math.ceil(gameState.countdownMs / 1000);
+      const intoSecond = 1 - (gameState.countdownMs - (n - 1) * 1000) / 1000;
+      const pop = easeOutBack(clamp01(intoSecond * 4));
+      ctx.fillStyle = "rgba(20, 40, 10, 0.3)";
+      ctx.fillRect(0, 0, width, height);
+      cartoonText(ctx, "Get ready!", cx, cy - 110, 34);
+      cartoonText(ctx, `${n}`, cx, cy + 60, Math.max(1, 180 * pop), {
+        fill: "gold", alpha: 1 - clamp01((intoSecond - 0.8) / 0.2),
+      });
+      return;
+    }
+    const t = (now - gameState.goAt) / GO_SHOW_MS;
+    if (t >= 0 && t < 1) {
+      cartoonText(ctx, "Go!", cx, cy + 50, 150 * (0.8 + 0.4 * easeOutCubic(t)), {
+        fill: "#7ddc4a", alpha: 1 - clamp01((t - 0.5) / 0.5),
+      });
+    }
+  }
+
   window.renderGame = function renderGame(ctx, canvas) {
     const width = canvas.clientWidth || canvas.width;
     const height = canvas.clientHeight || canvas.height;
+    const now = performance.now();
 
-    // Computed first (rather than down by the mole-drawing loop) so the
-    // sky/grass horizon can be pinned to sit right above the grid, keeping
-    // every hole fully inside the grass instead of poking into the sky.
+    // Computed first so the horizon can sit right above the board, keeping
+    // every hole on the grass.
     const layout = window.getGameGridLayout(canvas);
     const horizonY = Math.max(70, layout.gridTop - 36);
+    drawScenery(ctx, width, height, horizonY, { x: layout.gridLeft, y: layout.gridTop, size: layout.gridSize });
+    drawClouds(ctx, width, horizonY - 30, now);
 
-    // Sky-to-grass backdrop, echoing the whack-a-mole art direction.
-    const sky = ctx.createLinearGradient(0, 0, 0, horizonY);
-    sky.addColorStop(0, "#8fd3f4");
-    sky.addColorStop(1, "#bfe9c9");
-    ctx.fillStyle = sky;
-    ctx.fillRect(0, 0, width, horizonY);
+    if (gameState.activeHole === -1) moleRise.hole = -1;
+    layout.holes.forEach((hole) => drawHole(ctx, hole, now));
+    drawPopups(ctx, layout, now);
 
-    const grass = ctx.createLinearGradient(0, horizonY, 0, height);
-    grass.addColorStop(0, "#8bc34a");
-    grass.addColorStop(1, "#5a8f2f");
-    ctx.fillStyle = grass;
-    ctx.fillRect(0, horizonY, width, height - horizonY);
-
-    // Pause button, top-left corner (only actionable mid-round, but its
-    // position is always reserved so the score panel next to it never shifts).
-    const pauseLayout = getGamePauseLayout();
-    if (gameState.status === "playing") {
-      drawHudPanel(ctx, pauseLayout.x, pauseLayout.y, pauseLayout.width, pauseLayout.height, 10);
-      const barW = pauseLayout.width * 0.16;
-      const barH = pauseLayout.height * 0.5;
-      const barGap = pauseLayout.width * 0.12;
-      const pcx = pauseLayout.x + pauseLayout.width / 2;
-      const pcy = pauseLayout.y + pauseLayout.height / 2;
-      ctx.fillStyle = "#f4f4f5";
-      ctx.fillRect(pcx - barGap - barW, pcy - barH / 2, barW, barH);
-      ctx.fillRect(pcx + barGap, pcy - barH / 2, barW, barH);
-    }
-
-    // HUD: pause + score + lives share one row on the left, timer center, level right.
-    const scorePanel = getScorePanelRect(canvas);
-    const { scoreFontSize, livesFontSize } = scorePanel;
-    drawHudPanel(ctx, scorePanel.x, scorePanel.y, scorePanel.w, scorePanel.h, 14);
-
-    ctx.textAlign = "left";
-    ctx.fillStyle = "#f4f4f5";
-    ctx.font = `bold ${scoreFontSize}px monospace`;
-    ctx.fillText(`Score: ${gameState.score}`, scorePanel.x + 16, scorePanel.y + scoreFontSize + 8);
-
-    ctx.fillStyle = "#ef4444";
-    ctx.font = `bold ${livesFontSize}px monospace`;
-    ctx.fillText(
-      settings.testMode ? "♥∞" : "♥".repeat(Math.max(0, gameState.lives)),
-      scorePanel.x + 16,
-      scorePanel.y + scoreFontSize + livesFontSize + 22
-    );
-
-    // Unmissable badge - a score from a test run must never be mistaken for a real one.
-    if (settings.testMode) {
-      const badgeW = 168;
-      const badgeH = 26;
-      const badgeX = width / 2 - badgeW / 2;
-      const badgeY = 78;
-      ctx.fillStyle = "#f59e0b";
-      ctx.beginPath();
-      ctx.roundRect(badgeX, badgeY, badgeW, badgeH, 6);
-      ctx.fill();
-      ctx.fillStyle = "#13131c";
-      ctx.font = "bold 12px monospace";
-      ctx.textAlign = "center";
-      ctx.fillText("TEST MODE", width / 2, badgeY + 17);
-      ctx.textAlign = "left";
-    }
-
-    const levelPanel = { w: 130, h: 40 };
-    levelPanel.x = width - 12 - levelPanel.w;
-    levelPanel.y = 12;
-    drawHudPanel(ctx, levelPanel.x, levelPanel.y, levelPanel.w, levelPanel.h, 12);
-    ctx.textAlign = "right";
-    ctx.fillStyle = "#f4f4f5";
-    ctx.font = "bold 20px monospace";
-    ctx.fillText(`Level: ${gameState.level}`, levelPanel.x + levelPanel.w - 14, levelPanel.y + 27);
+    // HUD: pause + score + lives on the left, timer centre, level right.
+    if (gameState.status === "playing") drawPauseButton(ctx);
+    drawScoreSign(ctx, canvas);
+    drawTimerSign(ctx, width, now);
+    if (settings.testMode) drawTestBadge(ctx, width);
+    drawLevelSign(ctx, canvas);
     drawStatsToggle(ctx, canvas);
 
     // Pulses button: multi-pulse on the scanner nodes, amber while on.
@@ -4481,179 +5407,11 @@
       drawRoomButton(ctx, canvas);
     }
 
-    ctx.textAlign = "center";
-    const secondsLeft = Math.ceil(gameState.remainingMs / 1000);
-    const timerFontSize = Math.max(32, Math.min(52, width * 0.045));
-    const timerPanelW = timerFontSize * 3.4;
-    const timerPanelH = timerFontSize * 1.35;
-    drawHudPanel(ctx, width / 2 - timerPanelW / 2, 8, timerPanelW, timerPanelH, timerPanelH / 2);
-    if (settings.testMode) {
-      ctx.fillStyle = "#f59e0b";
-    } else {
-      ctx.fillStyle = secondsLeft <= 10 ? "#ef4444" : "#f4f4f5";
-    }
-    ctx.font = `bold ${timerFontSize}px monospace`;
-    ctx.fillText(
-      settings.testMode ? "∞" : `${secondsLeft}s`,
-      width / 2,
-      8 + timerPanelH / 2 + timerFontSize * 0.35
-    );
-
-    // Grid + moles
-    const now = performance.now();
-    const holeImg = moleImages.hole;
-
-    layout.holes.forEach((hole) => {
-      const centerX = hole.x + hole.size / 2;
-      const groundH = hole.size * 0.34;
-      const groundTopY = hole.y + hole.size - groundH;
-
-      // Soft dirt mound behind every tile so moles read as "popping up" even
-      // once the hole artwork has loaded.
-      ctx.save();
-      ctx.shadowColor = "rgba(0, 0, 0, 0.3)";
-      ctx.shadowBlur = 14;
-      ctx.shadowOffsetY = 6;
-      const moundGradient = ctx.createRadialGradient(
-        centerX, groundTopY + groundH * 0.4, hole.size * 0.05,
-        centerX, groundTopY + groundH * 0.4, hole.size * 0.6
-      );
-      moundGradient.addColorStop(0, "#7a5230");
-      moundGradient.addColorStop(1, "#4a3116");
-      ctx.fillStyle = moundGradient;
-      ctx.beginPath();
-      ctx.roundRect(hole.x, hole.y, hole.size, hole.size, 14);
-      ctx.fill();
-      ctx.restore();
-
-      if (isImageReady(holeImg)) {
-        const groundW = groundH * (holeImg.width / holeImg.height);
-        ctx.drawImage(holeImg, centerX - groundW / 2, groundTopY, groundW, groundH);
-      } else {
-        ctx.fillStyle = "#3b2a1a";
-        ctx.beginPath();
-        ctx.ellipse(centerX, groundTopY + groundH * 0.4, hole.size * 0.3, groundH * 0.4, 0, 0, Math.PI * 2);
-        ctx.fill();
-      }
-
-      const isFlashing = gameState.hitFlash.hole === hole.index && now < gameState.hitFlash.until;
-      if (isFlashing) {
-        let flashColor = "rgba(34, 197, 94, 0.35)";
-        if (gameState.hitFlash.type === "bomb") flashColor = "rgba(239, 68, 68, 0.4)";
-        else if (gameState.hitFlash.type === "wounded") flashColor = "rgba(234, 179, 8, 0.45)";
-        ctx.fillStyle = flashColor;
-        ctx.beginPath();
-        ctx.roundRect(hole.x, hole.y, hole.size, hole.size, 10);
-        ctx.fill();
-      }
-
-      if (hole.index === gameState.activeHole) {
-        const type = gameState.moleType;
-        let imgKey = "mole";
-        if (type === "bomb") imgKey = "bomb";
-        else if (type === "super") imgKey = gameState.moleWounded ? "super_mole_hit" : "super_mole";
-        const img = moleImages[imgKey];
-
-        if (isImageReady(img)) {
-          const height = type === "bomb" ? hole.size * 0.42 : hole.size * 0.62;
-          drawImageCentered(ctx, img, centerX, groundTopY - height * 0.35, height);
-        } else {
-          const moleRadius = hole.size * 0.32;
-          const moleCY = hole.y + hole.size / 2;
-          ctx.fillStyle = type === "bomb" ? "#1f2937" : "#8b5e3c";
-          ctx.beginPath();
-          ctx.ellipse(centerX, moleCY, moleRadius, moleRadius * 0.9, 0, 0, Math.PI * 2);
-          ctx.fill();
-          if (type !== "bomb") {
-            ctx.fillStyle = "#13131c";
-            ctx.beginPath();
-            ctx.arc(centerX - moleRadius * 0.35, moleCY - moleRadius * 0.15, moleRadius * 0.12, 0, Math.PI * 2);
-            ctx.arc(centerX + moleRadius * 0.35, moleCY - moleRadius * 0.15, moleRadius * 0.12, 0, Math.PI * 2);
-            ctx.fill();
-          }
-        }
-      } else if (isFlashing && gameState.hitFlash.type !== "bomb" && gameState.hitFlash.type !== "wounded") {
-        const img = moleImages[gameState.hitFlash.type === "super" ? "dead_super_mole" : "dead_mole"];
-        if (isImageReady(img)) {
-          const height = hole.size * 0.62;
-          drawImageCentered(ctx, img, centerX, groundTopY - height * 0.35, height);
-        }
-      }
-    });
-
-    // Floating "How to Play" legend, right-hand side.
-    const legendRect = getLegendRect(canvas);
-    const legendWidth = legendRect.w;
-    const legendX = legendRect.x;
-    const legendY = legendRect.y;
-    const legendEntries = [
-      { imgKey: "mole", color: "#8b5e3c", title: "Mole", lines: ["Whack it for", "+1 point."] },
-      { imgKey: "super_mole", color: "#eab308", title: "Hat Mole", lines: ["2 hits to defeat,", `worth +${SUPER_MOLE_POINTS} points.`] },
-      { imgKey: "bomb", color: "#ef4444", title: "Bomb", lines: [`Avoid! -${BOMB_PENALTY} points`, "and a lost life."] },
-    ];
-    const legendEntryHeight = LEGEND_ENTRY_H;
-    const legendHeaderHeight = LEGEND_HEADER_H;
-    drawHudPanel(ctx, legendX, legendY, legendWidth, legendRect.h, 14);
-
-    ctx.textAlign = "left";
-    ctx.fillStyle = "#f4f4f5";
-    ctx.font = "bold 16px monospace";
-    ctx.fillText("How to Play", legendX + 16, legendY + 26);
-
-    const legendIconSize = 32;
-    legendEntries.forEach((entry, index) => {
-      const entryY = legendY + legendHeaderHeight + index * legendEntryHeight;
-      const iconImg = moleImages[entry.imgKey];
-      if (isImageReady(iconImg)) {
-        drawImageCentered(ctx, iconImg, legendX + 16 + legendIconSize / 2, entryY + legendIconSize / 2, legendIconSize);
-      } else {
-        // Falls back to a flat swatch until the asset finishes loading.
-        ctx.fillStyle = entry.color;
-        ctx.beginPath();
-        ctx.roundRect(legendX + 16, entryY, legendIconSize, legendIconSize, 6);
-        ctx.fill();
-      }
-
-      ctx.fillStyle = "#f4f4f5";
-      ctx.font = "bold 15px monospace";
-      ctx.fillText(entry.title, legendX + 16 + legendIconSize + 10, entryY + legendIconSize / 2 + 5);
-
-      ctx.fillStyle = "#9298aa";
-      ctx.font = "12px monospace";
-      entry.lines.forEach((line, lineIndex) => {
-        // Cleared below the (now taller) icon rather than the old fixed
-        // offset, which only had headroom for the small flat swatch.
-        ctx.fillText(line, legendX + 16, entryY + legendIconSize + 14 + lineIndex * 15);
-      });
-    });
-
-    // Cursor - mouse pixels, or the sensor fix mapped through grid space.
-    if (gameState.cursor.x !== null) {
-      if (gameState.cursor.inBounds) {
-        ctx.save();
-        ctx.shadowColor = "rgba(250, 204, 21, 0.9)";
-        ctx.shadowBlur = 12;
-        ctx.strokeStyle = "#facc15";
-        ctx.lineWidth = 2.5;
-        ctx.beginPath();
-        ctx.arc(gameState.cursor.x, gameState.cursor.y, 10, 0, Math.PI * 2);
-        ctx.stroke();
-        ctx.fillStyle = "rgba(250, 204, 21, 0.25)";
-        ctx.beginPath();
-        ctx.arc(gameState.cursor.x, gameState.cursor.y, 4, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.restore();
-      } else if (gameState.inputMode === "mouse") {
-        // Sensor mode gets the full-screen status overlay below instead.
-        drawHudPanel(ctx, width / 2 - 100, height - 58, 200, 40, 10);
-        ctx.fillStyle = "#ef4444";
-        ctx.font = "bold 16px monospace";
-        ctx.textAlign = "center";
-        ctx.fillText("Out of bounds", width / 2, height - 32);
-      }
-    }
-
+    drawLegend(ctx, canvas);
     renderHud(ctx, canvas);
+    drawCursor(ctx, layout, width, height, now);
+    drawLevelBanner(ctx, layout, width, now);
+    drawCountdown(ctx, layout, width, height, now);
 
     // The phone pad places the player over whatever the sensors say.
     if (gameState.inputMode === "sensor" && !gameState.remoteActive && gameState.status === "playing") {

@@ -6,7 +6,7 @@
 // own state, so every number is exactly what was reported. Everything resets
 // at the start of each round.
 //
-//   GameStats.reset(inputMode)                  - "mouse" | "sensor" | "remote"
+//   GameStats.reset(inputMode, holeCount)       - "mouse" | "sensor" | "remote"; holes on this round's board
 //   GameStats.onSpawn(type)                     - "mole" | "super" | "bomb"
 //   GameStats.onFirstHit(type, reactionMs)      - first whack on a mole or hat mole
 //   GameStats.onDefeat(type, hole)              - a mole or hat mole finished off
@@ -49,7 +49,7 @@
 
   // inputMode is shown as given; only "sensor" changes what the panels draw
   // (mouse and remote both place the cursor on a hole directly).
-  function emptyState(inputMode) {
+  function emptyState(inputMode, holeCount) {
     return {
       inputMode: inputMode || "mouse",
       playMs: 0,
@@ -61,7 +61,7 @@
       missed: { mole: 0, super: 0 },
       bombsHit: 0,
       bombsDodged: 0,
-      hitsPerHole: new Array(9).fill(0),
+      hitsPerHole: new Array(holeCount || 9).fill(0),
       reactions: { mole: [], super: [] },
       lastReactionMs: null,
       streak: 0,
@@ -91,8 +91,8 @@
   }
 
   const GameStats = {
-    reset(inputMode) {
-      state = emptyState(inputMode);
+    reset(inputMode, holeCount) {
+      state = emptyState(inputMode, holeCount);
     },
 
     onSpawn(type) {
@@ -108,7 +108,7 @@
     onDefeat(type, hole) {
       if (!isTarget(type)) return;
       state.defeated[type] += 1;
-      if (hole >= 0 && hole < 9) state.hitsPerHole[hole] += 1;
+      if (hole >= 0 && hole < state.hitsPerHole.length) state.hitsPerHole[hole] += 1;
       state.streak += 1;
       state.bestStreak = Math.max(state.bestStreak, state.streak);
     },

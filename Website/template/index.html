@@ -8,18 +8,20 @@
     <link rel="icon" type="image/x-icon" href="/static/favicon.ico">
     <link rel="preload" href="/static/fonts/sora-latin.woff2" as="font" type="font/woff2" crossorigin>
     <link rel="preload" href="/static/fonts/figtree-latin.woff2" as="font" type="font/woff2" crossorigin>
-    <link rel="stylesheet" href="/static/ui.css?v=47">
-    <script defer src="/static/displays/ui.js?v=47"></script>
-    <script defer src="/static/displays/menu.js?v=47"></script>
-    <script defer src="/static/displays/calibrate.js?v=47"></script>
-    <script defer src="/static/displays/callibrate_corners.js?v=47"></script>
-    <script defer src="/static/displays/alert.js?v=47"></script>
-    <script defer src="/static/displays/logs.js?v=47"></script>
-    <script defer src="/static/displays/options.js?v=47"></script>
-    <script defer src="/static/displays/positionSolver.js?v=47"></script>
-    <script defer src="/static/displays/gameStats.js?v=47"></script>
-    <script defer src="/static/displays/game.js?v=47"></script>
-    <script defer src="/static/canvas.js?v=47"></script>
+    <link rel="preload" href="/static/fonts/lilita-one-latin.woff2" as="font" type="font/woff2" crossorigin>
+    <link rel="stylesheet" href="/static/ui.css?v=52">
+    <script defer src="/static/displays/sounds.js?v=52"></script>
+    <script defer src="/static/displays/ui.js?v=52"></script>
+    <script defer src="/static/displays/menu.js?v=52"></script>
+    <script defer src="/static/displays/calibrate.js?v=52"></script>
+    <script defer src="/static/displays/callibrate_corners.js?v=52"></script>
+    <script defer src="/static/displays/alert.js?v=52"></script>
+    <script defer src="/static/displays/logs.js?v=52"></script>
+    <script defer src="/static/displays/options.js?v=52"></script>
+    <script defer src="/static/displays/positionSolver.js?v=52"></script>
+    <script defer src="/static/displays/gameStats.js?v=52"></script>
+    <script defer src="/static/displays/game.js?v=52"></script>
+    <script defer src="/static/canvas.js?v=52"></script>
 </head>
 
 <body>
@@ -133,8 +135,15 @@
                 </div>
                 <div class="setting">
                     <div class="setting-text">
+                        <h3 id="lblBoard">Board</h3>
+                        <p>Classic is the familiar 3&nbsp;&times;&nbsp;3. Random deals a new layout every round, and again at every level up. Either way, the holes shrink as you level up.</p>
+                    </div>
+                    <div class="segmented" id="optBoard" role="group" aria-labelledby="lblBoard"></div>
+                </div>
+                <div class="setting">
+                    <div class="setting-text">
                         <h3 id="lblSound">Sound</h3>
-                        <p>Warning tone when the player gets too close to the screen.</p>
+                        <p>Whacks, bombs, level ups and menu clicks, and the warning tone when the player gets too close to the screen.</p>
                     </div>
                     <button class="switch" id="optSound" role="switch" aria-checked="true" aria-labelledby="lblSound" data-action="sound" data-nav><span></span></button>
                 </div>

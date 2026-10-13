@@ -50,6 +50,9 @@
   document.addEventListener("click", (event) => {
     const target = event.target.closest("[data-action]");
     if (!target || target.disabled || !target.closest("[data-screen]")) return;
+    // Played before the action, so the Sound switch clicks as it turns sound
+    // off, and stays quiet as it turns it back on.
+    window.GameSounds?.play(target.dataset.action === "back" ? "back" : "click");
     if (window.onScreenAction) window.onScreenAction(target.dataset.action, target.dataset);
   });
 

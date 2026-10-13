@@ -21,11 +21,18 @@ let alertReturnScreen = "calibrate";
 // The screen the control panel's held alert went up over, outside a round
 // (holdAlert()); null when it is not up there.
 let heldAlertFrom = null;
-const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+// One AudioContext for the too-close tone and the game's sound effects
+// (sounds.js), which unlocks it on the first click or key press.
+const audioContext = window.GameSounds?.context() || new (window.AudioContext || window.webkitAudioContext)();
 let alertOscillator = null;
 
 function soundEnabled() {
   return !window.getGameSettings || window.getGameSettings().soundEnabled;
+}
+
+// A button on the canvas pressed: "click", or "back" for one that leaves.
+function uiSound(name = "click") {
+  window.GameSounds?.play(name);
 }
 
 function playAlertNoise() {
@@ -900,6 +907,7 @@ c.addEventListener("click", (event) => {
   if (screen === "game") {
     const pauseMenuHit = window.getPauseMenuButtonAtPoint(c, point.x, point.y);
     if (pauseMenuHit) {
+      uiSound(pauseMenuHit.type === "menu" ? "back" : "click");
       if (pauseMenuHit.type === "resume") {
         window.resumeGame();
       } else if (pauseMenuHit.type === "restart") {
@@ -922,24 +930,28 @@ c.addEventListener("click", (event) => {
 
     const pauseButtonHit = window.getGamePauseButtonAtPoint(c, point.x, point.y);
     if (pauseButtonHit) {
+      uiSound();
       window.pauseGame();
       draw();
       return;
     }
 
     if (window.getGamePulsesButtonAtPoint(c, point.x, point.y)) {
+      uiSound();
       window.cycleGamePulses();
       draw(); // draw() sends the new count on to the nodes
       return;
     }
 
     if (window.getGameRoomButtonAtPoint(c, point.x, point.y)) {
+      uiSound();
       learnRoom();
       draw();
       return;
     }
 
     if (window.getStatsToggleAtPoint(c, point.x, point.y)) {
+      uiSound();
       window.toggleGameStats();
       draw();
       return;
@@ -947,6 +959,7 @@ c.addEventListener("click", (event) => {
 
     const overButton = window.getGameOverButtonAtPoint(c, point.x, point.y);
     if (overButton) {
+      uiSound(overButton.type === "return" ? "back" : "click");
       if (overButton.type === "restart") {
         startGameWithMode(window.getGameInputMode());
       } else if (overButton.type === "return") {
@@ -972,6 +985,7 @@ c.addEventListener("click", (event) => {
     const showBack = alertReturnScreen !== "game" && heldAlertFrom === null;
     const hit = window.getAlertButtonAtPoint(c, point.x, point.y, showBack);
     if (hit && hit.type === "back") {
+      uiSound("back");
       screen = alertReturnScreen;
       stopAlertNoise();
       draw();
@@ -1010,6 +1024,9 @@ const screenActions = {
     },
     lives(data) {
       window.setGameSettings({ startingLives: Number(data.value) });
+    },
+    board(data) {
+      window.setGameSettings({ boardStyle: data.value === "random" ? "random" : "classic" });
     },
     sound() {
       window.setGameSettings({ soundEnabled: !window.getGameSettings().soundEnabled });

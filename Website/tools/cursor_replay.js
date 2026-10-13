@@ -118,6 +118,8 @@ function startGame(site, method, tune) {
   }
   if (tune && Object.keys(tune).length) game.tuneSensor(tune);
   game.setGameInputMode("sensor");
+  // Holes are cells only on the classic 3 x 3 (Random is the default).
+  if (game.setGameSettings) game.setGameSettings({ boardStyle: "classic" });
   game.resetGame();
 
   // Hole index -> cell code, through the game's own hole centres.

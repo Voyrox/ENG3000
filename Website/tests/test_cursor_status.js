@@ -49,6 +49,9 @@ function loadWindow() {
     vm.runInContext(fs.readFileSync(path.join(DISPLAYS, file), "utf8"), context,
       { filename: file });
   });
+  // These tests are about the sensors' 3 x 3 cells, which are the holes only
+  // on the classic board (Random is the default).
+  context.setGameSettings({ boardStyle: "classic" });
   return context;
 }
 
@@ -95,7 +98,7 @@ function holeUnder(w, board) {
   const layout = w.getGameGridLayout(CANVAS);
   const x = layout.gridLeft + board.nx * layout.gridSize;
   const y = layout.gridTop + board.ny * layout.gridSize;
-  const hole = layout.holes.find((h) => x >= h.x && x <= h.x + h.size && y >= h.y && y <= h.y + h.size);
+  const hole = layout.holes.find((h) => Math.hypot(x - h.cx, y - h.cy) <= h.r);
   return hole ? hole.index : -1;
 }
 
@@ -228,6 +231,7 @@ test("while the pad has the cursor the sensors cannot hold the round or put up a
   const w = loadWindow();
   w.setGameInputMode("sensor");
   w.resetGame();
+  w.getGameState().countdownMs = 0; // straight into the round, past the 3-2-1
   const offline = [1, 2, 3].map((id) => ({ id, online: false, latest: null }));
   // One clock across every step (run() starts its own again at 0), so the
   // round clock only ever moves forward.
@@ -268,8 +272,10 @@ test("the pad over a mouse round hands the mouse's cursor back, and the old Remo
 
   w.setRemotePoint(0.15, 0.85);
   run(w, [], 30);
-  // The mouse moving while the finger is down is remembered, not drawn.
-  w.setGameCursor(CANVAS, layout.gridLeft + 1, layout.gridTop + 1);
+  // The mouse moving while the finger is down is remembered, not drawn. On
+  // the top-left hole's centre: the holes are round, so the board's very
+  // corner is not on one.
+  w.setGameCursor(CANVAS, layout.holes[0].cx, layout.holes[0].cy);
   const status = w.getGameCursorStatus(CANVAS);
   assert.strictEqual(status.remote, true);
   assert.strictEqual(status.sensor, null);
@@ -740,6 +746,7 @@ test("the control panel's held alert is up in any mode, and holds the round unti
   const w = loadWindow();
   w.setGameInputMode("mouse");
   w.resetGame();
+  w.getGameState().countdownMs = 0; // straight into the round, past the 3-2-1
   assert.strictEqual(w.isAlertHeld(), false);
   assert.strictEqual(w.isGameAlertActive(), false);
   assert.strictEqual(w.setAlertHeld(true), true);

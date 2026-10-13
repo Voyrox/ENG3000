@@ -1,5 +1,5 @@
 // options.js - the Options screen (the "options" section in index.html):
-// round length, starting lives, sound and test mode. Reads settings through
+// round length, starting lives, board, sound and test mode. Reads settings through
 // window.getGameSettings() from game.js; the controls' clicks go through
 // ui.js to canvas.js, which writes them with window.setGameSettings().
 // How the sensors place the player is switched on the phone's /control page
@@ -10,6 +10,7 @@
 (function () {
   const durationGroup = document.getElementById("optDuration");
   const livesGroup = document.getElementById("optLives");
+  const boardGroup = document.getElementById("optBoard");
   const soundSwitch = document.getElementById("optSound");
   const testModeSwitch = document.getElementById("optTestMode");
 
@@ -27,24 +28,31 @@
   }
 
   // The pressed segment is also where keyboard focus lands when the page opens.
+  // Compared as text, so word values (the board) work as well as numbers.
   function syncSegments(group, current) {
     group.querySelectorAll(".segment").forEach((button) => {
-      const pressed = Number(button.dataset.value) === current;
+      const pressed = button.dataset.value === String(current);
       button.setAttribute("aria-pressed", String(pressed));
       button.toggleAttribute("data-default-focus", pressed && group === durationGroup);
     });
   }
 
+  function boardLabel(style) {
+    return style === "random" ? "Random" : "Classic";
+  }
+
   window.updateOptionsScreen = function updateOptionsScreen() {
     const settings = window.getGameSettings
       ? window.getGameSettings()
-      : { durationMs: 60000, startingLives: 3, soundEnabled: true, testMode: false };
+      : { durationMs: 60000, startingLives: 3, boardStyle: "random", soundEnabled: true, testMode: false };
 
     buildSegments(durationGroup, "duration", window.DURATION_OPTIONS_MS || [30000, 60000, 90000], (ms) => `${ms / 1000} s`);
     buildSegments(livesGroup, "lives", window.LIVES_OPTIONS || [1, 3, 5], (n) => `${n}`);
+    buildSegments(boardGroup, "board", window.BOARD_STYLE_OPTIONS || ["classic", "random"], boardLabel);
 
     syncSegments(durationGroup, settings.durationMs);
     syncSegments(livesGroup, settings.startingLives);
+    syncSegments(boardGroup, settings.boardStyle);
     soundSwitch.setAttribute("aria-checked", String(Boolean(settings.soundEnabled)));
     testModeSwitch.setAttribute("aria-checked", String(Boolean(settings.testMode)));
   };

@@ -36,7 +36,8 @@
     if (settings) {
       const round = settings.testMode ? "Test mode" : `${Math.round(settings.durationMs / 1000)} s`;
       optionsMeta.textContent =
-        `${round} \u00b7 ${settings.startingLives} lives \u00b7 Sound ${settings.soundEnabled ? "on" : "off"}`;
+        `${round} \u00b7 ${settings.startingLives} lives \u00b7 ` +
+        `${settings.boardStyle === "random" ? "Random" : "Classic"} board \u00b7 Sound ${settings.soundEnabled ? "on" : "off"}`;
     }
     logsMeta.innerHTML = nodes.length
       ? nodes
