@@ -437,7 +437,7 @@ kbd .icon {
 
 .tile-row {
   display: grid;
-  grid-template-columns: minmax(0, 2.1fr) minmax(0, 1fr) minmax(0, 1fr);
+  grid-template-columns: minmax(0, 2fr) repeat(3, minmax(0, 1fr));
   gap: var(--space-4);
   padding-bottom: 40px;
 }
@@ -872,6 +872,190 @@ kbd .icon {
   padding: var(--space-7) var(--space-5);
   font: 500 17px var(--sans);
   color: var(--muted);
+}
+
+/* --- Leaderboard ----------------------------------------------------------- */
+
+.board {
+  overflow: hidden;
+}
+
+.board-head,
+.board-rows li {
+  display: grid;
+  grid-template-columns: 44px minmax(0, 1fr) 80px 64px 88px 80px;
+  gap: var(--space-3);
+  align-items: center;
+  padding: 10px var(--space-5);
+}
+
+.board-head {
+  border-bottom: 1px solid var(--line);
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.board-rows {
+  max-height: calc(100vh - 290px);
+  margin: 0;
+  padding: var(--space-2) 0;
+  overflow-y: auto;
+  list-style: none;
+  font-variant-numeric: tabular-nums;
+}
+
+.board-rows li:nth-child(even) {
+  background: rgba(226, 234, 255, 0.025);
+}
+
+.board-rank {
+  font: 700 18px var(--display);
+  color: var(--muted);
+}
+
+.board-rows .is-top1 .board-rank { color: #ffcf4a; }
+.board-rows .is-top2 .board-rank { color: #d9e1ec; }
+.board-rows .is-top3 .board-rank { color: #e0a06a; }
+
+.board-name {
+  overflow: hidden;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.board-score {
+  text-align: right;
+}
+
+.board-rows .board-score {
+  font: 700 18px var(--display);
+}
+
+.board-level {
+  text-align: right;
+}
+
+.board-style,
+.board-date {
+  color: var(--muted);
+  font-size: 15px;
+}
+
+.board-date {
+  text-align: right;
+}
+
+.board-rows li.is-mine {
+  background: var(--accent-soft);
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+
+.board-rows li.board-empty {
+  display: block;
+  padding: var(--space-7) var(--space-5);
+  color: var(--muted);
+}
+
+/* The name box over the game-over card, drawn in the game's own cartoon
+   look (wood, cream, chunky lettering) rather than the menus'. */
+
+.score-entry {
+  position: fixed;
+  z-index: 5;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  font-family: "Lilita One", "Figtree", system-ui, sans-serif;
+}
+
+.score-entry[hidden],
+.score-form[hidden] {
+  display: none;
+}
+
+.score-form {
+  display: flex;
+  gap: 10px;
+  width: 100%;
+}
+
+.score-name {
+  flex: 1;
+  min-width: 0;
+  height: 46px;
+  padding: 0 16px;
+  border: 3px solid #4a2a10;
+  border-radius: 999px;
+  background: #fff6dc;
+  color: #4a2a10;
+  font: 22px "Lilita One", "Figtree", system-ui, sans-serif;
+  box-shadow: inset 0 3px 0 rgba(74, 42, 16, 0.15);
+}
+
+.score-name::placeholder {
+  color: rgba(74, 42, 16, 0.45);
+}
+
+.score-name:focus {
+  outline: 3px solid #ffcf4a;
+  outline-offset: 2px;
+}
+
+.score-save {
+  height: 46px;
+  padding: 0 24px;
+  border: 3px solid #4a2a10;
+  border-radius: 999px;
+  background: linear-gradient(#7fe06c, #5ccf4a);
+  box-shadow: inset 0 -5px 0 #2f8a22;
+  color: #fff6dc;
+  font: 22px "Lilita One", "Figtree", system-ui, sans-serif;
+  text-shadow: -2px 0 #4a2a10, 2px 0 #4a2a10, 0 -2px #4a2a10, 0 2px #4a2a10, 0 3px #4a2a10;
+  cursor: pointer;
+}
+
+.score-save:hover:not(:disabled) {
+  filter: brightness(1.06);
+}
+
+.score-save:focus-visible {
+  outline: 3px solid #ffcf4a;
+  outline-offset: 2px;
+}
+
+.score-save:disabled {
+  cursor: progress;
+  filter: saturate(0.4);
+}
+
+.score-message {
+  margin: 0;
+  min-height: 1em;
+  color: #fff6dc;
+  font-size: 20px;
+  line-height: 1.1;
+  text-align: center;
+  text-shadow: -2px 0 #4a2a10, 2px 0 #4a2a10, 0 -2px #4a2a10, 0 2px #4a2a10, 0 3px #4a2a10;
+}
+
+.score-message:empty {
+  display: none;
+}
+
+.score-message[data-tone="good"] { color: #ffcf4a; font-size: 24px; }
+.score-message[data-tone="fault"] { color: #ff9a8a; }
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
 }
 
 /* --- Setup wizard --------------------------------------------------------- */
@@ -1352,7 +1536,17 @@ kbd .icon {
   }
 
   .tile-row {
-    grid-template-columns: 1fr 1fr;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .board-head,
+  .board-rows li {
+    grid-template-columns: 36px minmax(0, 1fr) 64px 52px;
+  }
+
+  .board-head > :nth-child(n + 5),
+  .board-rows li > :nth-child(n + 5) {
+    display: none;
   }
 
   .tile-row .tile-play {

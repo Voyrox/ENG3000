@@ -91,6 +91,9 @@ function draw() {
 
   // The menu and setup screens are HTML pages over the canvas (see ui.js). Each
   // is filled before it is shown, so its default control exists to take focus.
+  // The leaderboard's name box only shows over a finished round.
+  if (screen !== "game") window.syncScoreEntry?.(null, null);
+
   const page = HTML_SCREENS[screen];
   if (page) {
     page();
@@ -101,6 +104,7 @@ function draw() {
 
   if (screen === "game") {
     window.renderGame(ctx, c);
+    window.syncScoreEntry?.(c, window.getGameState());
     return;
   }
 
@@ -119,6 +123,7 @@ function draw() {
 const HTML_SCREENS = {
   menu: () => window.updateMenu(getSortedNodes()),
   options: () => window.updateOptionsScreen(),
+  leaderboard: () => window.updateLeaderboardScreen(),
   select_node: () => window.updateNodeSelectScreen(getSortedNodes()),
   logs: () => {
     const node = nodes.get(selectedNodeId) || { id: selectedNodeId ?? "?", address: "unknown address" };
@@ -1006,6 +1011,9 @@ const screenActions = {
     options() {
       screen = "options";
     },
+    leaderboard() {
+      screen = "leaderboard";
+    },
     logs() {
       if (nodes.size === 1) {
         selectedNodeId = getSortedNodes()[0]?.id ?? null;
@@ -1013,6 +1021,11 @@ const screenActions = {
       } else {
         screen = "select_node";
       }
+    },
+  },
+  leaderboard: {
+    back() {
+      screen = "menu";
     },
   },
   options: {

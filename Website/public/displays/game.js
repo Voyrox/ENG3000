@@ -1193,6 +1193,7 @@
 
   const gameState = {
     status: "idle", // "idle" | "playing" | "paused" | "gameover"
+    round: 0, // counts rounds started, so a finished one is saved to the leaderboard once
     inputMode: "mouse", // "mouse" | "sensor"
     remoteActive: false, // a finger on the phone pad has the cursor, in either mode
     remoteTarget: null, // { nx, ny } 0-1 across the grid, straight from the phone pad
@@ -1427,14 +1428,24 @@
     const buttonHeight = 52;
 
     return {
-      restartButton: { x: centerX - buttonWidth - 10, y: height / 2 + 70, width: buttonWidth, height: buttonHeight },
-      returnButton: { x: centerX + 10, y: height / 2 + 70, width: buttonWidth, height: buttonHeight },
+      restartButton: { x: centerX - buttonWidth - 10, y: height / 2 + 116, width: buttonWidth, height: buttonHeight },
+      returnButton: { x: centerX + 10, y: height / 2 + 116, width: buttonWidth, height: buttonHeight },
+      // Left free on the card for the leaderboard's name box (leaderboard.js,
+      // HTML over the canvas): between the level reached and the buttons.
+      entrySlot: { x: centerX - 210, y: height / 2 + 38, width: 420, height: 64 },
     };
   }
+
+  // Where the game-over card leaves room for the leaderboard's name box, in
+  // CSS pixels from the canvas's top-left.
+  window.getScoreEntryRect = function getScoreEntryRect(canvas) {
+    return getGameOverLayout(canvas).entrySlot;
+  };
 
   window.resetGame = function resetGame() {
     remoteAlert = false;
     gameState.status = "playing";
+    gameState.round += 1;
     gameState.score = 0;
     // Always starts at level 1; players climb further levels by scoring, not by picking a start.
     gameState.level = 1;
@@ -4706,14 +4717,14 @@
     ctx.fillRect(0, 0, width, height);
 
     const cardWidth = Math.min(480, width - 40);
-    const cardTop = height / 2 - 150;
+    const cardTop = height / 2 - 172;
     const cardBottom = layout.restartButton.y + layout.restartButton.height + 26;
     drawWoodSign(ctx, centerX - cardWidth / 2, cardTop, cardWidth, cardBottom - cardTop, 22);
 
-    cartoonText(ctx, isOutOfLives() ? "Out of lives!" : "Time's up!", centerX, height / 2 - 92, 50, { fill: "gold" });
-    cartoonText(ctx, "Final score", centerX, height / 2 - 52, 20);
-    cartoonText(ctx, `${gameState.score}`, centerX, height / 2 + 10, 60, { fill: "gold" });
-    cartoonText(ctx, `Level ${gameState.peakLevel} reached`, centerX, height / 2 + 44, 20);
+    cartoonText(ctx, isOutOfLives() ? "Out of lives!" : "Time's up!", centerX, height / 2 - 114, 50, { fill: "gold" });
+    cartoonText(ctx, "Final score", centerX, height / 2 - 74, 20);
+    cartoonText(ctx, `${gameState.score}`, centerX, height / 2 - 14, 60, { fill: "gold" });
+    cartoonText(ctx, `Level ${gameState.peakLevel} reached`, centerX, height / 2 + 20, 20);
 
     drawCartoonButton(ctx, layout.restartButton, "Play again", "#5ccf4a", "#2f8a22");
     drawCartoonButton(ctx, layout.returnButton, "Main menu", "#ffb02e", "#b8700c");

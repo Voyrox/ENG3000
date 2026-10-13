@@ -9,19 +9,20 @@
     <link rel="preload" href="/static/fonts/sora-latin.woff2" as="font" type="font/woff2" crossorigin>
     <link rel="preload" href="/static/fonts/figtree-latin.woff2" as="font" type="font/woff2" crossorigin>
     <link rel="preload" href="/static/fonts/lilita-one-latin.woff2" as="font" type="font/woff2" crossorigin>
-    <link rel="stylesheet" href="/static/ui.css?v=52">
-    <script defer src="/static/displays/sounds.js?v=52"></script>
-    <script defer src="/static/displays/ui.js?v=52"></script>
-    <script defer src="/static/displays/menu.js?v=52"></script>
-    <script defer src="/static/displays/calibrate.js?v=52"></script>
-    <script defer src="/static/displays/callibrate_corners.js?v=52"></script>
-    <script defer src="/static/displays/alert.js?v=52"></script>
-    <script defer src="/static/displays/logs.js?v=52"></script>
-    <script defer src="/static/displays/options.js?v=52"></script>
-    <script defer src="/static/displays/positionSolver.js?v=52"></script>
-    <script defer src="/static/displays/gameStats.js?v=52"></script>
-    <script defer src="/static/displays/game.js?v=52"></script>
-    <script defer src="/static/canvas.js?v=52"></script>
+    <link rel="stylesheet" href="/static/ui.css?v=54">
+    <script defer src="/static/displays/sounds.js?v=54"></script>
+    <script defer src="/static/displays/ui.js?v=54"></script>
+    <script defer src="/static/displays/menu.js?v=54"></script>
+    <script defer src="/static/displays/calibrate.js?v=54"></script>
+    <script defer src="/static/displays/callibrate_corners.js?v=54"></script>
+    <script defer src="/static/displays/alert.js?v=54"></script>
+    <script defer src="/static/displays/logs.js?v=54"></script>
+    <script defer src="/static/displays/options.js?v=54"></script>
+    <script defer src="/static/displays/positionSolver.js?v=54"></script>
+    <script defer src="/static/displays/gameStats.js?v=54"></script>
+    <script defer src="/static/displays/leaderboard.js?v=54"></script>
+    <script defer src="/static/displays/game.js?v=54"></script>
+    <script defer src="/static/canvas.js?v=54"></script>
 </head>
 
 <body>
@@ -32,6 +33,7 @@
         <symbol id="i-play" viewBox="0 0 24 24"><path d="M8 5.5v13l10.5-6.5z" fill="currentColor" stroke="none" /></symbol>
         <symbol id="i-sliders" viewBox="0 0 24 24"><path d="M4 7h9m4 0h3M4 17h3m4 0h9" /><circle cx="15" cy="7" r="2.2" /><circle cx="9" cy="17" r="2.2" /></symbol>
         <symbol id="i-list" viewBox="0 0 24 24"><path d="M9 6.5h11M9 12h11M9 17.5h11" /><path d="M4.5 6.5h.01M4.5 12h.01M4.5 17.5h.01" stroke-width="3" /></symbol>
+        <symbol id="i-trophy" viewBox="0 0 24 24"><path d="M8 4.5h8v5a4 4 0 0 1-8 0zM8 6.5H5a3 3 0 0 0 3 4M16 6.5h3a3 3 0 0 1-3 4M12 13.5v3.5M8.5 20h7M10 17h4" /></symbol>
         <symbol id="i-back" viewBox="0 0 24 24"><path d="M19 12H5m6-6-6 6 6 6" /></symbol>
         <symbol id="i-sensor" viewBox="0 0 24 24"><path d="M8.5 15.5a5 5 0 0 1 0-7M15.5 8.5a5 5 0 0 1 0 7M5.6 18.4a9 9 0 0 1 0-12.8M18.4 5.6a9 9 0 0 1 0 12.8" /><circle cx="12" cy="12" r="1.6" fill="currentColor" /></symbol>
         <symbol id="i-check" viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5" /></symbol>
@@ -92,6 +94,12 @@
                     <span class="tile-label">Options</span>
                     <span class="tile-meta" id="menuOptionsMeta"></span>
                     <span class="tile-caption">Round length, lives, sound, test mode</span>
+                </button>
+                <button class="tile" data-action="leaderboard" data-nav>
+                    <span class="tile-glyph"><svg class="icon"><use href="#i-trophy" /></svg></span>
+                    <span class="tile-label">Leaderboard</span>
+                    <span class="tile-meta" id="menuBoardMeta"></span>
+                    <span class="tile-caption">The best scores and the levels they reached</span>
                 </button>
                 <button class="tile" data-action="logs" data-nav>
                     <span class="tile-glyph"><svg class="icon"><use href="#i-list" /></svg></span>
@@ -159,6 +167,28 @@
         <footer class="hintbar">
             <span class="hint"><kbd><svg class="icon"><use href="#i-key-enter" /></svg></kbd>Select</span>
             <span class="hint"><kbd><svg class="icon"><use href="#i-key-arrows" /></svg></kbd>Move</span>
+            <span class="hint"><kbd>Esc</kbd>Back</span>
+        </footer>
+    </section>
+
+    <section class="screen page" data-screen="leaderboard" hidden>
+        <header class="pagebar">
+            <button class="btn btn-quiet" data-action="back" data-nav data-default-focus><svg class="icon"><use href="#i-back" /></svg>Back</button>
+        </header>
+        <div class="page-body page-split">
+            <div class="page-intro">
+                <h2 tabindex="-1">Leaderboard</h2>
+                <p class="page-lede">The best scores so far. Save yours with your name when a round ends.</p>
+                <p class="page-note" id="leaderboardNote"></p>
+            </div>
+            <div class="panel board">
+                <div class="board-head">
+                    <span>#</span><span>Name</span><span class="board-score">Score</span><span class="board-level">Level</span><span>Board</span><span class="board-date">Date</span>
+                </div>
+                <ol class="board-rows" id="leaderboardRows"></ol>
+            </div>
+        </div>
+        <footer class="hintbar">
             <span class="hint"><kbd>Esc</kbd>Back</span>
         </footer>
     </section>
@@ -250,6 +280,16 @@
             <span class="hint"><kbd>Esc</kbd>Back</span>
         </footer>
     </section>
+    <!-- The leaderboard's name box, over the game-over card on the canvas
+         (leaderboard.js puts it there and shows it only then). -->
+    <div class="score-entry" id="scoreEntry" hidden>
+        <form class="score-form" id="scoreForm" autocomplete="off" hidden>
+            <label class="visually-hidden" for="scoreName">Your name for the leaderboard</label>
+            <input class="score-name" id="scoreName" name="name" maxlength="16" placeholder="Your name" spellcheck="false">
+            <button class="score-save" id="scoreSave" type="submit">Save</button>
+        </form>
+        <p class="score-message" id="scoreMessage" role="status"></p>
+    </div>
 </body>
 
 </html>

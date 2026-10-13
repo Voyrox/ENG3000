@@ -12,6 +12,7 @@ import numpy as np
 from filterRules import FilterConfig
 from handover import Handover
 from heading import track_from_event
+from leaderboard import Leaderboard, LeaderboardError, TOP_DEFAULT
 from search import CHECK_READINGS, Search, cell_name
 from serverFilter import ServerFilterStage, server_filtering_enabled
 from sessionRecorder import SessionRecorder
@@ -1206,6 +1207,33 @@ def api_room():
     if not send_nodes_room(action):
         return jsonify({"error": f"action must be one of {sorted(ROOM_COMMANDS)}"}), 400
     return jsonify({"action": action})
+
+
+# The game's leaderboard, in leaderboard.json (see leaderboard.py).
+leaderboard = Leaderboard()
+
+
+@app.route("/api/leaderboard")
+def api_leaderboard():
+    """The best scores: {"entries": [{rank, name, score, level, board, at}]}.
+    ?limit= sets how many (default 10, at most 100)."""
+    try:
+        limit = int(request.args.get("limit", TOP_DEFAULT))
+    except ValueError:
+        limit = TOP_DEFAULT
+    return jsonify({"entries": leaderboard.top(max(1, min(100, limit)))})
+
+
+@app.route("/api/leaderboard", methods=["POST"])
+def api_leaderboard_add():
+    """Save a round: {"name", "score", "level", "board"}. Answers with the
+    saved entry and its rank, how many entries there are, and the top 10."""
+    body = request.get_json(silent=True) or {}
+    try:
+        saved = leaderboard.add(body.get("name"), body.get("score"), body.get("level"), body.get("board"))
+    except LeaderboardError as err:
+        return jsonify({"error": str(err)}), 400
+    return jsonify({**saved, "entries": leaderboard.top()}), 201
 
 
 if __name__ == '__main__':

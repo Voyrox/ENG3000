@@ -11,6 +11,7 @@
   const status = document.getElementById("menuStatus");
   const optionsMeta = document.getElementById("menuOptionsMeta");
   const logsMeta = document.getElementById("menuLogsMeta");
+  const boardMeta = document.getElementById("menuBoardMeta");
 
   function tickClock() {
     const now = new Date();
@@ -39,6 +40,7 @@
         `${round} \u00b7 ${settings.startingLives} lives \u00b7 ` +
         `${settings.boardStyle === "random" ? "Random" : "Classic"} board \u00b7 Sound ${settings.soundEnabled ? "on" : "off"}`;
     }
+    if (window.leaderboardSummary) boardMeta.textContent = window.leaderboardSummary();
     logsMeta.innerHTML = nodes.length
       ? nodes
           .map(
