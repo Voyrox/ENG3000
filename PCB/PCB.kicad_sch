@@ -3796,6 +3796,16 @@
 	)
 	(wire
 		(pts
+			(xy 95.25 73.66) (xy 99.06 73.66)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "2118a3de-434c-482f-87e8-031ba63af8c8")
+	)
+	(wire
+		(pts
 			(xy 36.83 130.81) (xy 38.1 130.81)
 		)
 		(stroke
@@ -5050,7 +5060,7 @@
 	)
 	(symbol
 		(lib_id "Connector:Conn_01x02_Socket")
-		(at 35.56 106.68 0)
+		(at 29.21 104.14 0)
 		(unit 1)
 		(body_style 1)
 		(exclude_from_sim no)
@@ -5061,7 +5071,7 @@
 		(fields_autoplaced yes)
 		(uuid "09e8d4e6-7bbd-4236-9141-b0080a246490")
 		(property "Reference" "J8"
-			(at 36.83 106.6799 0)
+			(at 30.48 104.1399 0)
 			(show_name no)
 			(do_not_autoplace no)
 			(effects
@@ -5072,7 +5082,7 @@
 			)
 		)
 		(property "Value" "in"
-			(at 36.83 109.2199 0)
+			(at 30.48 106.6799 0)
 			(show_name no)
 			(do_not_autoplace no)
 			(effects
@@ -5083,7 +5093,7 @@
 			)
 		)
 		(property "Footprint" "Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical"
-			(at 35.56 106.68 0)
+			(at 29.21 104.14 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -5094,7 +5104,7 @@
 			)
 		)
 		(property "Datasheet" ""
-			(at 35.56 106.68 0)
+			(at 29.21 104.14 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -5105,7 +5115,7 @@
 			)
 		)
 		(property "Description" "Generic connector, single row, 01x02, script generated"
-			(at 35.56 106.68 0)
+			(at 29.21 104.14 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -5281,6 +5291,84 @@
 			(project "PCB"
 				(path "/ab40fc32-b885-4754-9572-45a5defa6a02"
 					(reference "#PWR01")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "power:+BATT")
+		(at 95.25 73.66 0)
+		(unit 1)
+		(body_style 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(in_pos_files yes)
+		(dnp no)
+		(fields_autoplaced yes)
+		(uuid "1f85e156-bc5b-4675-a27f-f902686f1b45")
+		(property "Reference" "#PWR036"
+			(at 95.25 77.47 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Value" "+5V"
+			(at 95.25 68.58 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Footprint" ""
+			(at 95.25 73.66 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Datasheet" ""
+			(at 95.25 73.66 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Description" "Power symbol creates a global label with name \"+BATT\""
+			(at 95.25 73.66 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(pin "1"
+			(uuid "4805bfed-18e3-42a5-b7d1-3a4dcdcfa57f")
+		)
+		(instances
+			(project "PCB"
+				(path "/ab40fc32-b885-4754-9572-45a5defa6a02"
+					(reference "#PWR036")
 					(unit 1)
 				)
 			)
@@ -6037,86 +6125,8 @@
 		)
 	)
 	(symbol
-		(lib_id "power:+3.3V")
-		(at 69.85 177.8 0)
-		(unit 1)
-		(body_style 1)
-		(exclude_from_sim no)
-		(in_bom yes)
-		(on_board yes)
-		(in_pos_files yes)
-		(dnp no)
-		(fields_autoplaced yes)
-		(uuid "5c4d6e6e-d809-4d6e-b571-cda8219924ac")
-		(property "Reference" "#PWR024"
-			(at 69.85 181.61 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Value" "+3.3V"
-			(at 69.85 172.72 0)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Footprint" ""
-			(at 69.85 177.8 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Datasheet" ""
-			(at 69.85 177.8 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Description" "Power symbol creates a global label with name \"+3.3V\""
-			(at 69.85 177.8 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(pin "1"
-			(uuid "1f909a42-592b-4acd-93c2-2dbffb0f9e91")
-		)
-		(instances
-			(project "PCB"
-				(path "/ab40fc32-b885-4754-9572-45a5defa6a02"
-					(reference "#PWR024")
-					(unit 1)
-				)
-			)
-		)
-	)
-	(symbol
 		(lib_id "power:+BATT")
-		(at 30.48 106.68 0)
+		(at 24.13 104.14 0)
 		(unit 1)
 		(body_style 1)
 		(exclude_from_sim no)
@@ -6127,7 +6137,7 @@
 		(fields_autoplaced yes)
 		(uuid "63f69fa8-0453-4643-8e1f-6df06a6c234f")
 		(property "Reference" "#PWR038"
-			(at 30.48 110.49 0)
+			(at 24.13 107.95 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -6138,7 +6148,7 @@
 			)
 		)
 		(property "Value" "+BATT"
-			(at 30.48 101.6 0)
+			(at 24.13 99.06 0)
 			(show_name no)
 			(do_not_autoplace no)
 			(effects
@@ -6148,7 +6158,7 @@
 			)
 		)
 		(property "Footprint" ""
-			(at 30.48 106.68 0)
+			(at 24.13 104.14 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -6159,7 +6169,7 @@
 			)
 		)
 		(property "Datasheet" ""
-			(at 30.48 106.68 0)
+			(at 24.13 104.14 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -6170,7 +6180,7 @@
 			)
 		)
 		(property "Description" "Power symbol creates a global label with name \"+BATT\""
-			(at 30.48 106.68 0)
+			(at 24.13 104.14 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -7246,8 +7256,8 @@
 		)
 	)
 	(symbol
-		(lib_id "power:+3.3V")
-		(at 88.9 177.8 0)
+		(lib_id "power:+BATT")
+		(at 106.68 180.34 0)
 		(unit 1)
 		(body_style 1)
 		(exclude_from_sim no)
@@ -7256,9 +7266,9 @@
 		(in_pos_files yes)
 		(dnp no)
 		(fields_autoplaced yes)
-		(uuid "86fd11bf-8355-4a4f-901c-f151e20d536b")
-		(property "Reference" "#PWR025"
-			(at 88.9 181.61 0)
+		(uuid "84d2ab34-2c92-40b2-aaf3-95445b6b769d")
+		(property "Reference" "#PWR033"
+			(at 106.68 184.15 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -7268,8 +7278,8 @@
 				)
 			)
 		)
-		(property "Value" "+3.3V"
-			(at 88.9 172.72 0)
+		(property "Value" "+5V"
+			(at 106.68 175.26 0)
 			(show_name no)
 			(do_not_autoplace no)
 			(effects
@@ -7279,7 +7289,7 @@
 			)
 		)
 		(property "Footprint" ""
-			(at 88.9 177.8 0)
+			(at 106.68 180.34 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -7290,7 +7300,7 @@
 			)
 		)
 		(property "Datasheet" ""
-			(at 88.9 177.8 0)
+			(at 106.68 180.34 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -7300,8 +7310,8 @@
 				)
 			)
 		)
-		(property "Description" "Power symbol creates a global label with name \"+3.3V\""
-			(at 88.9 177.8 0)
+		(property "Description" "Power symbol creates a global label with name \"+BATT\""
+			(at 106.68 180.34 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -7312,12 +7322,12 @@
 			)
 		)
 		(pin "1"
-			(uuid "e62354a3-b7fe-44d7-b9d6-3edd5c590b05")
+			(uuid "eca6000f-1600-4bca-9fec-26ad1ce9c5d7")
 		)
 		(instances
 			(project "PCB"
 				(path "/ab40fc32-b885-4754-9572-45a5defa6a02"
-					(reference "#PWR025")
+					(reference "#PWR033")
 					(unit 1)
 				)
 			)
@@ -7579,6 +7589,84 @@
 		)
 	)
 	(symbol
+		(lib_id "power:+BATT")
+		(at 88.9 177.8 0)
+		(unit 1)
+		(body_style 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(in_pos_files yes)
+		(dnp no)
+		(fields_autoplaced yes)
+		(uuid "abe623bd-a8ae-4202-b904-6d193d7df392")
+		(property "Reference" "#PWR034"
+			(at 88.9 181.61 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Value" "+5V"
+			(at 88.9 172.72 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Footprint" ""
+			(at 88.9 177.8 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Datasheet" ""
+			(at 88.9 177.8 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Description" "Power symbol creates a global label with name \"+BATT\""
+			(at 88.9 177.8 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(pin "1"
+			(uuid "e3cdc997-9487-4124-8d20-4cfcd9cb6f85")
+		)
+		(instances
+			(project "PCB"
+				(path "/ab40fc32-b885-4754-9572-45a5defa6a02"
+					(reference "#PWR034")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
 		(lib_id "power:GND")
 		(at 48.26 106.68 0)
 		(unit 1)
@@ -7658,7 +7746,7 @@
 	)
 	(symbol
 		(lib_id "power:GND")
-		(at 30.48 109.22 0)
+		(at 24.13 106.68 0)
 		(unit 1)
 		(body_style 1)
 		(exclude_from_sim no)
@@ -7669,7 +7757,7 @@
 		(fields_autoplaced yes)
 		(uuid "b4f4a18c-c927-4c6e-99a3-02a2bec73a7b")
 		(property "Reference" "#PWR039"
-			(at 30.48 115.57 0)
+			(at 24.13 113.03 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -7680,7 +7768,7 @@
 			)
 		)
 		(property "Value" "GND"
-			(at 30.48 114.3 0)
+			(at 24.13 111.76 0)
 			(show_name no)
 			(do_not_autoplace no)
 			(effects
@@ -7690,7 +7778,7 @@
 			)
 		)
 		(property "Footprint" ""
-			(at 30.48 109.22 0)
+			(at 24.13 106.68 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -7701,7 +7789,7 @@
 			)
 		)
 		(property "Datasheet" ""
-			(at 30.48 109.22 0)
+			(at 24.13 106.68 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -7712,7 +7800,7 @@
 			)
 		)
 		(property "Description" "Power symbol creates a global label with name \"GND\" , ground"
-			(at 30.48 109.22 0)
+			(at 24.13 106.68 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -8219,84 +8307,6 @@
 		)
 	)
 	(symbol
-		(lib_id "power:+3.3V")
-		(at 99.06 27.94 0)
-		(unit 1)
-		(body_style 1)
-		(exclude_from_sim no)
-		(in_bom yes)
-		(on_board yes)
-		(in_pos_files yes)
-		(dnp no)
-		(fields_autoplaced yes)
-		(uuid "d8d15e4e-8fc9-4dac-8db3-67abaccfd4ce")
-		(property "Reference" "#PWR019"
-			(at 99.06 31.75 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Value" "+3.3V"
-			(at 99.06 22.86 0)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Footprint" ""
-			(at 99.06 27.94 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Datasheet" ""
-			(at 99.06 27.94 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Description" "Power symbol creates a global label with name \"+3.3V\""
-			(at 99.06 27.94 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(pin "1"
-			(uuid "1d67a054-39e3-4b1b-8faa-34e55773a3ad")
-		)
-		(instances
-			(project "PCB"
-				(path "/ab40fc32-b885-4754-9572-45a5defa6a02"
-					(reference "#PWR019")
-					(unit 1)
-				)
-			)
-		)
-	)
-	(symbol
 		(lib_id "Mechanical:MountingHole")
 		(at 128.27 168.91 0)
 		(unit 1)
@@ -8443,84 +8453,6 @@
 			(project "PCB"
 				(path "/ab40fc32-b885-4754-9572-45a5defa6a02"
 					(reference "H1")
-					(unit 1)
-				)
-			)
-		)
-	)
-	(symbol
-		(lib_id "power:+3.3V")
-		(at 106.68 180.34 0)
-		(unit 1)
-		(body_style 1)
-		(exclude_from_sim no)
-		(in_bom yes)
-		(on_board yes)
-		(in_pos_files yes)
-		(dnp no)
-		(fields_autoplaced yes)
-		(uuid "e2e8cb23-c0dd-41fe-a3b7-5a87ef83b365")
-		(property "Reference" "#PWR020"
-			(at 106.68 184.15 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Value" "+3.3V"
-			(at 106.68 175.26 0)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Footprint" ""
-			(at 106.68 180.34 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Datasheet" ""
-			(at 106.68 180.34 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Description" "Power symbol creates a global label with name \"+3.3V\""
-			(at 106.68 180.34 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(pin "1"
-			(uuid "0dba8a8d-b60e-4539-8384-db9759d16268")
-		)
-		(instances
-			(project "PCB"
-				(path "/ab40fc32-b885-4754-9572-45a5defa6a02"
-					(reference "#PWR020")
 					(unit 1)
 				)
 			)
@@ -8768,6 +8700,84 @@
 			(project "PCB"
 				(path "/ab40fc32-b885-4754-9572-45a5defa6a02"
 					(reference "#PWR017")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "power:+BATT")
+		(at 69.85 177.8 0)
+		(unit 1)
+		(body_style 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(in_pos_files yes)
+		(dnp no)
+		(fields_autoplaced yes)
+		(uuid "ff5b615c-01a3-4cd3-9823-5006ed9fe1f3")
+		(property "Reference" "#PWR035"
+			(at 69.85 181.61 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Value" "+5V"
+			(at 69.85 172.72 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Footprint" ""
+			(at 69.85 177.8 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Datasheet" ""
+			(at 69.85 177.8 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Description" "Power symbol creates a global label with name \"+BATT\""
+			(at 69.85 177.8 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(pin "1"
+			(uuid "8eacbc55-b3ad-46f8-a0aa-2d889f8cc224")
+		)
+		(instances
+			(project "PCB"
+				(path "/ab40fc32-b885-4754-9572-45a5defa6a02"
+					(reference "#PWR035")
 					(unit 1)
 				)
 			)
