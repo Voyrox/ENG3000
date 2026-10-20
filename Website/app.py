@@ -792,6 +792,24 @@ def send_nodes_room(action):
     return True
 
 
+# The control panel's buzzer hold button: a finger on it sounds the dead-zone
+# buzzer on every scanner node (BUZZ 1, re-sent every 250 ms), lifting it hands
+# the buzzer back to the sensors (BUZZ 0). A node lets go by itself 1 s after
+# the last BUZZ 1 (BUZZER_HELD_TIMEOUT_MS in src/Config.h), so a dropped phone
+# cannot leave it sounding.
+def send_nodes_buzzer(on):
+    """Hold the dead-zone buzzer on every connected node on or off. A value
+    that is not true/false is ignored. Returns whether it was sent."""
+    if not isinstance(on, bool):
+        print(f"Ignored bad buzzer hold: {on!r}")
+        return False
+    with state_lock:
+        node_ids = [node_id for node_id, node in nodes.items() if node.get("conn") is not None]
+    for node_id in node_ids:
+        send_command(node_id, f"BUZZ {1 if on else 0}")
+    return True
+
+
 def sync_node(node_id):
     """Send the authoritative tick to one node (PC is source of truth)."""
     with state_lock:
@@ -1074,11 +1092,12 @@ def handover_message():
 async def control_handler(websocket):
     """Phone control panel: relays commands to every game browser. The empty
     room ("room": learn or forget) and the Far hold and Far steer switches
-    ("farHold", "farSteer") go straight to the nodes instead, so they work with
-    no game page open, and the Handover, Search and Heading switches
+    ("farHold", "farSteer") and the buzzer hold button ("buzzerHold") go
+    straight to the nodes instead, so they work with no game page open, and the Handover, Search and Heading switches
     ("handover", "search", "searchHeading") to the server."""
     CONTROL_CONNECTIONS.add(websocket)
     print(f"Control panel connected from {websocket.remote_address}")
+    buzzer_held = False
     try:
         await websocket.send(json.dumps({"type": "nodes:update", "nodes": snapshot_nodes()}))
         await websocket.send(json.dumps(handover_message()))
@@ -1108,6 +1127,14 @@ async def control_handler(websocket):
                 await asyncio.to_thread(set_nodes_far, switch, event.get("enabled"))
                 broadcast(CONTROL_CONNECTIONS.copy(), json.dumps(far_message()))
                 continue
+            if event.get("action") == "buzzerHold":
+                # Sent 4 times a second while held, so only the changes print.
+                on = event.get("on")
+                if on is not buzzer_held and isinstance(on, bool):
+                    print(f"Control panel: buzzer held {'on' if on else 'off'}")
+                if await asyncio.to_thread(send_nodes_buzzer, on):
+                    buzzer_held = on
+                continue
             if event.get("action") not in CONTROL_ACTIONS:
                 continue
             if event["action"] not in QUIET_CONTROL_ACTIONS:
@@ -1116,6 +1143,8 @@ async def control_handler(websocket):
             broadcast(BROWSER_CONNECTIONS.copy(), command)
     finally:
         CONTROL_CONNECTIONS.discard(websocket)
+        if buzzer_held:
+            await asyncio.to_thread(send_nodes_buzzer, False)
         print("Control panel disconnected")
 
 

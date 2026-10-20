@@ -1623,6 +1623,40 @@ class NodeFarTests(BrokerTestCase):
         self.assertTrue(all(status["type"] == "far:status" for status in statuses))
 
 
+class NodeBuzzerTests(BrokerTestCase):
+    """The control panel's buzzer hold button sounds the dead-zone buzzer on
+    the scanner nodes (BUZZ 1) and hands it back to the sensors (BUZZ 0)."""
+
+    def held(self, *events):
+        phone = FakeControlSocket(path="/control", incoming=[json.dumps(e) for e in events])
+        with mock.patch.object(app, "broadcast") as broadcast, mock.patch("builtins.print"):
+            asyncio.run(app.control_handler(phone))
+        return broadcast
+
+    def test_holding_and_letting_go_reaches_every_connected_node(self):
+        _, first = self.add_node(conn=RecordingConn())
+        _, second = self.add_node(address=("10.0.0.2", 1001), conn=RecordingConn())
+        broadcast = self.held({"action": "buzzerHold", "on": True},
+                              {"action": "buzzerHold", "on": True},
+                              {"action": "buzzerHold", "on": False})
+        for node in (first, second):
+            self.assertEqual(node["conn"].sent, ["BUZZ 1\n", "BUZZ 1\n", "BUZZ 0\n"])
+        # Straight to the nodes: nothing goes to the game browsers.
+        self.assertFalse(any(call.args[0] is app.BROWSER_CONNECTIONS or
+                             json.loads(call.args[1]).get("type") == "remote:command"
+                             for call in broadcast.call_args_list))
+
+    def test_a_panel_that_drops_while_holding_lets_go(self):
+        _, node = self.add_node(conn=RecordingConn())
+        self.held({"action": "buzzerHold", "on": True})
+        self.assertEqual(node["conn"].sent, ["BUZZ 1\n", "BUZZ 0\n"])
+
+    def test_a_bad_value_is_ignored(self):
+        _, node = self.add_node(conn=RecordingConn())
+        self.held({"action": "buzzerHold", "on": "yes"}, {"action": "buzzerHold"})
+        self.assertEqual(node["conn"].sent, [])
+
+
 class FakeControlSocket(FakeBrowserSocket):
     """The slice of a connection that `control_handler` uses."""
 
