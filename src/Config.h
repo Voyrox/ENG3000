@@ -71,6 +71,7 @@ constexpr uint8_t LEFT_ECHO_PIN = 12;
 constexpr uint8_t RIGHT_TRIG_PIN = 26;
 constexpr uint8_t RIGHT_ECHO_PIN = 27;
 constexpr uint8_t SERVO_PIN = 33;
+constexpr uint8_t BUZZER_PIN = 32;
 
 // --- Ultrasonic sensors ---------------------------------------------------
 // Returned when no echo came back. Distinct from a reading of 0 cm, which is
