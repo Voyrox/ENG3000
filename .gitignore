@@ -10,3 +10,4 @@ __pycache__/
 *-backups/
 
 platformio.ini
+Website/leaderboard.json
