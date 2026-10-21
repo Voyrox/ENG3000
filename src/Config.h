@@ -101,7 +101,7 @@ constexpr unsigned long ECHO_START_US = 2500;
 constexpr unsigned long ECHO_TIMEOUT_US =
     static_cast<unsigned long>(MAX_TARGET_CM * 2 / SOUND_CM_PER_US) + ECHO_START_US;
 
-// --- Scan timing -----------------------------------------------------------
+// --- Scan timing ------------------------------------------------------------
 // Quiet time after one pulse pair before the next pair starts.
 constexpr unsigned long PAIR_GAP_MS = 30;
 
