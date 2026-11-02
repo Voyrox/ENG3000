@@ -159,13 +159,13 @@ test("a one-node round places the player from that node, and is Out of bounds wh
     "back once it finds the player again");
 });
 
-test("without a one-node assignment the missing node is counted, so the same run never goes Out of bounds", () => {
+test("without a one-node assignment a silent node counts as down (2eccc1d), so the same run goes Out of bounds too", () => {
   const w = loadWindow();
   w.setGameInputMode("sensor");
   w.resetGame();
   const clock = { t: 0 };
   play(w, () => [seeing(1, 0, 40, 80), null, null], 2000, clock);
-  assert.notStrictEqual(play(w, () => [lost(1, 0), null, null], 1000, clock).status, "out-of-bounds");
+  assert.strictEqual(play(w, () => [lost(1, 0), null, null], 1000, clock).status, "out-of-bounds");
 });
 
 test("a one-node round on line of sight: the track stays on a player standing still", () => {
