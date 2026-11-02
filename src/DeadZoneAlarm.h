@@ -28,6 +28,9 @@
 //   - no echo from either sensor says nothing, and changes nothing.
 // It also goes quiet config::DEAD_ZONE_HOLD_MS after the last pair in the dead
 // zone, since a node reads nothing during the other node's turn.
+//
+// The control panel's hold button (BUZZ 1 / BUZZ 0) sounds it whatever the
+// sensors say; let go, and it is back to the sensors.
 class DeadZoneAlarm {
 public:
     explicit DeadZoneAlarm(uint8_t buzzerPin);
@@ -38,10 +41,15 @@ public:
     void hear(float leftCm, float rightCm, int angleDeg);
 
     // Call every loop, scanning turn or not: silences the buzzer once the last
-    // pair in the dead zone is config::DEAD_ZONE_HOLD_MS old.
+    // pair in the dead zone is config::DEAD_ZONE_HOLD_MS old, and lets go of
+    // a hold that has not been renewed for config::BUZZER_HELD_TIMEOUT_MS.
     void update();
 
-    bool isSounding() const { return sounding_; }
+    // The control panel's hold button: on sounds the buzzer until off, or
+    // until config::BUZZER_HELD_TIMEOUT_MS without another on.
+    void hold(bool on);
+
+    bool isSounding() const { return sounding_ || held_; }
 
     // How far in front of the nodes' line an echo distanceCm away at angleDeg
     // is, or config::NO_ECHO for no echo.
@@ -49,9 +57,12 @@ public:
 
 private:
     void sound(bool on);
+    void write();
 
     uint8_t pin_;
-    bool sounding_ = false;
+    bool sounding_ = false; // the sensors' say
+    bool held_ = false;     // the control panel's
+    unsigned long heldMs_ = 0;
     int closePairs_ = 0;
     unsigned long lastCloseMs_ = 0;
 };

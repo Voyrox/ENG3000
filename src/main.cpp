@@ -19,7 +19,7 @@ DeadZoneAlarm deadZone(config::BUZZER_PIN);
 Scanner scanner(leftSensor, rightSensor, scannerServo, deadZone);
 
 NodeConnection connection;
-CommandHandler commands(connection, scanner);
+CommandHandler commands(connection, scanner, deadZone);
 
 void setup() {
     Serial.begin(config::SERIAL_BAUD);

@@ -1,7 +1,7 @@
 #include "CommandHandler.h"
 
-CommandHandler::CommandHandler(NodeConnection& connection, Scanner& scanner)
-    : connection_(connection), scanner_(scanner) {}
+CommandHandler::CommandHandler(NodeConnection& connection, Scanner& scanner, DeadZoneAlarm& deadZone)
+    : connection_(connection), scanner_(scanner), deadZone_(deadZone) {}
 
 void CommandHandler::reset() {
     hasTurn_ = false;
@@ -66,6 +66,10 @@ void CommandHandler::handle(const String& line) {
         // The control panel's Far steer switch: 1 on, 0 off (see Config.h).
         scanner_.setFarSteer(line.substring(9).toInt() != 0);
         Serial.printf("Far steer: %s\n", scanner_.farSteer() ? "on" : "off");
+    } else if (line.startsWith("BUZZ ")) {
+        // The control panel's hold button: 1 while a finger is on it, re-sent
+        // every 250 ms, then 0. Not logged, since it comes 4 times a second.
+        deadZone_.hold(line.substring(5).toInt() != 0);
     } else if (line == "LEARN") {
         if (scanner_.learnRoom()) {
             Serial.println("Learning the room: keep the play area clear");

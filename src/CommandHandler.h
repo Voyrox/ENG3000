@@ -2,6 +2,7 @@
 
 #include <Arduino.h>
 
+#include "DeadZoneAlarm.h"
 #include "NodeConnection.h"
 #include "Scanner.h"
 
@@ -15,9 +16,11 @@
 //                        half-found, 1 = off (clamped to 1..MAX_PULSES_PER_ANGLE)
 //   LEARN / FORGET       learn the empty room (sweep with nobody in the play
 //                        area) / clear it; see RoomMap.h
+//   BUZZ 1|0             the control panel's hold button: sound the dead-zone
+//                        buzzer / back to the sensors; see DeadZoneAlarm.h
 class CommandHandler {
 public:
-    CommandHandler(NodeConnection& connection, Scanner& scanner);
+    CommandHandler(NodeConnection& connection, Scanner& scanner, DeadZoneAlarm& deadZone);
 
     // Forgets the turn, e.g. after a reconnect: the node waits for a fresh TURN.
     void reset();
@@ -32,5 +35,6 @@ private:
 
     NodeConnection& connection_;
     Scanner& scanner_;
+    DeadZoneAlarm& deadZone_;
     bool hasTurn_ = false;
 };

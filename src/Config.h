@@ -207,6 +207,10 @@ constexpr float DEAD_ZONE_CLEAR_CM = 3;
 // reads nothing while the other node has the scanning turn (1 s), so this is
 // longer than a turn and the buzzer sounds on through it.
 constexpr unsigned long DEAD_ZONE_HOLD_MS = 1500;
+// The control panel's hold button sounds the buzzer (BUZZ 1), re-sent every
+// 250 ms while a finger is on it. If BUZZ 0 never comes - the phone or the
+// connection drops - it lets go this long after the last BUZZ 1.
+constexpr unsigned long BUZZER_HELD_TIMEOUT_MS = 1000;
 // 0 for an active buzzer, which beeps by itself on a steady HIGH. A passive one
 // only clicks on that: give it a tone in Hz instead (2000-4000 is loudest).
 constexpr unsigned int BUZZER_TONE_HZ = 0;

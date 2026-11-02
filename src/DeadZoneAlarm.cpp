@@ -49,6 +49,12 @@ void DeadZoneAlarm::hear(float leftCm, float rightCm, int angleDeg) {
 }
 
 void DeadZoneAlarm::update() {
+    if (held_ && millis() - heldMs_ > config::BUZZER_HELD_TIMEOUT_MS) {
+        Serial.println("Dead zone: hold timed out, back to the sensors");
+        held_ = false;
+        write();
+    }
+
     if (millis() - lastCloseMs_ <= config::DEAD_ZONE_HOLD_MS) {
         return;
     }
@@ -66,8 +72,24 @@ float DeadZoneAlarm::depthCm(float distanceCm, int angleDeg) {
     return distanceCm * sinf(radians(angleDeg));
 }
 
+void DeadZoneAlarm::hold(bool on) {
+    heldMs_ = millis();
+    if (on == held_) {
+        return; // a heartbeat
+    }
+    held_ = on;
+    Serial.printf("Dead zone: buzzer held %s (control panel)\n", on ? "on" : "off");
+    write();
+}
+
 void DeadZoneAlarm::sound(bool on) {
     sounding_ = on;
+    write();
+}
+
+// On while the sensors or the control panel say so.
+void DeadZoneAlarm::write() {
+    bool on = isSounding();
     if (config::BUZZER_TONE_HZ > 0) {
         ledcWriteTone(TONE_CHANNEL, on ? config::BUZZER_TONE_HZ : 0);
     } else {
