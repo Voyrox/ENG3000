@@ -2315,5 +2315,51 @@ class ConfidenceLevel(unittest.TestCase):
         self.assertEqual(DYNAMIC_RULE_SWITCHES["confidenceNode"], "confidence_node")
 
 
+class OneNodeRound(unittest.TestCase):
+    """The game's One node switch (Aaron, 2 Nov): a round played with one
+    node, slots_in_use set by serverFilter.assign_slots(). Mirrors
+    tests/test_one_node.js."""
+
+    STEP_MS = 50.0
+
+    def pipe(self, method="dyn"):
+        geometry = TwoSensorGeometry(method=method)
+        geometry.slots_in_use = (TwoSensorGeometry.LEFT,)
+        return CoordinatePipeline(geometry)
+
+    def left(self, pipe, reading, steps, start):
+        result = None
+        for k in range(steps):
+            result = pipe.update([reading, None, None], (start + k) * self.STEP_MS)
+        return result
+
+    def test_out_of_bounds_when_the_node_in_use_is_lost(self):
+        pipe = self.pipe()
+        lost = (None, 60, 2)
+        self.assertEqual(self.left(pipe, scanner_sample(40.0, 80.0)[0], 40, 0).status, STATUS_OK)
+        self.assertEqual(self.left(pipe, lost, 40, 40).status, STATUS_OUT_OF_BOUNDS)
+        self.assertEqual(self.left(pipe, scanner_sample(40.0, 80.0)[0], 40, 80).status, STATUS_OK)
+
+    def test_with_both_in_use_the_silent_node_keeps_it_from_out_of_bounds(self):
+        pipe = CoordinatePipeline(TwoSensorGeometry())
+        self.left(pipe, scanner_sample(40.0, 80.0)[0], 40, 0)
+        self.assertNotEqual(self.left(pipe, (None, 60, 2), 40, 40).status, STATUS_OUT_OF_BOUNDS)
+
+    def test_line_of_sight_stays_on_a_player_standing_still(self):
+        # A held aim counts in full with one node; discounted, the track
+        # drifted sideways off the board.
+        pipe = self.pipe(method="los")
+        self.left(pipe, scanner_sample(40.0, 80.0)[0], 40, 0)
+        self.left(pipe, scanner_sample(120.0, 90.0)[0], 80, 40)
+        x, y = pipe.geometry._los.fix(80 * self.STEP_MS + 40 * self.STEP_MS, FilterConfig())
+        self.assertLess(math.hypot(x - 120.0, y - 90.0), 3.0, (x, y))
+
+    def test_the_slots_in_use_survive_a_reset(self):
+        pipe = self.pipe()
+        pipe.reset()
+        self.assertEqual(pipe.geometry.slots_in_use, (TwoSensorGeometry.LEFT,))
+        self.assertEqual(TwoSensorGeometry().slots_in_use, (0, 2))
+
+
 if __name__ == "__main__":
     unittest.main()

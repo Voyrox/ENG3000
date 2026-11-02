@@ -305,6 +305,11 @@ kbd .icon {
   background: var(--accent-strong);
 }
 
+/* .btn's display would otherwise show it (calibrate.js's Skip sensor). */
+.btn[hidden] {
+  display: none;
+}
+
 .btn:disabled {
   cursor: not-allowed;
   background: var(--surface);
@@ -1289,6 +1294,11 @@ kbd .icon {
 
 .slot.is-assigned .slot-value {
   color: var(--text);
+}
+
+/* Not used in a one-node round (calibrate.js). */
+.slot.is-skipped {
+  opacity: 0.6;
 }
 
 .slot.is-assigned .slot-side {

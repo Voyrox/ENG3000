@@ -974,9 +974,11 @@ class LineOfSightTracker:
         self.outliers = [0] * GRID_SIZE   # each slot's readings in a row that failed the gate
 
     def step(self, filtered, angles, states, fresh, now_ms: float,
-             area: PlayArea, config: FilterConfig) -> None:
+             area: PlayArea, config: FilterConfig, alone: bool = False) -> None:
         """stepLosTrack(): feed this update's readings, then drop a track that
-        has taken nothing for too long."""
+        has taken nothing for too long. alone: a one-node round
+        (TwoSensorGeometry.slots_in_use), where every reading's aim counts in
+        full - nothing else places the player across the line."""
         for slot in (self.LEFT, self.RIGHT):
             angle, state = angles[slot], states[slot]
             if (not fresh[slot] or filtered[slot] is None or angle is None
@@ -988,7 +990,7 @@ class LineOfSightTracker:
                 continue
             new_aim = (self.x is None or angle != self.aimed_at[slot]
                        or now_ms - self.fed_ms[slot] > config.hold_ms)
-            repeats = 0 if new_aim else self.aim_repeats[slot] + 1
+            repeats = 0 if new_aim or alone else self.aim_repeats[slot] + 1
             m = line_of_sight(area.column_centre_cm(slot),
                               body_centre_cm(filtered[slot], config), angle, state,
                               config, repeats)
@@ -1216,6 +1218,11 @@ class TwoSensorGeometry(Geometry):
 
     def __init__(self, method: str = "dyn"):
         self.method = method
+        # The slots the round places the player with: both, or in a one-node
+        # round (the game's One node switch) the one assigned, set by
+        # serverFilter.assign_slots(). Out of bounds is every one of them
+        # being lost (_nobody_found()). Kept across reset(), like method.
+        self.slots_in_use: tuple = (self.LEFT, self.RIGHT)
         self._los = LineOfSightTracker()
         self._dynamic = DynamicPicker()
         self._last_column: Optional[int] = None
@@ -1309,7 +1316,8 @@ class TwoSensorGeometry(Geometry):
     def track(self, filtered, fresh, now_ms, area, config, heard=None) -> None:
         self._now_ms = now_ms
         self._config = config
-        self._los.step(filtered, self._angles, self._states, fresh, now_ms, area, config)
+        self._los.step(filtered, self._angles, self._states, fresh, now_ms, area, config,
+                       alone=len(self.slots_in_use) == 1)
         heard = fresh if heard is None else heard
         for slot in (self.LEFT, self.RIGHT):
             state = self._states[slot]
@@ -1374,12 +1382,13 @@ class TwoSensorGeometry(Geometry):
         return total <= 0
 
     def _nobody_found(self, config, area=None) -> bool:
-        """bothNodesLost() in game.js: both nodes are lost (_lost()). A node
-        that sends no scan state never is, unless it is down. With Dynamic on, far priority's
-        position (_far_fix()) is someone on the board, however lost the nodes
-        are."""
-        left = self._lost(self.LEFT, config)
-        right = self._lost(self.RIGHT, config)
+        """bothNodesLost() in game.js: both nodes are lost (_lost()) - in a
+        one-node round the node in use (slots_in_use). A node that sends no
+        scan state never is, unless it is down. With Dynamic on, far
+        priority's position (_far_fix()) is someone on the board, however lost
+        the nodes are."""
+        left = self._lost(self.LEFT, config) or self.LEFT not in self.slots_in_use
+        right = self._lost(self.RIGHT, config) or self.RIGHT not in self.slots_in_use
         if left and right and self.method == "dyn" and area is not None:
             return self._far_fix(area) is None
         return left and right

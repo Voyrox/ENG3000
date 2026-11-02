@@ -19,10 +19,22 @@
 // Start Game appears once both nodes are identified; leaving the screen lets
 // the nodes scan again.
 //
+// One node (Aaron, 2 Nov; the control panel's One node switch, on by
+// default): a round can also be played with one working node. Skip this
+// sensor leaves the active slot empty, and Start Game unlocks once one node is
+// identified and either the other slot is skipped or no other node is
+// connected to identify (Start Game then leaves that slot empty itself). The
+// game places the player from that node alone and goes Out of bounds when it
+// is lost (game.js slotsInUse()). With the switch off both nodes are needed,
+// as before.
+//
 // API on `window`:
 //   window.updateSensorAssignment(nodes, now) - run detection, call on each update
 //   window.getSensorAssignment()              - [leftId, null, rightId]
-//   window.isSensorAssignmentComplete()
+//   window.isSensorAssignmentComplete()       - both identified, or one and the other skipped
+//   window.canStartOneNode()                  - one identified and no other node to identify
+//   window.finishSensorAssignment()           - skips what is left if canStartOneNode(); complete?
+//   window.skipSensorSlot()                   - leave the active slot empty (One node on)
 //   window.resetSensorAssignment()
 //   window.updateCalibrateScreen(nodes)      - fill in the "calibrate" section of index.html
 
@@ -49,22 +61,49 @@
 
   const state = {
     slots: { left: null, right: null },
-    activeIndex: 0,
+    // Left empty with Skip this sensor: a one-node round (One node on).
+    skipped: { left: false, right: false },
+    // Connected nodes not assigned to a slot, as of the last update.
+    spare: 0,
     candidateId: null,
     dwellStartedAt: 0,
     dwellProgress: 0, // 0..1, drives the progress bar
   };
 
+  // The One node switch (game.js), on by default.
+  function oneNodeOn() {
+    return window.getOneNode ? window.getOneNode() : true;
+  }
+
+  // A skipped slot only counts while the switch is on: turned off, the slot
+  // asks for its node again.
+  function isSkipped(key) {
+    return oneNodeOn() && state.skipped[key];
+  }
+
+  // The first slot still waiting for a hand, LEFT then RIGHT, or null.
   function activeSlot() {
-    return SLOTS[state.activeIndex] || null;
+    return SLOTS.find((slot) => state.slots[slot.key] === null && !isSkipped(slot.key)) || null;
   }
 
   function assignedIds() {
     return SLOTS.map((slot) => state.slots[slot.key]);
   }
 
+  function assignedCount() {
+    return assignedIds().filter((id) => id !== null).length;
+  }
+
+  // Both nodes identified, or (One node on) one, with the other slot skipped.
   function isComplete() {
-    return assignedIds().every((id) => id !== null);
+    if (assignedCount() === SLOTS.length) return true;
+    return assignedCount() > 0 && SLOTS.every((slot) => state.slots[slot.key] !== null || isSkipped(slot.key));
+  }
+
+  // One node identified and no other node connected to identify: Start Game
+  // can leave the other slot empty (finishSensorAssignment()).
+  function canStartOneNode() {
+    return oneNodeOn() && !isComplete() && assignedCount() > 0 && state.spare === 0;
   }
 
   function clearDwell() {
@@ -84,22 +123,50 @@
   };
 
   window.isSensorAssignmentComplete = isComplete;
+  window.canStartOneNode = canStartOneNode;
+
+  // Start Game's check: with one node identified and none left to identify,
+  // the empty slot is skipped. Returns whether the assignment is complete.
+  window.finishSensorAssignment = function finishSensorAssignment() {
+    if (canStartOneNode()) {
+      SLOTS.forEach((slot) => {
+        if (state.slots[slot.key] === null) state.skipped[slot.key] = true;
+      });
+      clearDwell();
+    }
+    return isComplete();
+  };
+
+  // Skip this sensor: the active slot is left empty, so a node that does not
+  // work can be left out. Never both: one slot always needs its node. Returns
+  // whether it skipped.
+  window.skipSensorSlot = function skipSensorSlot() {
+    const slot = activeSlot();
+    if (!oneNodeOn() || !slot) return false;
+    if (SLOTS.some((other) => other.key !== slot.key && isSkipped(other.key))) return false;
+    state.skipped[slot.key] = true;
+    clearDwell();
+    return true;
+  };
 
   window.resetSensorAssignment = function resetSensorAssignment() {
     SLOTS.forEach((slot) => {
       state.slots[slot.key] = null;
+      state.skipped[slot.key] = false;
     });
-    state.activeIndex = 0;
+    state.spare = 0;
     clearDwell();
   };
 
   window.getSensorAssignmentState = function getSensorAssignmentState() {
     return {
       slots: { ...state.slots },
+      skipped: { left: isSkipped("left"), right: isSkipped("right") },
       activeKey: activeSlot() ? activeSlot().key : null,
       dwellProgress: state.dwellProgress,
       candidateId: state.candidateId,
       complete: isComplete(),
+      oneNodeReady: canStartOneNode(),
     };
   };
 
@@ -128,11 +195,7 @@
       }
     });
 
-    if (dropped) {
-      const nextIndex = SLOTS.findIndex((slot) => state.slots[slot.key] === null);
-      state.activeIndex = nextIndex === -1 ? SLOTS.length : nextIndex;
-      clearDwell();
-    }
+    if (dropped) clearDwell();
   }
 
   // Runs the detection for the active slot. Call whenever fresh node data
@@ -141,13 +204,14 @@
     const time = Number.isFinite(now) ? now : performance.now();
     pruneMissing(nodes);
 
+    const taken = new Set(assignedIds().filter((id) => id !== null));
+    state.spare = nodes.filter((node) => !taken.has(node.id)).length;
+
     const slot = activeSlot();
     if (!slot) {
       clearDwell();
       return;
     }
-
-    const taken = new Set(assignedIds().filter((id) => id !== null));
 
     // Rank the still-unassigned sensors by how close something is to them.
     const candidates = nodes
@@ -180,7 +244,7 @@
 
     if (elapsed >= HAND_DWELL_MS) {
       state.slots[slot.key] = nearest.id;
-      state.activeIndex += 1;
+      state.spare -= 1;
       clearDwell();
     }
   };
@@ -199,6 +263,7 @@
       readings: document.getElementById("calReadings"),
       hold: document.getElementById("calHold"),
       start: document.getElementById("calStart"),
+      skipSensor: document.getElementById("calSkipSensor"),
       slots: Object.fromEntries(
         SLOTS.map((slot) => [slot.key, root.querySelector(`[data-slot="${slot.key}"]`)])
       ),
@@ -212,12 +277,18 @@
   window.updateCalibrateScreen = function updateCalibrateScreen(nodes = []) {
     if (!view) bindView();
     const slot = activeSlot();
-    const complete = isComplete();
+    const oneNodeReady = canStartOneNode();
+    const ready = isComplete() || oneNodeReady;
 
-    if (complete) {
+    if (ready && assignedCount() === SLOTS.length) {
       view.instruction.textContent = "Both sensors identified";
       view.instruction.className = "instruction";
       view.hint.textContent = "Aim both nodes straight, then press Start Game.";
+    } else if (ready) {
+      const alone = SLOTS.find((entry) => state.slots[entry.key] !== null);
+      view.instruction.textContent = `One sensor: the ${alone.key} node plays alone`;
+      view.instruction.className = "instruction";
+      view.hint.textContent = "Aim it straight, then press Start Game. Its servo follows you across the board.";
     } else if (nodes.length === 0) {
       view.instruction.textContent = "Waiting for the sensors to connect";
       view.instruction.className = "instruction is-fault";
@@ -225,14 +296,23 @@
     } else {
       view.instruction.textContent = `Hold your hand in front of the ${slot.key} sensor`;
       view.instruction.className = "instruction is-wait";
-      view.hint.textContent = "Keep it steady until the bar fills.";
+      // With one node connected and nothing identified yet, it may be the
+      // right node, which needs the left slot skipped first.
+      const lone = oneNodeOn() && nodes.length === 1 && assignedCount() === 0 && slot.key === "left";
+      view.hint.textContent = lone
+        ? "Only one node is connected. If it is the right node, press Skip left sensor first."
+        : oneNodeOn()
+          ? `Keep it steady until the bar fills, or press Skip ${slot.key} sensor if it does not work.`
+          : "Keep it steady until the bar fills.";
     }
 
     SLOTS.forEach((entry) => {
       const el = view.slots[entry.key];
       const assignedId = state.slots[entry.key];
-      const isActive = !complete && slot && slot.key === entry.key;
+      const isActive = !ready && slot && slot.key === entry.key;
+      const skipped = assignedId === null && (isSkipped(entry.key) || oneNodeReady);
       el.classList.toggle("is-assigned", assignedId !== null);
+      el.classList.toggle("is-skipped", skipped);
       el.classList.toggle("is-active", Boolean(isActive));
 
       const side = el.querySelector(".slot-side");
@@ -244,6 +324,10 @@
         side.innerHTML = `<svg class="icon"><use href="#i-check" /></svg>${label}`;
         value.textContent = `Node ${assignedId}`;
         meta.textContent = formatCm(distanceFor(nodes.find((n) => n.id === assignedId)));
+      } else if (skipped) {
+        side.textContent = label;
+        value.textContent = "Not used";
+        meta.textContent = "one-node round";
       } else {
         side.textContent = label;
         value.textContent = isActive ? "Waiting for a hand" : "Not assigned yet";
@@ -283,12 +367,22 @@
 
     // The servos are held straight for as long as this screen is up, through
     // both steps (canvas.js sends the hold; the server passes AIM 90 to every node).
-    view.hold.textContent =
-      `Servos held at ${AIM_ANGLE_DEG}° throughout - aim both nodes straight out into the play area.`;
+    view.hold.textContent = ready && assignedCount() === 1
+      ? `Servo held at ${AIM_ANGLE_DEG}° throughout - aim the node straight out into the play area.`
+      : `Servos held at ${AIM_ANGLE_DEG}° throughout - aim both nodes straight out into the play area.`;
 
-    // Start Game: live once both nodes are identified, and where focus lands then.
-    view.start.disabled = !complete;
-    view.start.toggleAttribute("data-default-focus", complete);
+    // Start Game: live once both nodes are identified (or one, with One node
+    // on), and where focus lands then.
+    view.start.disabled = !ready;
+    view.start.toggleAttribute("data-default-focus", ready);
+
+    // Skip this sensor: One node on, a slot waiting for a hand, and the other
+    // slot not skipped already.
+    const canSkip = oneNodeOn() && !ready && slot !== null &&
+      !SLOTS.some((other) => other.key !== slot.key && isSkipped(other.key));
+    view.skipSensor.hidden = !canSkip;
+    view.skipSensor.disabled = !canSkip;
+    if (slot) view.skipSensor.querySelector("span").textContent = `Skip ${slot.key} sensor`;
   };
 
 })();

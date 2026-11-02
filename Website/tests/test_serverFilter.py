@@ -868,5 +868,19 @@ class BrowserMessages(unittest.TestCase):
         self.assertEqual(coordinate["y"], close_cm)
 
 
+class OneNodeAssignment(unittest.TestCase):
+    """A one-node round's sensors:assign (the game's One node switch) tells
+    the geometry which slot is in use."""
+
+    def test_the_assigned_slots_are_the_ones_in_use(self):
+        stage = ServerFilterStage()
+        stage.assign_slots([None, None, 4])
+        self.assertEqual(stage.pipeline.geometry.slots_in_use, (2,))
+        stage.assign_slots([3, None, 4])
+        self.assertEqual(stage.pipeline.geometry.slots_in_use, (0, 2))
+        stage.assign_slots([None, None, None])
+        self.assertEqual(stage.pipeline.geometry.slots_in_use, (0, 2))
+
+
 if __name__ == "__main__":
     unittest.main()

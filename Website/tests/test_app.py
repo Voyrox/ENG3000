@@ -1864,5 +1864,51 @@ class ScannerAngleTests(unittest.TestCase):
             self.assertIsNone(app.parse_angle_deg(payload), payload)
 
 
+class OneNodeTurnsTests(BrokerTestCase):
+    """The game's One node switch (Aaron, 2 Nov): with one node assigned, it
+    scans on every tick; the turns rotate as before while a page holds the
+    servos on the calibration screen, and with two nodes assigned."""
+
+    def setUp(self):
+        super().setUp()
+        self._saved_roles = dict(app.node_roles)
+        self._saved_aim = app.nodes_aim_held
+        app.node_roles.clear()
+        app.nodes_aim_held = False
+
+    def tearDown(self):
+        app.node_roles.clear()
+        app.node_roles.update(self._saved_roles)
+        app.nodes_aim_held = self._saved_aim
+        super().tearDown()
+
+    def add_nodes(self, count):
+        return [self.add_node(address=(f"10.0.0.{index + 1}", 1000 + index), conn=RecordingConn())[0]
+                for index in range(count)]
+
+    def holders(self, ticks):
+        held = []
+        for _ in range(ticks):
+            self.run_loop_until(app.coordinator_loop, 1)
+            held.append([n["id"] for n in app.nodes.values() if n["has_turn"]])
+        return held
+
+    def test_the_one_node_in_use_scans_on_every_tick(self):
+        first, second = self.add_nodes(2)
+        app.node_roles[second] = "RIGHT"
+        self.assertEqual(self.holders(4), [[second]] * 4)
+
+    def test_two_nodes_in_use_take_turns(self):
+        first, second = self.add_nodes(2)
+        app.node_roles.update({first: "LEFT", second: "RIGHT"})
+        self.assertEqual({tuple(h) for h in self.holders(4)}, {(first,), (second,)})
+
+    def test_every_node_takes_turns_on_the_calibration_screen(self):
+        first, second = self.add_nodes(2)
+        app.node_roles[second] = "RIGHT"
+        app.nodes_aim_held = True
+        self.assertEqual({tuple(h) for h in self.holders(4)}, {(first,), (second,)})
+
+
 if __name__ == "__main__":
     unittest.main()

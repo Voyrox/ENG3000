@@ -21,6 +21,7 @@
 //   window.setCellConfidence(on) / window.getCellConfidenceSwitch() - the cell decision uses cell confidence
 //   window.getCellConfidence()                  - each cell's confidence, 0-1, index gx * 3 + gy
 //   window.getSensorMotion()                    - { moving, x, y, vx, vy, at }: the player, their velocity and its time
+//   window.setOneNode(on) / window.getOneNode()     - a sensor round can be played with one node
 //   window.handleGameClick(canvas, x, y)        - register a hit attempt
 //   window.getGamePauseButtonAtPoint(canvas,x,y)- hit-test the pause icon
 //   window.getPauseMenuButtonAtPoint(canvas,x,y)- hit-test Resume / Restart / Main Menu
@@ -46,7 +47,11 @@
 //              mole is live. The continuous position is drawn as the cursor
 //              through the spring in positionSolver.js, so the player glides
 //              between holes instead of snapping to their centres. Entered
-//              with Start Game once both nodes are identified.
+//              with Start Game once both nodes are identified - or one, with
+//              One node on (Aaron, 2 Nov): then that node alone places the
+//              player (its distance along its servo angle, through line of
+//              sight and Dynamic's lone-node rule) and Out of bounds is that
+//              node being lost (slotsInUse()).
 //              When the server runs filterRules.py (SERVER_FILTERING on), its
 //              coordinate replaces readSensorCoordinate() for the cursor and
 //              alert; with the flag off (the default) nothing here changes.
@@ -422,6 +427,12 @@
     // empty room. Switched on the control panel. Python: FilterConfig
     // far_half.
     farHalf: true,
+    // One node (Aaron, 2 Nov): with one node working, Play Game still goes
+    // through to sensor mode. The calibration screen can start a round with
+    // one node identified (calibrate.js), and that round goes Out of bounds
+    // when that node is lost (slotsInUse()). Off: both nodes are needed, as
+    // before. Switched on the control panel.
+    oneNode: true,
   };
 
   // The most readings a node's lost score can be taken over (setLostReadings()).
@@ -2991,15 +3002,21 @@
   // after that each reading at the same aim counts for less across the line
   // (lineOfSight()). With tuning.kalman off, each reading starts the track
   // again at its own point: no gate, nothing kept from before. A reading past
-  // the angle limit (withinAngleLimit()) is not used at all.
+  // the angle limit (withinAngleLimit()) is not used at all. In a one-node
+  // round (slotsInUse()) every reading's aim counts in full: there is no other
+  // node's distance to place the player across the line, and with a held aim
+  // counting for less the track drifted sideways off the board while the
+  // player stood still (a player at (120, 90) tracked to (183, 22), which
+  // raised the too-close alert).
   function stepLosTrack(filtered, scans, fresh, now) {
+    const alone = slotsInUse().length === 1;
     [LEFT_SENSOR, RIGHT_SENSOR].forEach((slot) => {
       const scan = scans[slot];
       if (!fresh[slot] || filtered[slot] === null || scan.angle === null || scan.state === SCAN_LOST) return;
       if (!withinAngleLimit(slot, filtered[slot], scan.angle)) return;
       const newAim = losTrack.x === null || scan.angle !== losTrack.aimedAt[slot] ||
         now - losTrack.fedAt[slot] > SENSOR_HOLD_MS;
-      const repeats = newAim ? 0 : losTrack.aimRepeats[slot] + 1;
+      const repeats = newAim || alone ? 0 : losTrack.aimRepeats[slot] + 1;
       const m = lineOfSight(columnCentreCm(slot), bodyCentreCm(filtered[slot]), scan.angle, scan.state, repeats);
       let took = true;
       if (tuning.kalman) took = losObserve(m, slot, now);
@@ -3601,6 +3618,18 @@
     return tuning.farHalf;
   };
 
+  // The One node switch, on by default; see tuning.oneNode. Takes effect on
+  // the calibration screen: a round already running keeps its nodes.
+  window.getOneNode = function getOneNode() {
+    return tuning.oneNode;
+  };
+
+  window.setOneNode = function setOneNode(on) {
+    tuning.oneNode = Boolean(on);
+    console.info(`[one node] ${tuning.oneNode ? "on" : "off"}`);
+    return tuning.oneNode;
+  };
+
   // How far each node's servo line runs on the grid at an angle (angleLimitCm()),
   // for the tests and the console: slot 0 is the left node, 2 the right.
   window.getAngleLimitCm = function getAngleLimitCm(slot, angle) {
@@ -3693,7 +3722,20 @@
     });
   };
 
-  // Whether both nodes are lost. A node is lost when its last
+  // The sensor slots this round places the player with: both, or in a
+  // one-node round (tuning.oneNode; calibrate.js) the one identified. Read
+  // from the calibration screen's assignment once it is complete; before
+  // that, or without that screen (the tests, the parity trace), both.
+  // serverFilter.py assign_slots() -> TwoSensorGeometry.slots_in_use.
+  function slotsInUse() {
+    const complete = window.isSensorAssignmentComplete && window.isSensorAssignmentComplete();
+    const assigned = complete && window.getSensorAssignment ? window.getSensorAssignment() : null;
+    const used = assigned ? [LEFT_SENSOR, RIGHT_SENSOR].filter((slot) => assigned[slot] !== null) : [];
+    return used.length > 0 ? used : [LEFT_SENSOR, RIGHT_SENSOR];
+  }
+
+  // Whether both nodes are lost - in a one-node round, the node in use
+  // (slotsInUse()). A node is lost when its last
   // tuning.lostReadings readings' scores (lostScore()) add up to 0 or less:
   // on average half or lost, so the odd found reading among lost ones does
   // not stop it, and a node mostly finding the player is never lost. Each
@@ -3718,7 +3760,8 @@
     };
     const left = lost(LEFT_SENSOR);
     const right = lost(RIGHT_SENSOR);
-    return left && right;
+    const used = slotsInUse();
+    return (!used.includes(LEFT_SENSOR) || left) && (!used.includes(RIGHT_SENSOR) || right);
   }
 
   // Input:  [left, centre, right] node records, nulls allowed (calibration order).

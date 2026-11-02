@@ -88,6 +88,12 @@ class ServerFilterStage:
         if len(slots) != GRID_SIZE:
             raise ValueError(f"need {GRID_SIZE} slots, got {len(slots)}")
         self.sensor_slots = slots
+        # A one-node round (the game's One node switch): Out of bounds is that
+        # node being lost (TwoSensorGeometry.slots_in_use).
+        geometry = self.pipeline.geometry
+        if hasattr(geometry, "slots_in_use"):
+            used = tuple(slot for slot in (geometry.LEFT, geometry.RIGHT) if slots[slot] is not None)
+            geometry.slots_in_use = used or (geometry.LEFT, geometry.RIGHT)
         self._latest_cm.clear()
         self._latest_angle.clear()
         self._latest_state.clear()

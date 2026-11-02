@@ -760,6 +760,12 @@ function handleRemoteCommand(command) {
       window.setFarHalf(command.enabled);
       syncServerFilterSetup();
       break;
+    case "oneNode":
+      // One node: the calibration screen can start a round with one node
+      // identified (calibrate.js). The assignment the round started with
+      // tells the server which nodes are in use, so it is not sent here.
+      window.setOneNode(command.enabled);
+      break;
     default:
       return;
   }
@@ -807,6 +813,7 @@ function sendGameStatus() {
     dynamicRules: window.getDynamicRules(),
     confidenceLevel: window.getConfidenceLevel(),
     farHalf: window.getFarHalf(),
+    oneNode: window.getOneNode(),
   }));
 }
 
@@ -1108,9 +1115,14 @@ const screenActions = {
     skip() {
       startGameWithMode("mouse");
     },
-    // Live once both nodes are identified: calibration ends here.
+    // One node: leave the active slot empty (calibrate.js).
+    skipSensor() {
+      window.skipSensorSlot();
+    },
+    // Live once both nodes are identified, or one with One node on (the
+    // empty slot is skipped here): calibration ends here.
     start() {
-      if (window.isSensorAssignmentComplete()) startGameWithMode("sensor");
+      if (window.finishSensorAssignment()) startGameWithMode("sensor");
     },
   },
 };

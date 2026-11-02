@@ -113,13 +113,15 @@ CONTROL_ENABLED = os.environ.get("CON") == "1"
 # each node against itself; off, the older vote).
 # "cellLock" turns the cell lock on or off (the game's cursor, and the hole it
 # scores in, keep to the voted cell).
+# "oneNode" turns One node on or off (the sensor screen can start a round with
+# one node identified).
 # "tooCloseHold" is the hold button: the too-close screen while it is down,
 # re-sent every 250 ms while held. "outOfBoundsHold" is the same for the
 # game's Out of bounds banner.
 CONTROL_ACTIONS = {"point", "release", "start", "mode", "pause", "resume", "restart", "menu", "testMode",
                    "position", "compare", "lostReadings", "kalman", "angleLimit", "triAimTolerance",
                    "dynamicRules", "confidenceLevel", "farHalf", "deadZone", "cellLock", "cellDecision", "trackMoving", "cellConfidence",
-                   "tooCloseHold", "outOfBoundsHold", "alert"}
+                   "tooCloseHold", "outOfBoundsHold", "alert", "oneNode"}
 # Sent many times a second while a finger is down, so not printed.
 QUIET_CONTROL_ACTIONS = {"point", "release", "tooCloseHold", "outOfBoundsHold"}
 # Every raw node reading to logs/raw-*.csv, for the bench noise test
@@ -915,6 +917,19 @@ def set_turn(node_id, granted):
     schedule_broadcast_nodes()
 
 
+def one_node_round_ids(online_ids):
+    """The game's One node switch (Aaron, 2 Nov): calibration assigned one
+    node only (sensors:assign with the other slot empty), so that node scans
+    on every tick instead of waiting out the turn of a node the round does not
+    use. Returns [that node], or [] when the turns rotate as before: two nodes
+    assigned, none yet, or a page holding the servos on the calibration screen,
+    where every node needs its readings to be identified. Call with
+    state_lock held."""
+    if len(node_roles) != 1 or nodes_aim_held:
+        return []
+    return [node_id for node_id in online_ids if node_id in node_roles]
+
+
 def coordinator_loop():
     """The PC is the source of truth: alternate scan turns across all online
     nodes on a fixed schedule so two ultrasonic sensors never fire together.
@@ -936,6 +951,7 @@ def coordinator_loop():
                 node_id for node_id, node in nodes.items()
                 if node.get("conn") is not None
             )
+            scanning_ids = one_node_round_ids(online_ids) or online_ids
         if not online_ids:
             continue
 
@@ -943,7 +959,7 @@ def coordinator_loop():
         for node_id in online_ids:
             sync_node(node_id)
 
-        active = online_ids[sync_tick % len(online_ids)]
+        active = scanning_ids[sync_tick % len(scanning_ids)]
         # Revoke every other turn before granting the next one, regardless of
         # node ID order. Never send TURN while another node is still authorized.
         for node_id in online_ids:
