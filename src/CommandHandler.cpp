@@ -70,6 +70,13 @@ void CommandHandler::handle(const String& line) {
         // The control panel's hold button: 1 while a finger is on it, re-sent
         // every 250 ms, then 0. Not logged, since it comes 4 times a second.
         deadZone_.hold(line.substring(5).toInt() != 0);
+    } else if (line.startsWith("PAD ")) {
+        // The control panel's pad: 1 while someone steers the cursor, re-sent
+        // every 250 ms, then 0. The sensors cannot sound the buzzer meanwhile.
+        deadZone_.padInUse(line.substring(4).toInt() != 0);
+    } else if (line.startsWith("ALARM ")) {
+        // The control panel's Dead-zone alarm switch: 1 on, 0 off.
+        deadZone_.setAlarm(line.substring(6).toInt() != 0);
     } else if (line == "LEARN") {
         if (scanner_.learnRoom()) {
             Serial.println("Learning the room: keep the play area clear");

@@ -1671,6 +1671,69 @@ class NodeFarTests(BrokerTestCase):
         self.assertTrue(all(status["type"] == "far:status" for status in statuses))
 
 
+class NodePadAndAlarmTests(BrokerTestCase):
+    """The control panel takes priority over the sensors for the buzzer (Aaron,
+    3 Nov): its pad in use (PAD 1/0) and its Dead-zone alarm switch (ALARM 1/0)
+    reach the scanner nodes."""
+
+    def setUp(self):
+        super().setUp()
+        self._saved_alarm = app.nodes_alarm
+        app.nodes_alarm = True
+
+    def tearDown(self):
+        app.nodes_alarm = self._saved_alarm
+        super().tearDown()
+
+    def run_panel(self, *events):
+        phone = FakeControlSocket(path="/control", incoming=[json.dumps(e) for e in events])
+        with mock.patch.object(app, "broadcast") as broadcast, mock.patch("builtins.print"):
+            asyncio.run(app.control_handler(phone))
+        return phone, broadcast
+
+    def test_the_pad_in_use_reaches_the_nodes_and_letting_go_releases_it(self):
+        _, node = self.add_node(conn=RecordingConn())
+        _, broadcast = self.run_panel({"action": "point", "x": 0.5, "y": 0.5},
+                                      {"action": "point", "x": 0.6, "y": 0.5},
+                                      {"action": "release"})
+        # Points every frame: PAD 1 at most every 250 ms, then PAD 0.
+        self.assertEqual(node["conn"].sent, ["PAD 1\n", "PAD 0\n"])
+        # The game still gets the points.
+        commands = [json.loads(call.args[1]) for call in broadcast.call_args_list]
+        self.assertEqual([c["action"] for c in commands if c["type"] == "remote:command"],
+                         ["point", "point", "release"])
+
+    def test_pad_is_resent_while_the_finger_stays_down(self):
+        _, node = self.add_node(conn=RecordingConn())
+        # With no gap between resends, every point (or heartbeat) sends PAD 1;
+        # then the panel drops without a release, so the nodes are let go.
+        with mock.patch.object(app, "PAD_RESEND_SECONDS", 0):
+            self.run_panel(*({"action": "point", "x": 0.5, "y": 0.5} for _ in range(3)))
+        self.assertEqual(node["conn"].sent, ["PAD 1\n", "PAD 1\n", "PAD 1\n", "PAD 0\n"])
+
+    def test_a_release_without_the_pad_sends_nothing(self):
+        _, node = self.add_node(conn=RecordingConn())
+        self.run_panel({"action": "release"})
+        self.assertEqual(node["conn"].sent, [])
+
+    def test_the_alarm_switch_reaches_the_nodes_and_every_panel(self):
+        _, node = self.add_node(conn=RecordingConn())
+        phone, broadcast = self.run_panel({"action": "alarm", "enabled": False},
+                                          {"action": "alarm", "enabled": "no"})
+        self.assertEqual(node["conn"].sent, ["ALARM 0\n"])
+        self.assertIn(json.dumps({"type": "alarm:status", "on": True}), phone.sent)
+        statuses = [json.loads(call.args[1]) for call in broadcast.call_args_list]
+        self.assertEqual(statuses, [{"type": "alarm:status", "on": False}])
+        self.assertFalse(app.nodes_alarm)
+
+    def test_a_node_that_connects_later_is_told_the_alarm_is_off(self):
+        with mock.patch("builtins.print"):
+            app.set_nodes_alarm(False)
+        conn = FakeNodeSocket(b"\r\n")
+        app.handle_node_connection(conn, ("10.0.0.1", 1000))
+        self.assertEqual(conn.sent[-1], "ALARM 0\n")
+
+
 class NodeBuzzerTests(BrokerTestCase):
     """The control panel's buzzer hold button sounds the dead-zone buzzer on
     the scanner nodes (BUZZ 1) and hands it back to the sensors (BUZZ 0)."""

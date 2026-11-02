@@ -18,6 +18,9 @@
 //                        area) / clear it; see RoomMap.h
 //   BUZZ 1|0             the control panel's hold button: sound the dead-zone
 //                        buzzer / back to the sensors; see DeadZoneAlarm.h
+//   PAD 1|0              someone steers the cursor from the control panel's
+//                        pad / no longer: the sensors cannot sound the buzzer
+//   ALARM 1|0            the control panel's Dead-zone alarm switch
 class CommandHandler {
 public:
     CommandHandler(NodeConnection& connection, Scanner& scanner, DeadZoneAlarm& deadZone);

@@ -54,6 +54,11 @@ void DeadZoneAlarm::update() {
         held_ = false;
         write();
     }
+    if (pad_ && millis() - padMs_ > config::BUZZER_HELD_TIMEOUT_MS) {
+        Serial.println("Dead zone: pad timed out, back to the sensors");
+        pad_ = false;
+        write();
+    }
 
     if (millis() - lastCloseMs_ <= config::DEAD_ZONE_HOLD_MS) {
         return;
@@ -82,12 +87,29 @@ void DeadZoneAlarm::hold(bool on) {
     write();
 }
 
+void DeadZoneAlarm::padInUse(bool on) {
+    padMs_ = millis();
+    if (on == pad_) {
+        return; // a heartbeat
+    }
+    pad_ = on;
+    Serial.printf("Dead zone: pad %s, sensors %s the buzzer\n", on ? "in use" : "let go", on ? "cannot sound" : "sound");
+    write();
+}
+
+void DeadZoneAlarm::setAlarm(bool on) {
+    alarm_ = on;
+    Serial.printf("Dead zone alarm: %s (control panel)\n", on ? "on" : "off");
+    write();
+}
+
 void DeadZoneAlarm::sound(bool on) {
     sounding_ = on;
     write();
 }
 
-// On while the sensors or the control panel say so.
+// On while the control panel holds it, or the sensors say so and the control
+// panel lets them.
 void DeadZoneAlarm::write() {
     bool on = isSounding();
     if (config::BUZZER_TONE_HZ > 0) {

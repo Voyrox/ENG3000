@@ -31,6 +31,12 @@
 //
 // The control panel's hold button (BUZZ 1 / BUZZ 0) sounds it whatever the
 // sensors say; let go, and it is back to the sensors.
+//
+// The control panel takes priority over the sensors (Aaron, 3 Nov): while
+// someone steers the cursor from its pad (PAD 1, re-sent every 250 ms) or its
+// Dead-zone alarm switch is off (ALARM 0), the sensors cannot sound it. They
+// still keep track, so a player in the dead zone sounds it again once the pad
+// is let go. The hold button still sounds it.
 class DeadZoneAlarm {
 public:
     explicit DeadZoneAlarm(uint8_t buzzerPin);
@@ -49,7 +55,15 @@ public:
     // until config::BUZZER_HELD_TIMEOUT_MS without another on.
     void hold(bool on);
 
-    bool isSounding() const { return sounding_ || held_; }
+    // The control panel's pad: on while someone steers the cursor from it,
+    // until off, or until config::BUZZER_HELD_TIMEOUT_MS without another on.
+    void padInUse(bool on);
+
+    // The control panel's Dead-zone alarm switch: off, the sensors never sound it.
+    void setAlarm(bool on);
+    bool alarm() const { return alarm_; }
+
+    bool isSounding() const { return held_ || (sounding_ && alarm_ && !pad_); }
 
     // How far in front of the nodes' line an echo distanceCm away at angleDeg
     // is, or config::NO_ECHO for no echo.
@@ -63,6 +77,9 @@ private:
     bool sounding_ = false; // the sensors' say
     bool held_ = false;     // the control panel's
     unsigned long heldMs_ = 0;
+    bool pad_ = false;      // someone steers from the control panel's pad
+    unsigned long padMs_ = 0;
+    bool alarm_ = true;     // the control panel's Dead-zone alarm switch
     int closePairs_ = 0;
     unsigned long lastCloseMs_ = 0;
 };

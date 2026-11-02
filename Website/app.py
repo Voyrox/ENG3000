@@ -891,6 +891,56 @@ def send_nodes_buzzer(on):
     return True
 
 
+# The control panel takes priority over the sensors for the dead-zone buzzer
+# (Aaron, 3 Nov). While someone steers the cursor from its pad, every scanner
+# node is told PAD 1 (at most every 250 ms while the points keep coming, then
+# PAD 0 on release), and its sensors cannot sound the buzzer; a node lets go by
+# itself 1 s after the last PAD 1. The Dead-zone alarm switch (on by default)
+# turns the sensors' buzzer off for good (ALARM 0). The server holds the switch:
+# every node is told on arrival (a rebooted node starts with it on) and again
+# whenever it changes. The hold button sounds the buzzer either way.
+PAD_RESEND_SECONDS = 0.25
+nodes_alarm = True
+
+
+def send_nodes_pad(on):
+    """Tell every connected node whether the control panel's pad is in use."""
+    with state_lock:
+        node_ids = [node_id for node_id, node in nodes.items() if node.get("conn") is not None]
+    for node_id in node_ids:
+        send_command(node_id, f"PAD {1 if on else 0}")
+
+
+def set_nodes_alarm(on):
+    """Turn the dead-zone alarm on or off on every connected node. A value
+    that is not true/false is ignored. Returns whether it was taken."""
+    global nodes_alarm
+    if not isinstance(on, bool):
+        print(f"Ignored bad alarm switch: {on!r}")
+        return False
+    with state_lock:
+        nodes_alarm = on
+        node_ids = [node_id for node_id, node in nodes.items() if node.get("conn") is not None]
+    print(f"Dead-zone alarm: {'on' if on else 'off'} (control panel)")
+    for node_id in node_ids:
+        send_command(node_id, f"ALARM {1 if on else 0}")
+    return True
+
+
+def send_node_alarm(node_id):
+    """Tell a node that has just connected the dead-zone alarm is off. A node
+    starts with it on, so on needs no word."""
+    with state_lock:
+        on = nodes_alarm
+    if not on:
+        send_command(node_id, "ALARM 0")
+
+
+def alarm_message():
+    """What the control panel's Dead-zone alarm switch shows."""
+    return {"type": "alarm:status", "on": nodes_alarm}
+
+
 def sync_node(node_id):
     """Send the authoritative tick to one node (PC is source of truth)."""
     with state_lock:
@@ -993,11 +1043,12 @@ def handle_node_connection(conn, address):
         conn.sendall(f"{node_id}\n".encode("utf-8"))
         # A rebooted node has forgotten whether it should be holding straight
         # for calibration, which mount it is, how many pulses to take and
-        # whether far hold and far steer are on; tell it again.
+        # whether far hold, far steer and the dead-zone alarm are on; tell it again.
         send_node_aim(node_id)
         send_node_role(node_id)
         send_node_pulses(node_id)
         send_node_far(node_id)
+        send_node_alarm(node_id)
         if first_message is not None:
             update_node(node_id, first_message)
         with conn.makefile("r") as stream:
@@ -1193,11 +1244,13 @@ async def control_handler(websocket):
     CONTROL_CONNECTIONS.add(websocket)
     print(f"Control panel connected from {websocket.remote_address}")
     buzzer_held = False
+    pad_sent_at = None  # when PAD 1 last went out, None while the pad is free
     try:
         await websocket.send(json.dumps({"type": "nodes:update", "nodes": snapshot_nodes()}))
         await websocket.send(json.dumps(handover_message()))
         await websocket.send(json.dumps(search_message()))
         await websocket.send(json.dumps(far_message()))
+        await websocket.send(json.dumps(alarm_message()))
         async for message in websocket:
             try:
                 event = json.loads(message)
@@ -1238,6 +1291,20 @@ async def control_handler(websocket):
                 if await asyncio.to_thread(send_nodes_buzzer, on):
                     buzzer_held = on
                 continue
+            if event.get("action") == "alarm":
+                if await asyncio.to_thread(set_nodes_alarm, event.get("enabled")):
+                    broadcast(CONTROL_CONNECTIONS.copy(), json.dumps(alarm_message()))
+                continue
+            # The pad's points come every frame: PAD 1 goes to the nodes at most
+            # every 250 ms, still within their 1 s timeout.
+            if event.get("action") == "point":
+                now = time.monotonic()
+                if pad_sent_at is None or now - pad_sent_at >= PAD_RESEND_SECONDS:
+                    pad_sent_at = now
+                    await asyncio.to_thread(send_nodes_pad, True)
+            elif event.get("action") == "release" and pad_sent_at is not None:
+                pad_sent_at = None
+                await asyncio.to_thread(send_nodes_pad, False)
             if event.get("action") not in CONTROL_ACTIONS:
                 continue
             if event["action"] not in QUIET_CONTROL_ACTIONS:
@@ -1248,6 +1315,8 @@ async def control_handler(websocket):
         CONTROL_CONNECTIONS.discard(websocket)
         if buzzer_held:
             await asyncio.to_thread(send_nodes_buzzer, False)
+        if pad_sent_at is not None:
+            await asyncio.to_thread(send_nodes_pad, False)
         print("Control panel disconnected")
 
 

@@ -90,6 +90,7 @@
             <button id="holdTooCloseBtn" class="hold">Hold: too close</button>
             <button id="holdOutOfBoundsBtn" class="hold">Hold: out of bounds</button>
             <button id="holdBuzzerBtn" class="hold">Hold: dead zone alarm</button>
+            <button id="alarmBtn">Dead zone alarm: on</button>
         </div>
         <p class="note">Dead zone on: too close when a node's raw reading, along its servo line, is
             less than 10 cm out from the nodes (the 150 × 10 cm strip at the front of the grid):
@@ -98,7 +99,10 @@
             finger to go back. Hold: out of bounds does the same for the game's Out of bounds
             banner, in a round only (sensor or mouse), and the round waits while it is up.
             Hold: dead zone alarm sounds the buzzer on the nodes while your
-            finger is on it; lift it and the buzzer goes back to the sensors.</p>
+            finger is on it; lift it and the buzzer goes back to the sensors. The control panel
+            comes first: while your finger is on the pad, the nodes' sensors cannot sound the
+            buzzer, however close someone is. Dead zone alarm off: they never do. The hold
+            button sounds it either way.</p>
     </section>
 
     <section>
@@ -393,6 +397,19 @@
             $("farHoldBtn").classList.toggle("selected", !far.hold);
             $("farSteerBtn").textContent = `Far steer: ${far.steer ? "on" : "off"}`;
             $("farSteerBtn").classList.toggle("selected", !far.steer);
+        }
+
+        // The Dead-zone alarm switch goes straight to the server, which tells
+        // the nodes (ALARM) and answers with alarm:status. Off, or while a
+        // finger is on the pad, the nodes' sensors cannot sound the buzzer;
+        // the hold button still does.
+        let alarmOn = true;
+        $("alarmBtn").addEventListener("click", () => send({ action: "alarm", enabled: !alarmOn }));
+        function renderAlarm(on) {
+            if (typeof on !== "boolean") return;
+            alarmOn = on;
+            $("alarmBtn").textContent = `Dead zone alarm: ${on ? "on" : "off"}`;
+            $("alarmBtn").classList.toggle("selected", !on);
         }
 
         function renderHandover(on) {
@@ -901,6 +918,8 @@
                     renderSearch(payload);
                 } else if (payload.type === "far:status") {
                     renderFar(payload);
+                } else if (payload.type === "alarm:status") {
+                    renderAlarm(payload.on);
                 }
             });
             socket.addEventListener("close", () => {
