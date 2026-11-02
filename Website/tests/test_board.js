@@ -180,25 +180,27 @@ function isStep(layout, from, to) {
   return Math.abs(Math.abs(to.cx - from.cx) - nearest) < 1e-6;
 }
 
-// Whacks every mole for a while and checks each one (a bomb too) comes up a
-// step from the last real mole - or, after a new deal, a step from the new
-// hole nearest it.
-function checkSteps(w, spawnsWanted) {
+// Plays wave after wave, always going for the mole (else the hat mole), and
+// checks each wave: 2 or 3 things, each a different kind on a different hole,
+// coming up a step from where the last wave was played - as many of them as
+// that hole has neighbours, the rest the next nearest - or, after a new deal,
+// from the new hole nearest it.
+function checkSteps(w, wavesWanted) {
   let t = 0;
-  let last = null; // { cx, cy } of the last real mole
-  let spawns = 0;
+  let last = null; // { cx, cy } of the hole the last wave was played at
+  let waves = 0;
   let deals = 0;
   let shape = JSON.stringify(rowsOf(w.getGameGridLayout(CANVAS)).map((r) => r.holes.length));
   let wasUp = false;
-  while (spawns < spawnsWanted) {
+  while (waves < wavesWanted) {
     t = run(w, [], 1, t);
     const state = w.getGameState();
     assert.notStrictEqual(state.status, "gameover");
     // A long run: the clock and lives never end it.
     state.remainingMs = 60000;
     state.lives = 99;
-    // Only the frame something comes up: a bomb left alone stays up a while.
-    const up = state.activeHole !== -1;
+    // Only the frame a wave comes up.
+    const up = state.items.length > 0;
     const spawned = up && !wasUp;
     wasUp = up;
     if (!spawned) continue;
@@ -206,18 +208,26 @@ function checkSteps(w, spawnsWanted) {
     const nowShape = JSON.stringify(rowsOf(layout).map((r) => r.holes.length));
     if (nowShape !== shape) deals += 1;
     shape = nowShape;
-    const hole = layout.holes[state.activeHole];
+
+    const items = state.items.slice();
+    assert.ok(items.length === 2 || items.length === 3, `${items.length} up`);
+    assert.strictEqual(new Set(items.map((item) => item.type)).size, items.length, "no kind twice");
+    assert.strictEqual(new Set(items.map((item) => item.hole)).size, items.length, "no hole twice");
+    assert.ok(items.some((item) => item.type !== "bomb"), "always something to go for");
     if (last) {
       const from = layout.holes.reduce((a, b) =>
         (Math.hypot(b.cx - last.cx, b.cy - last.cy) < Math.hypot(a.cx - last.cx, a.cy - last.cy) ? b : a));
-      assert.ok(isStep(layout, from, hole), `${from.index} -> ${hole.index} on ${nowShape}`);
+      const steps = layout.holes.filter((h) => isStep(layout, from, h)).length;
+      const onSteps = items.filter((item) => isStep(layout, from, layout.holes[item.hole])).length;
+      assert.strictEqual(onSteps, Math.min(items.length, steps), `${from.index} -> ${items.map((i) => i.hole)} on ${nowShape}`);
     }
-    if (state.moleType !== "bomb") last = { cx: hole.cx, cy: hole.cy };
-    spawns += 1;
-    // A hat mole takes two whacks; a bomb is left alone.
-    for (let i = 0; i < 2 && state.activeHole !== -1 && state.moleType !== "bomb"; i += 1) {
-      w.handleGameClick(CANVAS, hole.cx, hole.cy);
-    }
+    waves += 1;
+
+    // Go for the mole, else the hat mole (two whacks).
+    const target = items.find((item) => item.type === "mole") || items.find((item) => item.type === "super");
+    const hole = layout.holes[target.hole];
+    for (let i = 0; i < 2 && state.items.length; i += 1) w.handleGameClick(CANVAS, hole.cx, hole.cy);
+    last = { cx: hole.cx, cy: hole.cy };
   }
   return deals;
 }
@@ -247,11 +257,11 @@ test("a level up deals a new random board once the hit has flashed, and the next
   const state = w.getGameState();
   let t = run(w, [], 60);
   state.score = 4; // one more for level 2
-  while (state.activeHole === -1) t = run(w, [], 1, t);
-  const hole = w.getGameGridLayout(CANVAS).holes[state.activeHole];
+  while (state.items.length === 0) t = run(w, [], 1, t);
+  const target = state.items.find((item) => item.type !== "bomb");
+  const hole = w.getGameGridLayout(CANVAS).holes[target.hole];
   w.performance.now = () => t;
-  while (state.activeHole !== -1 && state.moleType !== "bomb") w.handleGameClick(CANVAS, hole.cx, hole.cy);
-  if (state.moleType === "bomb") return; // a bomb came up: nothing to whack, try another seed
+  while (state.items.length) w.handleGameClick(CANVAS, hole.cx, hole.cy);
   assert.strictEqual(state.peakLevel, 2);
   assert.strictEqual(state.boardPending, true, "waits for the hit to finish flashing");
 
@@ -260,7 +270,7 @@ test("a level up deals a new random board once the hit has flashed, and the next
   assert.strictEqual(state.boardPending, false);
   assert.notDeepStrictEqual(rows, [3, 4, 2], "a new shape");
   assert.strictEqual(rows.length, 3);
-  assert.strictEqual(state.activeHole, -1);
+  assert.strictEqual(state.items.length, 0);
   assert.ok(state.nextSpawnAt >= t - 20 * FRAME_MS + 1000, "the next mole waits for the player to see it");
 });
 
@@ -315,8 +325,8 @@ test("only the circle scores, not the corners of the square around it", () => {
   w.setGameInputMode("mouse");
   w.resetGame();
   let t = 0;
-  while (w.getGameState().activeHole === -1) t = run(w, [], 1, t);
-  const hole = w.getGameGridLayout(CANVAS).holes[w.getGameState().activeHole];
+  while (w.getGameState().items.length === 0) t = run(w, [], 1, t);
+  const hole = w.getGameGridLayout(CANVAS).holes[w.getGameState().items[0].hole];
 
   assert.strictEqual(w.handleGameClick(CANVAS, hole.x + 2, hole.y + 2), false, "the square's corner");
   assert.strictEqual(w.getGameState().score, 0);
@@ -384,12 +394,12 @@ test("a round starts with a 3-2-1 countdown: no clock and no moles until Go", ()
   let t = run(w, [], 150); // 2.4 s
   assert.ok(state.countdownMs > 0, "still counting");
   assert.strictEqual(state.remainingMs, full, "the clock has not started");
-  assert.strictEqual(state.activeHole, -1, "no mole yet");
+  assert.strictEqual(state.items.length, 0, "no mole yet");
 
   t = run(w, [], 60, t); // past 3 s
   assert.strictEqual(state.countdownMs, 0);
   assert.ok(Number.isFinite(state.goAt), "Go");
-  while (state.activeHole === -1) t = run(w, [], 1, t);
+  while (state.items.length === 0) t = run(w, [], 1, t);
   assert.ok(t - state.goAt >= 500, "the first mole comes up after Go");
 });
 
@@ -456,4 +466,83 @@ test("each battery pack loses 1 % every 2 minutes of round played, and is kept a
   assert.deepStrictEqual(percents(w), [94, 97], "a new session carries on where the last left off");
   assert.deepStrictEqual(Array.from(w.setBatteryPercent(1, 100)), [100, 97], "and a pack can be charged again");
   assert.deepStrictEqual(percents(load()), [100, 97]);
+});
+
+// Starts a mouse round on the classic board and runs it to its first wave.
+function firstWave(settings = {}) {
+  const w = loadWindow();
+  w.setGameInputMode("mouse");
+  w.setGameSettings({ boardStyle: "classic", ...settings });
+  w.resetGame();
+  let t = 0;
+  while (w.getGameState().items.length === 0) t = run(w, [], 1, t);
+  return { w, t, state: w.getGameState(), layout: w.getGameGridLayout(CANVAS) };
+}
+
+test("waves are 2 or 3 things, all three kinds turning up, a pair more often", () => {
+  const sizes = { 2: 0, 3: 0 };
+  const kinds = new Set();
+  for (let i = 0; i < 200; i += 1) {
+    const { state } = firstWave();
+    sizes[state.items.length] += 1;
+    state.items.forEach((item) => kinds.add(item.type));
+  }
+  assert.strictEqual(sizes[2] + sizes[3], 200, "never 1, never more than 3");
+  assert.ok(sizes[2] > sizes[3] && sizes[3] > 20, JSON.stringify(sizes));
+  assert.deepStrictEqual([...kinds].sort(), ["bomb", "mole", "super"]);
+});
+
+test("test mode has no bombs: a mole and a hat mole", () => {
+  for (let i = 0; i < 30; i += 1) {
+    const { w, state } = firstWave();
+    w.testMode(true);
+    w.resetGame();
+    let t = 0;
+    while (state.items.length === 0) t = run(w, [], 1, t);
+    assert.strictEqual(JSON.stringify(state.items.map((item) => item.type).sort()), '["mole","super"]');
+  }
+});
+
+test("the first hit is the choice: the rest go back down, and a hat mole waits for its second", () => {
+  for (let i = 0; i < 40; i += 1) {
+    const { w, state, layout } = firstWave();
+    const target = state.items.find((item) => item.type !== "bomb");
+    const hole = layout.holes[target.hole];
+    assert.strictEqual(w.handleGameClick(CANVAS, hole.cx, hole.cy), true);
+    if (target.type === "super") {
+      assert.strictEqual(JSON.stringify(state.items.map((item) => item.hole)), `[${target.hole}]`, "only the hat mole is left");
+      assert.strictEqual(state.items[0].wounded, true);
+      w.handleGameClick(CANVAS, hole.cx, hole.cy);
+      assert.strictEqual(state.score, 3);
+    } else {
+      assert.strictEqual(state.score, 1);
+    }
+    assert.strictEqual(state.items.length, 0, "the wave is over");
+  }
+});
+
+test("hitting the bomb ends the wave too, with its penalty", () => {
+  for (let i = 0; i < 100; i += 1) {
+    const { w, state, layout } = firstWave();
+    const bomb = state.items.find((item) => item.type === "bomb");
+    if (!bomb) continue;
+    const livesBefore = state.lives;
+    const hole = layout.holes[bomb.hole];
+    w.handleGameClick(CANVAS, hole.cx, hole.cy);
+    assert.strictEqual(state.items.length, 0);
+    assert.strictEqual(state.lives, livesBefore - 1);
+    return;
+  }
+  assert.fail("no wave with a bomb in 100 rounds");
+});
+
+test("a wave left alone costs one life, however many moles were in it", () => {
+  for (let i = 0; i < 40; i += 1) {
+    let { w, t, state } = firstWave();
+    const livesBefore = state.lives;
+    const moles = state.items.filter((item) => item.type !== "bomb").length;
+    // Past every timer (12 s at level 1), but short of a second wave's.
+    t = run(w, [], Math.ceil(12500 / FRAME_MS), t);
+    assert.strictEqual(state.lives, livesBefore - 1, `${moles} mole(s) missed`);
+  }
 });

@@ -789,8 +789,8 @@ function sendGameStatus() {
     lives: state.lives,
     level: state.level,
     remainingMs: state.remainingMs,
-    activeHole: state.activeHole,
-    moleType: state.moleType,
+    // What is up, 2 or 3 at once: [{ hole, type }].
+    items: state.items.map((item) => ({ hole: item.hole, type: item.type })),
     remoteHole: state.remoteHole,
     cursor: roundOnScreen() ? window.getGameCursorStatus(c) : null,
     testMode: window.getGameSettings().testMode,
