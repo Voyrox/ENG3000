@@ -1234,6 +1234,14 @@ class TwoSensorGeometry(Geometry):
         self._raw: list = [None] * GRID_SIZE         # this update's distances as they arrived (channels())
         self._now_ms = -math.inf
         self._config: Optional[FilterConfig] = None
+        # Each node down (set_down()): kept across reset(), which a new round
+        # does, since a node that is down stays down.
+        self._down: list = [False] * GRID_SIZE
+
+    def set_down(self, down: Sequence[bool]) -> None:
+        """Which nodes are down - no node in the slot, or it went offline -
+        as nodeDown in game.js: a node that is down is lost (_lost())."""
+        self._down = [bool(d) for d in down]
 
     @property
     def method(self) -> str:
@@ -1352,7 +1360,10 @@ class TwoSensorGeometry(Geometry):
 
     def _lost(self, slot, config) -> bool:
         """This node's last lost_readings readings' scores (lost_score())
-        add up to 0 or less; never before it has had that many."""
+        add up to 0 or less; never before it has had that many. A node that
+        is down (set_down()) is lost, whatever it last said."""
+        if self._down[slot]:
+            return True
         log = self._state_log[slot]
         n = config.lost_readings
         if len(log) < n:
@@ -1364,7 +1375,7 @@ class TwoSensorGeometry(Geometry):
 
     def _nobody_found(self, config, area=None) -> bool:
         """bothNodesLost() in game.js: both nodes are lost (_lost()). A node
-        that sends no scan state never is. With Dynamic on, far priority's
+        that sends no scan state never is, unless it is down. With Dynamic on, far priority's
         position (_far_fix()) is someone on the board, however lost the nodes
         are."""
         left = self._lost(self.LEFT, config)

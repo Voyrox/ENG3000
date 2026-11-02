@@ -27,7 +27,7 @@
         <h2>Holes <small>green mole · blue hat mole · red bomb · cyan the sensors' cursor</small></h2>
         <div id="pad"></div>
         <div class="coord">
-            <div><span>Sensor (x, y) cm</span><b id="coordXY">--</b></div>
+            <div><span id="coordLabel">Sensor (x, y) cm</span><b id="coordXY">--</b></div>
             <div><span>Sensors</span><b id="coordState">--</b></div>
         </div>
         <div id="methodFixes" class="fixes"></div>
@@ -88,14 +88,61 @@
         <div class="row">
             <button id="deadZoneBtn" data-action="deadZone">Dead zone: on</button>
             <button id="holdTooCloseBtn" class="hold">Hold: too close</button>
+            <button id="holdOutOfBoundsBtn" class="hold">Hold: out of bounds</button>
             <button id="holdBuzzerBtn" class="hold">Hold: dead zone alarm</button>
         </div>
         <p class="note">Dead zone on: too close when a node's raw reading, along its servo line, is
             less than 10 cm out from the nodes (the 150 × 10 cm strip at the front of the grid):
             10 cm straight ahead, 29 cm with the servo turned 70°. Off: the raw reading under
             10 cm, whatever the angle. Hold the button to show the too-close screen; lift your
-            finger to go back. Hold: dead zone alarm sounds the buzzer on the nodes while your
+            finger to go back. Hold: out of bounds does the same for the game's Out of bounds
+            banner, in a round only (sensor or mouse), and the round waits while it is up.
+            Hold: dead zone alarm sounds the buzzer on the nodes while your
             finger is on it; lift it and the buzzer goes back to the sensors.</p>
+    </section>
+
+    <section>
+        <h2>Servo <small>hold a node's servo at an angle</small></h2>
+        <div class="row" id="servoTargets">
+            <button data-servo-target="left">Left</button>
+            <button data-servo-target="right">Right</button>
+            <button data-servo-target="both" class="selected">Both</button>
+        </div>
+        <div class="row">
+            <button id="servoLess" aria-label="Turn 5 degrees less">&minus;5°</button>
+            <b id="servoAngle" class="stepper">90°</b>
+            <button id="servoMore" aria-label="Turn 5 degrees more">+5°</button>
+        </div>
+        <input id="servoSlider" type="range" min="0" max="180" step="1" value="90" aria-label="Servo angle">
+        <div class="row">
+            <button id="servoCentre">Centre 90°</button>
+            <button id="servoScan">Scan</button>
+        </div>
+        <p class="note">Pick a node, then move the slider or press &minus;5° / +5° / Centre: its servo
+            turns there and the node reads at that angle only (90 straight out, more towards
+            screen-right). 3 s after you last touch it, or at once with Scan, it goes back to
+            tracking and sensing by itself. While the calibration screen is open every servo is
+            held at 90°. Left and right are the nodes' calibrated roles.</p>
+    </section>
+
+    <section>
+        <h2>Out of bounds <small>readings per node</small></h2>
+        <div class="row">
+            <button id="lostLess" aria-label="Fewer readings">&minus;</button>
+            <b id="lostReadings" class="stepper">--</b>
+            <button id="lostMore" aria-label="More readings">+</button>
+        </div>
+        <div class="coord">
+            <div><span>Left score</span><b id="lostScoreLeft">--</b></div>
+            <div><span>Right score</span><b id="lostScoreRight">--</b></div>
+        </div>
+        <div class="row">
+            <button id="farHalfBtn" data-action="farHalf">Far half: on</button>
+        </div>
+        <p class="note">Each node's last n readings score found +1, half 0, lost &minus;1. A node whose
+            readings add up to 0 or less is lost, and the game says Out of bounds while both are.
+            Far half on: a half reading (one of the node's two sensors has the player) that puts
+            them in the back row scores +1, as found does.</p>
     </section>
 
     <section>
@@ -128,26 +175,6 @@
             lines cross says the column - the centre (held 1 s), or at least 20 cm into a side column
             (MID, COL L, COL R). Lone node: when only one node is sure of the player, it places them on
             its own (L, R).</p>
-    </section>
-
-    <section>
-        <h2>Out of bounds <small>readings per node</small></h2>
-        <div class="row">
-            <button id="lostLess" aria-label="Fewer readings">&minus;</button>
-            <b id="lostReadings" class="stepper">--</b>
-            <button id="lostMore" aria-label="More readings">+</button>
-        </div>
-        <div class="coord">
-            <div><span>Left score</span><b id="lostScoreLeft">--</b></div>
-            <div><span>Right score</span><b id="lostScoreRight">--</b></div>
-        </div>
-        <div class="row">
-            <button id="farHalfBtn" data-action="farHalf">Far half: on</button>
-        </div>
-        <p class="note">Each node's last n readings score found +1, half 0, lost &minus;1. A node whose
-            readings add up to 0 or less is lost, and the game says Out of bounds while both are.
-            Far half on: a half reading (one of the node's two sensors has the player) that puts
-            them in the back row scores +1, as found does.</p>
     </section>
 
     <section>
@@ -374,6 +401,7 @@
         // on: true, re-sent like the pad's point so the game (or the node)
         // lets go if the phone goes quiet, then once with on: false.
         //   tooCloseHold - the too-close screen, through the game page
+        //   outOfBoundsHold - the game's Out of bounds banner, the same way
         //   buzzerHold   - the dead-zone buzzer, straight to the nodes
         function holdButton(btn, action) {
             let beat = null;
@@ -397,6 +425,75 @@
             btn.addEventListener("lostpointercapture", end);
         }
         holdButton($("holdTooCloseBtn"), "tooCloseHold");
+        holdButton($("holdOutOfBoundsBtn"), "outOfBoundsHold");
+
+        // The servo control: straight to the nodes (AIM / SCAN). The hold is
+        // re-sent every HEARTBEAT_MS while the servo is being controlled - a
+        // finger on the slider, or SERVO_IDLE_MS since the last touch - then
+        // let go, and the node goes back to tracking. The server lets go by
+        // itself 1 s after the last one, so a dropped phone cannot keep it.
+        const SERVO_IDLE_MS = 3000;
+        let servoTarget = "both";
+        let servoAngle = 90;
+        let servoSentAt = 0;
+        let servoPending = null;
+        let servoTouchedAt = 0;
+        let servoSliding = false;
+        let servoBeat = null;
+
+        const sendServoHold = () => {
+            servoSentAt = Date.now();
+            send({ action: "servo", target: servoTarget, angle: servoAngle });
+        };
+
+        function releaseServo() {
+            clearTimeout(servoPending);
+            clearInterval(servoBeat);
+            servoBeat = null;
+            servoSliding = false;
+            send({ action: "servo", target: servoTarget, scan: true });
+        }
+
+        function holdServo(angle) {
+            servoAngle = Math.min(180, Math.max(0, Math.round(angle)));
+            servoTouchedAt = Date.now();
+            $("servoAngle").textContent = `${servoAngle}°`;
+            $("servoSlider").value = servoAngle;
+            // The slider sends as it moves, at most every 100 ms, and always
+            // its last angle.
+            clearTimeout(servoPending);
+            const wait = 100 - (Date.now() - servoSentAt);
+            servoPending = setTimeout(sendServoHold, Math.max(0, wait));
+            if (servoBeat === null) {
+                servoBeat = setInterval(() => {
+                    if (!servoSliding && Date.now() - servoTouchedAt > SERVO_IDLE_MS) releaseServo();
+                    else sendServoHold();
+                }, HEARTBEAT_MS);
+            }
+        }
+
+        document.querySelectorAll("[data-servo-target]").forEach((btn) => {
+            btn.addEventListener("click", () => {
+                // The old node is let go: it goes back to tracking.
+                if (servoBeat !== null) releaseServo();
+                servoTarget = btn.dataset.servoTarget;
+                document.querySelectorAll("[data-servo-target]").forEach((other) => {
+                    other.classList.toggle("selected", other === btn);
+                });
+            });
+        });
+        $("servoSlider").addEventListener("input", (e) => holdServo(Number(e.target.value)));
+        $("servoSlider").addEventListener("pointerdown", () => { servoSliding = true; });
+        ["pointerup", "pointercancel", "change"].forEach((type) => {
+            $("servoSlider").addEventListener(type, () => {
+                servoSliding = false;
+                servoTouchedAt = Date.now();
+            });
+        });
+        $("servoLess").addEventListener("click", () => holdServo(servoAngle - 5));
+        $("servoMore").addEventListener("click", () => holdServo(servoAngle + 5));
+        $("servoCentre").addEventListener("click", () => holdServo(90));
+        $("servoScan").addEventListener("click", releaseServo);
         holdButton($("holdBuzzerBtn"), "buzzerHold");
 
         // Dynamic's rule switches: each press flips one (on until the game
@@ -635,6 +732,15 @@
             gameCursor.classList.toggle("held", Boolean(sensor && sensor.held));
             renderRings(sensor);
             renderMethodFixes(sensor);
+            // A finger on the pad: where it puts the player, in the same cm
+            // as the sensors, in either mode.
+            const pad = cursor && cursor.pad;
+            $("coordLabel").textContent = pad ? "Phone pad (x, y) cm" : "Sensor (x, y) cm";
+            if (pad) {
+                $("coordXY").textContent = `(${cm(pad.xCm)}, ${cm(pad.yCm)})`;
+                $("coordState").textContent = "phone pad";
+                return;
+            }
             if (!sensor) {
                 $("coordXY").textContent = "--";
                 $("coordState").textContent = cursor ? `${game.mode} input` : "--";
@@ -959,6 +1065,7 @@
     .row button { flex: 1; }
     .row + .row { margin-top: 8px; }
     .stepper { flex: 0 0 64px; align-self: center; text-align: center; font-size: 22px; }
+    #servoSlider { width: 100%; margin: 14px 0 6px; accent-color: #facc15; }
 
     .grid2 {
         display: grid;

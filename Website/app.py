@@ -1,6 +1,7 @@
 import asyncio
 from collections import deque
 import json
+import math
 import os
 import socket
 import threading
@@ -113,13 +114,14 @@ CONTROL_ENABLED = os.environ.get("CON") == "1"
 # "cellLock" turns the cell lock on or off (the game's cursor, and the hole it
 # scores in, keep to the voted cell).
 # "tooCloseHold" is the hold button: the too-close screen while it is down,
-# re-sent every 250 ms while held.
+# re-sent every 250 ms while held. "outOfBoundsHold" is the same for the
+# game's Out of bounds banner.
 CONTROL_ACTIONS = {"point", "release", "start", "mode", "pause", "resume", "restart", "menu", "testMode",
                    "position", "compare", "lostReadings", "kalman", "angleLimit", "triAimTolerance",
                    "dynamicRules", "confidenceLevel", "farHalf", "deadZone", "cellLock", "cellDecision", "trackMoving", "cellConfidence",
-                   "tooCloseHold", "alert"}
+                   "tooCloseHold", "outOfBoundsHold", "alert"}
 # Sent many times a second while a finger is down, so not printed.
-QUIET_CONTROL_ACTIONS = {"point", "release", "tooCloseHold"}
+QUIET_CONTROL_ACTIONS = {"point", "release", "tooCloseHold", "outOfBoundsHold"}
 # Every raw node reading to logs/raw-*.csv, for the bench noise test
 # (tools/bench_noise.py). Off unless started with REC=1; see sessionRecorder.py.
 recorder = SessionRecorder.from_env(os.environ)
@@ -463,7 +465,7 @@ def update_node(node_id, message):
                         room=room)
         search_look = search.record(node_id, node_roles.get(node_id), parse_scan_state(payload),
                                     parse_distance_cm(payload), parse_angle_deg(payload), now,
-                                    room=room, far_hold=nodes_far["hold"], held=nodes_aim_held,
+                                    room=room, far_hold=nodes_far["hold"], held=node_servo_held(node_id),
                                     echo_cm=parse_nearest_echo_cm(payload))
         looks = handover.commands(dict(node_roles),
                                   {other_id: other["has_turn"] for other_id, other in nodes.items()},
@@ -570,6 +572,9 @@ def parse_handshake(raw_line):
 def cleanup_stale_nodes():
     while True:
         time.sleep(1)
+        # The control panel's servo holds that are no longer being renewed.
+        for node_id in release_stale_servo_holds():
+            print(f"Servo: node {node_id} back to scanning")
         cutoff = time.monotonic() - NODE_STALE_SECONDS
         stale_ids = []
         with state_lock:
@@ -639,21 +644,94 @@ AIM_ANGLE_DEG = 90
 nodes_aim_held = False
 aim_requesters = set()          # the game pages on the calibration screen
 aim_lock = threading.Lock()     # one hold/release decided and sent at a time
+# The control panel's servo control: node id -> (the angle its servo is held
+# at, time.monotonic() of the last command). The panel re-sends the hold every
+# 250 ms while it is being controlled; a hold not renewed for
+# SERVO_HELD_TIMEOUT_S lets go (release_stale_servo_holds()), so the node goes
+# back to tracking and sensing by itself, also if the phone drops.
+# Calibration's hold comes first; let go, a node still held here goes back to
+# its angle rather than scanning.
+servo_holds = {}
+SERVO_TARGETS = {"left": "LEFT", "right": "RIGHT", "both": None}
+SERVO_HELD_TIMEOUT_S = 1.0
 
 
-def aim_command():
-    return f"AIM {AIM_ANGLE_DEG}" if nodes_aim_held else "SCAN"
+def aim_command(node_id=None):
+    if nodes_aim_held:
+        return f"AIM {AIM_ANGLE_DEG}"
+    if node_id in servo_holds:
+        return f"AIM {servo_holds[node_id][0]}"
+    return "SCAN"
+
+
+def node_servo_held(node_id):
+    """Whether this node's servo is held, by calibration or the control panel."""
+    return nodes_aim_held or node_id in servo_holds
 
 
 def set_nodes_aim(hold):
-    """Hold every connected node's servo straight, or let them all scan."""
+    """Hold every connected node's servo straight, or let them all go back to
+    scanning, or to the angle the control panel holds them at."""
     global nodes_aim_held
     with state_lock:
         nodes_aim_held = bool(hold)
-        command = aim_command()
         node_ids = [node_id for node_id, node in nodes.items() if node.get("conn") is not None]
-    for node_id in node_ids:
+        commands = [(node_id, aim_command(node_id)) for node_id in node_ids]
+    for node_id, command in commands:
         send_command(node_id, command)
+
+
+def set_nodes_servo(target, angle):
+    """The control panel's servo control: hold the left node's servo, the
+    right one's or both ("left", "right", "both") at angle degrees (0-180),
+    or with angle None hand them back to scanning. Left and right are the
+    calibrated roles; both is every connected node. Returns whether it was
+    taken: a bad target or angle, or no node with that role, is ignored."""
+    if target not in SERVO_TARGETS:
+        print(f"Ignored bad servo target: {target!r}")
+        return False
+    if angle is not None:
+        if isinstance(angle, bool) or not isinstance(angle, (int, float)) or not math.isfinite(angle):
+            print(f"Ignored bad servo angle: {angle!r}")
+            return False
+        angle = int(round(min(180, max(0, angle))))
+    role = SERVO_TARGETS[target]
+    with state_lock:
+        node_ids = [node_id for node_id, node in nodes.items()
+                    if node.get("conn") is not None and (role is None or node_roles.get(node_id) == role)]
+        if not node_ids:
+            print(f"Servo: no {target} node connected")
+            return False
+        now = time.monotonic()
+        # A heartbeat at the same angle renews the hold without a new AIM.
+        changed = [node_id for node_id in node_ids
+                   if (servo_holds.get(node_id) or (None,))[0] != angle]
+        for node_id in node_ids:
+            if angle is None:
+                servo_holds.pop(node_id, None)
+            else:
+                servo_holds[node_id] = (angle, now)
+        commands = [(node_id, aim_command(node_id)) for node_id in changed]
+    for node_id, command in commands:
+        send_command(node_id, command)
+    return True
+
+
+def release_stale_servo_holds(now=None):
+    """Let go of every servo hold the control panel has not renewed for
+    SERVO_HELD_TIMEOUT_S: the node goes back to scanning (or to calibration's
+    hold). Returns the node ids let go."""
+    now = time.monotonic() if now is None else now
+    with state_lock:
+        stale = [node_id for node_id, (_, at) in servo_holds.items()
+                 if now - at > SERVO_HELD_TIMEOUT_S]
+        for node_id in stale:
+            del servo_holds[node_id]
+        commands = [(node_id, aim_command(node_id)) for node_id in stale
+                    if nodes.get(node_id, {}).get("conn") is not None]
+    for node_id, command in commands:
+        send_command(node_id, command)
+    return stale
 
 
 def request_nodes_aim(requester, hold):
@@ -672,10 +750,11 @@ def request_nodes_aim(requester, hold):
 
 
 def send_node_aim(node_id):
-    """Tell a node that has just connected to hold straight or to scan. It
-    boots holding, so it scans only once told to."""
+    """Tell a node that has just connected to hold straight, hold where the
+    control panel put it, or scan. It boots holding, so it scans only once
+    told to."""
     with state_lock:
-        command = aim_command()
+        command = aim_command(node_id)
     send_command(node_id, command)
 
 
@@ -1092,8 +1171,8 @@ def handover_message():
 async def control_handler(websocket):
     """Phone control panel: relays commands to every game browser. The empty
     room ("room": learn or forget) and the Far hold and Far steer switches
-    ("farHold", "farSteer") and the buzzer hold button ("buzzerHold") go
-    straight to the nodes instead, so they work with no game page open, and the Handover, Search and Heading switches
+    ("farHold", "farSteer"), the buzzer hold button ("buzzerHold") and the
+    servo control ("servo") go straight to the nodes instead, so they work with no game page open, and the Handover, Search and Heading switches
     ("handover", "search", "searchHeading") to the server."""
     CONTROL_CONNECTIONS.add(websocket)
     print(f"Control panel connected from {websocket.remote_address}")
@@ -1126,6 +1205,14 @@ async def control_handler(websocket):
                 switch = "hold" if event["action"] == "farHold" else "steer"
                 await asyncio.to_thread(set_nodes_far, switch, event.get("enabled"))
                 broadcast(CONTROL_CONNECTIONS.copy(), json.dumps(far_message()))
+                continue
+            if event.get("action") == "servo":
+                # { target: "left" | "right" | "both", angle: 0-180 } holds,
+                # re-sent every 250 ms while it is being controlled, so not
+                # printed; { target, scan: true } hands back to scanning.
+                angle = None if event.get("scan") is True else event.get("angle")
+                if angle is not None or event.get("scan") is True:
+                    await asyncio.to_thread(set_nodes_servo, event.get("target"), angle)
                 continue
             if event.get("action") == "buzzerHold":
                 # Sent 4 times a second while held, so only the changes print.

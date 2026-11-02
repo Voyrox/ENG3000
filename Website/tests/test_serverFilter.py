@@ -198,6 +198,31 @@ class StageTwoSensorRig(unittest.TestCase):
         self.assertAlmostEqual(result.x_cm, 125.0 - 0.0, places=6)
         self.assertAlmostEqual(result.y_cm, 80.0 + BODY_RADIUS_CM, places=6)
 
+    def test_with_one_node_offline_the_other_alone_says_out_of_bounds(self):
+        stage = ServerFilterStage()
+        stage.assign_slots([LEFT, None, RIGHT])
+        n = stage.pipeline.config.lost_readings
+        t = 0
+        # Both find the player; then the right node goes offline still
+        # finding them, and the left one loses them.
+        for _ in range(n):
+            t += STEP_MS
+            stage.on_reading(LEFT, 60.0, t, angle_deg=90, scan_state=0)
+            t += STEP_MS
+            stage.on_reading(RIGHT, 60.0, t, angle_deg=90, scan_state=0)
+        stage.on_missing(RIGHT)
+        for _ in range(n):
+            t += STEP_MS
+            result = stage.on_reading(LEFT, -1.0, t, angle_deg=90, scan_state=2)
+        self.assertEqual(result.status, "out-of-bounds")
+        # Back online and finding them: no longer lost.
+        for _ in range(n):
+            t += STEP_MS
+            stage.on_reading(RIGHT, 60.0, t, angle_deg=90, scan_state=0)
+            t += STEP_MS
+            result = stage.on_reading(LEFT, -1.0, t, angle_deg=90, scan_state=2)
+        self.assertNotEqual(result.status, "out-of-bounds")
+
     def test_the_lost_readings_can_be_set(self):
         stage = ServerFilterStage()
         stage.set_lost_readings(12)

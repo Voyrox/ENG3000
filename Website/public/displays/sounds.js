@@ -10,6 +10,12 @@
 //                                  too-close tone plays through it as well)
 //   window.GameSounds.unlock()   - resume audio after a user gesture
 //
+// The one recording is the background music (GameMusic below), which loops
+// while a round is played.
+//
+//   window.GameMusic.sync(on)    - play (on) or pause; call on every draw
+//   window.GameMusic.restart()   - back to the top, for a new round
+//
 // Browsers only start audio after the page has been clicked or a key
 // pressed; the first one unlocks it (see the listeners at the bottom).
 
@@ -195,7 +201,56 @@
 
   window.GameSounds = { play, context, unlock, names: Object.keys(SOUNDS) };
 
+  // --- Background music ---------------------------------------------------------
+  // One looping track, played while canvas.js says so (sync(true): a round is
+  // on screen and playing, and the Options screen's Music switch is on), at
+  // the Music volume. Paused, not stopped, so the pause menu picks up where it
+  // left off; restart() puts it back to the top for a new round.
+  const MUSIC_SRC = "/static/sounds/minigame.mp3";
+  let music = null;
+  let musicWanted = false;
+
+  function musicElement() {
+    if (!music && typeof Audio !== "undefined") {
+      music = new Audio(MUSIC_SRC);
+      music.loop = true;
+      music.preload = "auto";
+    }
+    return music;
+  }
+
+  function musicVolume() {
+    const settings = window.getGameSettings ? window.getGameSettings() : {};
+    return Number.isFinite(settings.musicVolume) ? Math.min(1, Math.max(0, settings.musicVolume)) : 0.5;
+  }
+
+  function syncMusic(on) {
+    musicWanted = Boolean(on);
+    const el = musicElement();
+    if (!el) return;
+    el.volume = musicVolume();
+    if (musicWanted && el.paused) {
+      // Refused until the page has had a click or key press (a round started
+      // from the phone, say); the next one tries again (startMusicOnGesture).
+      el.play().catch(() => {});
+    } else if (!musicWanted && !el.paused) {
+      el.pause();
+    }
+  }
+
+  function restartMusic() {
+    const el = musicElement();
+    if (el) el.currentTime = 0;
+  }
+
+  function startMusicOnGesture() {
+    if (musicWanted) syncMusic(true);
+  }
+
+  window.GameMusic = { sync: syncMusic, restart: restartMusic };
+
   ["pointerdown", "keydown", "touchstart"].forEach((type) => {
     document.addEventListener(type, unlock, { passive: true });
+    document.addEventListener(type, startMusicOnGesture, { passive: true });
   });
 })();

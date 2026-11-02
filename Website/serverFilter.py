@@ -75,6 +75,7 @@ class ServerFilterStage:
         self._latest_angle: dict = {}                     # node id -> servo angle or None
         self._latest_state: dict = {}                     # node id -> scan state or None
         self._confidence: dict = {}                       # node id -> confidence 0-1 or None
+        self._missing: set = set()                        # node ids that went offline (on_missing())
         self.latest: Optional[FilteredCoordinate] = None
         self.predicted_cm: list = [None] * GRID_SIZE      # L, C, R; cm or None
 
@@ -186,7 +187,9 @@ class ServerFilterStage:
 
     def on_missing(self, node_id) -> None:
         """A node went offline: its channel has no reading from now on, and
-        its track is dropped rather than extrapolated."""
+        its track is dropped rather than extrapolated, and it counts as lost
+        towards Out of bounds until it reads again."""
+        self._missing.add(node_id)
         self._latest_cm.pop(node_id, None)
         self._latest_angle.pop(node_id, None)
         self._latest_state.pop(node_id, None)
@@ -210,6 +213,7 @@ class ServerFilterStage:
         Returns None, and runs nothing, if the node is not assigned to a slot."""
         if node_id not in self.sensor_slots:
             return None
+        self._missing.discard(node_id)
         if node_id in self._latest_angle and self._latest_angle[node_id] != angle_deg:
             channel = self.sensor_slots.index(node_id)
             self.pipeline.reset_channel(channel)
@@ -233,6 +237,11 @@ class ServerFilterStage:
                  for i, slot in enumerate(self.sensor_slots)]
         # Only the reporting node was heard: its scan state counts once.
         heard = [slot == node_id for slot in self.sensor_slots]
+        # A slot with no node, or one that went offline, is down: lost
+        # towards Out of bounds, so the other node alone says it.
+        set_down = getattr(self.pipeline.geometry, "set_down", None)
+        if set_down is not None:
+            set_down([slot is None or slot in self._missing for slot in self.sensor_slots])
         self.latest = self.pipeline.update(sample, now_ms, fresh=fresh, heard=heard)
 
         # Trackers: the same raw reading, on the reporting channel only (a

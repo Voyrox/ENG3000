@@ -232,7 +232,9 @@ test("while the pad has the cursor the sensors cannot hold the round or put up a
   w.setGameInputMode("sensor");
   w.resetGame();
   w.getGameState().countdownMs = 0; // straight into the round, past the 3-2-1
-  const offline = [1, 2, 3].map((id) => ({ id, online: false, latest: null }));
+  // Both nodes up, and both lost: Out of bounds once they have had
+  // lostReadings readings.
+  const lost = [1, 2, 3].map((id) => ({ id, online: true, latest: JSON.stringify({ avg: -1, angle: 90, scanState: 2 }) }));
   // One clock across every step (run() starts its own again at 0), so the
   // round clock only ever moves forward.
   let t = 0;
@@ -241,26 +243,26 @@ test("while the pad has the cursor the sensors cannot hold the round or put up a
       t += FRAME_MS;
       w.performance.now = () => t;
       w.markSensorFrame();
-      w.updateGame(t, CANVAS, offline);
+      w.updateGame(t, CANVAS, lost);
     }
   };
   step(30);
   const state = w.getGameState();
   const held = state.remainingMs;
   step(30);
-  assert.strictEqual(state.remainingMs, held, "Sensors offline holds the round");
-  assert.ok(textsDrawn(w).includes("Sensors offline"));
+  assert.strictEqual(state.remainingMs, held, "Out of bounds holds the round");
+  assert.ok(textsDrawn(w).includes("Out of bounds"));
 
   w.setRemotePoint(0.5, 0.5);
   step(30);
   assert.strictEqual(state.remainingMs, held - 30 * FRAME_MS, "the round runs while the phone places the player");
-  assert.strictEqual(state.sensor.status, "offline", "the sensors still say so");
-  assert.ok(!textsDrawn(w).includes("Sensors offline"), "but the overlay is not drawn");
-  assert.ok(textsDrawn(w).includes("OFFLINE"), "the sensor panel shows it instead");
+  assert.strictEqual(state.sensor.status, "out-of-bounds", "the sensors still say so");
+  assert.ok(!textsDrawn(w).includes("Out of bounds"), "but the overlay is not drawn");
+  assert.ok(textsDrawn(w).some((text) => text.includes("PHONE PAD")), "the sensor panel says the pad has them");
   assert.strictEqual(w.isGameAlertActive(), false);
 
   w.releaseRemotePoint();
-  assert.ok(textsDrawn(w).includes("Sensors offline"));
+  assert.ok(textsDrawn(w).includes("Out of bounds"));
 });
 
 test("the pad over a mouse round hands the mouse's cursor back, and the old Remote mode is the sensors", () => {
@@ -429,7 +431,7 @@ test("off the side of the board, found: the edge square, never Out of bounds", (
   assert.strictEqual(w.getGameState().sensor.status, "ok");
 });
 
-test("Sensors offline when neither node sends anything, never Out of bounds", () => {
+test("both nodes down: the round goes over to the mouse until one is back", () => {
   const w = loadWindow();
   w.setGameInputMode("sensor");
   w.resetGame();
@@ -455,11 +457,56 @@ test("Sensors offline when neither node sends anything, never Out of bounds", ()
   // Quiet for less than offlineMs: the last square is ridden out.
   const quiet = step(nodes, offlineMs - 100, false);
   assert.strictEqual(quiet.status, "ok");
-  assert.strictEqual(step(nodes, 200, false).status, "offline");
-  assert.strictEqual(step(nodes, 500, true).status, "ok", "back as soon as they send again");
-  // The server marking both nodes offline says so at once.
+  assert.strictEqual(w.getGameInputMode(), "sensor");
+  step(nodes, 200, false);
+  assert.strictEqual(w.getGameInputMode(), "mouse", "quiet for offlineMs: the mouse");
+  assert.strictEqual(w.isSensorsDownMouse(), true);
+  assert.ok(!textsDrawn(w).some((text) => /offline/i.test(text)), "with nothing on screen to say so");
+  step(nodes, FRAME_MS, true);
+  assert.strictEqual(w.getGameInputMode(), "sensor", "back as soon as they send again");
+  assert.strictEqual(step(nodes, 1000, true).status, "ok");
+  // The server marking both nodes offline switches at once.
   nodes.forEach((node) => { node.online = false; });
-  assert.strictEqual(step(nodes, FRAME_MS, false).status, "offline");
+  step(nodes, FRAME_MS, false);
+  assert.strictEqual(w.getGameInputMode(), "mouse");
+  // A mode picked on purpose stays, whatever the nodes do.
+  w.setGameInputMode("mouse");
+  nodes.forEach((node) => { node.online = true; });
+  step(nodes, 1000, true);
+  assert.strictEqual(w.getGameInputMode(), "mouse");
+});
+
+test("one node down: the other plays on, says Out of bounds alone, and the game says which is down", () => {
+  const w = loadWindow();
+  w.setGameInputMode("sensor");
+  w.resetGame();
+  w.getGameState().countdownMs = 0;
+  let t = 0;
+  const step = (nodes, frames) => {
+    for (let i = 0; i < frames; i += 1) {
+      t += FRAME_MS;
+      w.performance.now = () => t;
+      w.markSensorFrame();
+      w.updateGame(t, CANVAS, nodes);
+    }
+    return w.getGameState().sensor;
+  };
+  const nodes = scannersSeeing(40, 80);
+  assert.strictEqual(step(nodes, 120).status, "ok");
+  // The right node finding the player, then going offline mid-round.
+  nodes[2] = { id: 3, online: false, latest: null };
+  assert.strictEqual(step(nodes, 60).status, "ok", "the left node plays on");
+  assert.strictEqual(w.getGameInputMode(), "sensor");
+  assert.ok(textsDrawn(w).includes("Right node offline - playing on the left node"));
+  w.setRemotePoint(0.5, 0.5);
+  step(nodes, 2);
+  assert.ok(!textsDrawn(w).some((text) => /offline/i.test(text)), "nothing while the phone pad has the cursor");
+  w.releaseRemotePoint();
+  // The player leaves: the left node alone says Out of bounds, however the
+  // right node last saw them.
+  nodes[0] = { id: 1, online: true, latest: JSON.stringify({ avg: -1, angle: 90, scanState: 2 }) };
+  const lostReadings = w.getLostReadings();
+  assert.strictEqual(step(nodes, lostReadings + 5).status, "out-of-bounds");
 });
 
 test("a long run of unusable readings is ridden out on the last square", () => {
@@ -1070,4 +1117,28 @@ test("far half: half readings in the back row keep a player in play", () => {
   near.resetGame();
   run(near, half(75, 50), 120);
   assert.strictEqual(near.getGameState().sensor.status, "out-of-bounds");
+});
+
+test("the phone pad's point is in the sensors' cm: the panel, the phone and the stats say where it is", () => {
+  const w = loadWindow();
+  w.setGameInputMode("sensor");
+  w.resetGame();
+  w.getGameState().countdownMs = 0;
+  run(w, scannersSeeing(25, 40), 60);
+  // The pad on the centre hole of the board (column 1, middle row): the
+  // middle of the play area, 75 cm across and half way between 10 and 160 cm.
+  const layout = w.getGameGridLayout(CANVAS);
+  const centre = layout.holes.find((h) => h.index === 4);
+  w.setRemotePoint((centre.cx - layout.gridLeft) / layout.gridSize, (centre.cy - layout.gridTop) / layout.gridSize);
+  run(w, scannersSeeing(25, 40), 60);
+  const status = w.getGameCursorStatus(CANVAS);
+  assert.ok(Math.abs(status.pad.xCm - 75) < 0.5, `x ${status.pad.xCm}`);
+  assert.ok(Math.abs(status.pad.yCm - 85) < 0.5, `y ${status.pad.yCm}`);
+  assert.strictEqual(status.pad.gx, 1);
+  assert.strictEqual(status.pad.gy, 1);
+  assert.ok(status.sensor.xCm < 50, "the sensors' own position is still theirs");
+  assert.ok(textsDrawn(w).some((text) => text.includes("x 75.0  y 85.0 cm  (phone pad)")));
+
+  w.releaseRemotePoint();
+  assert.strictEqual(w.getGameCursorStatus(CANVAS).pad, null, "lifted: no pad position");
 });

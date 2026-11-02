@@ -13,6 +13,7 @@
 //   window.isGameAlertActive()                  - drive the full-screen alert
 //   window.getGameAlertInfo()                   - { active, distanceCm }
 //   window.setAlertHeld(on) / window.isAlertHeld() - the control panel's held alert
+//   window.setOutOfBoundsHeld(on)               - the control panel's held Out of bounds banner
 //   window.setDeadZone(on) / window.getDeadZone()   - too close by depth, or by the raw reading
 //   window.setCellLock(on) / window.getCellLock()   - the drawn cursor and its hits keep to the voted cell
 //   window.setCellDecision(on) / window.getCellDecision() - the cell decision, or the older vote
@@ -28,6 +29,7 @@
 //   window.getGameState()                       - read-only peek at state (score/level/etc)
 //   window.getGameCursorStatus(canvas)          - the cursor and sensor (x, y) for the phone panel
 //   window.setServerFilteringActive(active)     - the server has SERVER_FILTERING on
+//   window.getBatteryPercents() / window.setBatteryPercent(pack, pct) - the two (simulated) battery packs
 //   window.setServerCoordinate(coordinate)      - latest filtered coordinate from the server
 //   window.setRemotePoint(nx, ny) / window.releaseRemotePoint() - the phone pad's override
 //
@@ -271,10 +273,12 @@
     cellConfidenceHalfLifeS: 30,
     cellConfidenceOtherHalfLifeS: 5,
     cellConfidenceFirstCell: 0.5,
-    // Neither node has sent a new reading for this long (ms), or the server
-    // says both are offline: the game says Sensors offline and the round
-    // waits. Unusable readings are otherwise ridden out on the last good
-    // square for as long as they last (updateSensorCursor()).
+    // A node that has sent no new reading for this long (ms), or that the
+    // server says is offline, is down. One down: the round plays on the other
+    // node, which alone says Out of bounds, and the game says which is down.
+    // Both down: a sensor round switches to the mouse and the phone pad until
+    // one is back (updateGame()), with nothing on screen to say so. Unusable readings are otherwise ridden out
+    // on the last good square for as long as they last (updateSensorCursor()).
     offlineMs: 5000,
     // The Kalman switch (the control panel's Kalman button, setKalman();
     // Aaron, 5 Oct). false turns off both Kalman filters: each sensor's
@@ -584,6 +588,10 @@
     durationMs: GAME_DURATION_MS,
     startingLives: DEFAULT_LIVES,
     soundEnabled: true,
+    // The background music (GameMusic in sounds.js): on or off, and its volume,
+    // one of MUSIC_VOLUME_OPTIONS. Kept in this browser (MUSIC_KEY).
+    musicEnabled: true,
+    musicVolume: 0.5,
     // Test mode: no bombs spawn and lives are never lost, so a run can be used
     // to exercise the sensor pipeline without the round ending underneath you.
     testMode: false,
@@ -599,12 +607,32 @@
   // The Pulses button steps through these: off, 2, 3.
   const PULSE_COUNT_OPTIONS = [1, 2, 3];
 
+  // The Options screen's Music volume steps.
+  const MUSIC_VOLUME_OPTIONS = [0.25, 0.5, 1];
+  window.MUSIC_VOLUME_OPTIONS = MUSIC_VOLUME_OPTIONS;
+  const MUSIC_KEY = "eng3000.music";
+  try {
+    const saved = JSON.parse(window.localStorage.getItem(MUSIC_KEY));
+    if (saved && typeof saved.enabled === "boolean") settings.musicEnabled = saved.enabled;
+    if (saved && MUSIC_VOLUME_OPTIONS.includes(saved.volume)) settings.musicVolume = saved.volume;
+  } catch (err) {
+    // Storage blocked or nothing saved: music on, at half volume.
+  }
+
   window.getGameSettings = function getGameSettings() {
     return { ...settings };
   };
 
   window.setGameSettings = function setGameSettings(partial) {
     Object.assign(settings, partial);
+    if ("musicEnabled" in partial || "musicVolume" in partial) {
+      try {
+        window.localStorage.setItem(MUSIC_KEY,
+          JSON.stringify({ enabled: settings.musicEnabled, volume: settings.musicVolume }));
+      } catch (err) {
+        // Not kept, but still applied for this page.
+      }
+    }
   };
 
   // Console shortcut: testMode() toggles, testMode(true/false) sets.
@@ -1199,6 +1227,7 @@
     remotePos: null, // smoothed copy of remoteTarget, eased every frame
     remoteLastFrame: null,
     remoteHole: -1, // hole the smoothed cursor is over, mirrored back to the phone
+    remoteCm: null, // { x, y, gx, gy }: where the pad puts the player, in play-area cm, and its cell
     sensor: emptySensorState(),
     score: 0,
     level: 1,
@@ -1531,6 +1560,7 @@
     // "remote" was a mode before the pad became an override; a /control page
     // from then still asks for it, and gets the sensors with the pad on top.
     gameState.inputMode = mode === "sensor" || mode === "remote" ? "sensor" : "mouse";
+    sensorsDownMouse = false;
     // Drop any stale cursor so the modes never inherit each other's position.
     gameState.cursor = { x: null, y: null, inBounds: true };
     sensorCursor = { x: null, y: null, inBounds: true };
@@ -1538,6 +1568,29 @@
     clearRemote();
     gameState.sensor = emptySensorState();
     resetSensorFilters();
+  };
+
+  // Both nodes down (rigIsOffline()): a sensor round goes over to the mouse,
+  // with the phone pad on top as ever, rather than waiting on Sensors
+  // offline; once either node sends again it is back on the sensors. Only a
+  // switch made here is undone here: a mode picked on purpose stays.
+  let sensorsDownMouse = false;
+
+  function switchOnSensorsDown(orderedNodes) {
+    const list = Array.isArray(orderedNodes) ? orderedNodes : [];
+    if (gameState.inputMode === "sensor" && rigIsOffline(list, performance.now())) {
+      window.setGameInputMode("mouse");
+      sensorsDownMouse = true;
+      console.info("[game] Both nodes are down: mouse and phone pad until one is back");
+    } else if (sensorsDownMouse && !rigIsOffline(list, performance.now())) {
+      window.setGameInputMode("sensor");
+      console.info("[game] A node is back: sensors again");
+    }
+  }
+
+  // The mouse is in because both nodes went down (switchOnSensorsDown()).
+  window.isSensorsDownMouse = function isSensorsDownMouse() {
+    return sensorsDownMouse;
   };
 
   window.getGameInputMode = function getGameInputMode() {
@@ -1587,6 +1640,16 @@
     return alertHeld;
   };
 
+  // The control panel's "Hold: out of bounds" button: while a finger is on
+  // it, a round shows the Out of bounds banner and waits, in any input mode,
+  // whatever the sensors say; lifting the finger hands back to them.
+  let outOfBoundsHeld = false;
+
+  window.setOutOfBoundsHeld = function setOutOfBoundsHeld(on) {
+    outOfBoundsHeld = Boolean(on);
+    return outOfBoundsHeld;
+  };
+
   window.getGameAlertInfo = function getGameAlertInfo() {
     return {
       active: window.isGameAlertActive(),
@@ -1617,6 +1680,7 @@
   // [left, centre, right] in calibration slot order.
   window.updateGame = function updateGame(now, canvas, orderedNodes) {
     updateRoomStatus(orderedNodes);
+    switchOnSensorsDown(orderedNodes);
     if (gameState.inputMode === "sensor" && canvas) {
       // The sensors move their own cursor, even while the phone pad has the
       // one drawn, so lifting the finger hands back a cursor that kept up.
@@ -1664,6 +1728,7 @@
     }
 
     roundStats()?.onTick(elapsed, statsFrame(canvas));
+    drainBattery(elapsed);
 
     // Hold the round while the player is too close, out of bounds, or invisible
     // to the sensors, or while the control panel holds the alert up. Advancing
@@ -1758,7 +1823,15 @@
     let positionCm = null;
     let onBoard = false;
 
-    if (sensorMode) {
+    const pad = gameState.remoteActive ? gameState.remoteCm : null;
+    if (pad) {
+      // The phone pad places the player, in either mode: its point, in the
+      // same cm as the sensors', and the hole under it, which is the one
+      // that scores.
+      cell = gameState.remoteHole >= 0 ? gameState.remoteHole : null;
+      positionCm = { x: pad.x, y: pad.y };
+      onBoard = true;
+    } else if (sensorMode) {
       if (Number.isInteger(sensor.gx) && Number.isInteger(sensor.gy)) cell = holeForCell(sensor.gx, sensor.gy);
       const live = sensor.status === "ok" && !sensor.held;
       if (live && Number.isFinite(sensor.xCm) && Number.isFinite(sensor.yCm)) {
@@ -1780,8 +1853,8 @@
 
     return {
       blocked: isSensorBlocked(),
-      held: sensorMode && Boolean(sensor.held),
-      sensorStatus: sensorMode ? sensor.status : "ok",
+      held: sensorMode && !pad && Boolean(sensor.held),
+      sensorStatus: sensorMode && !pad ? sensor.status : "ok",
       cell,
       onBoard,
       positionCm,
@@ -1802,13 +1875,18 @@
     if (gameState.status !== "playing") return;
 
     const sensor = gameState.sensor;
-    const raw = sensor.raw || [null, null, null];
+    const pad = gameState.remoteActive ? gameState.remoteCm : null;
+    // With the phone pad placing the player, each node's distance is the
+    // echo it would get with them at the pad's point: the near side of them,
+    // tuning.bodyRadiusCm short of their middle.
+    const padEcho = (slot) => Math.max(0, Math.hypot(pad.x - columnCentreCm(slot), pad.y) - tuning.bodyRadiusCm);
+    const raw = pad ? [padEcho(LEFT_SENSOR), null, padEcho(RIGHT_SENSOR)] : sensor.raw || [null, null, null];
     const list = Array.isArray(orderedNodes) ? orderedNodes : [];
     const rateOf = (node) => (node && Number.isFinite(node.rps) ? node.rps : null);
-    const usable = sensor.status === "ok" && !sensor.held;
+    const usable = pad || (sensor.status === "ok" && !sensor.held);
     roundStats()?.onSensorReading(now, {
       raw: [raw[LEFT_SENSOR], raw[RIGHT_SENSOR]],
-      source: usable ? sensor.source || null : null,
+      source: pad ? "both" : usable ? sensor.source || null : null,
       rejects: [sensorFilters[LEFT_SENSOR].rejectCount, sensorFilters[RIGHT_SENSOR].rejectCount],
       rate: [rateOf(list[LEFT_SENSOR]), rateOf(list[RIGHT_SENSOR])],
     });
@@ -1856,6 +1934,7 @@
     gameState.remotePos = null;
     gameState.remoteLastFrame = null;
     gameState.remoteHole = -1;
+    gameState.remoteCm = null;
   }
 
   // Stored normalised rather than as pixels, so a resize keeps the cursor on
@@ -1868,6 +1947,7 @@
       gameState.remotePos = null;
       gameState.remoteLastFrame = null;
       gameState.remoteHole = -1;
+      gameState.remoteCm = null;
       return;
     }
 
@@ -1889,6 +1969,7 @@
 
     const hole = holeAtPoint(layout, x, y);
     gameState.remoteHole = hole ? hole.index : -1;
+    gameState.remoteCm = canvasToWorldPoint(canvas, x, y);
     window.handleGameHover(canvas, x, y);
   }
 
@@ -1917,8 +1998,12 @@
   window.getGameCursorStatus = function getGameCursorStatus(canvas) {
     const { board, hole } = cursorOnBoard(canvas, gameState.cursor);
     const remote = gameState.remoteActive;
+    // Where the pad puts the player, in play-area cm, while a finger is on it.
+    const pad = remote && gameState.remoteCm
+      ? { xCm: gameState.remoteCm.x, yCm: gameState.remoteCm.y, gx: gameState.remoteCm.gx, gy: gameState.remoteCm.gy }
+      : null;
 
-    if (gameState.inputMode !== "sensor") return { board, hole, remote, sensor: null };
+    if (gameState.inputMode !== "sensor") return { board, hole, remote, pad, sensor: null };
 
     const sensor = gameState.sensor;
     const hasCell = Number.isInteger(sensor.gx) && Number.isInteger(sensor.gy);
@@ -1926,6 +2011,7 @@
       board,
       hole,
       remote,
+      pad,
       sensor: {
         board: cursorOnBoard(canvas, sensorCursor).board,
         status: sensor.status,
@@ -3614,7 +3700,9 @@
   // reading counts once, when it arrives (heard), and a node waiting for its
   // turn keeps the readings of its last one. A node is not lost until it has
   // had that many readings this round, and one that sends no scan state never
-  // is. Notes this update's readings first (and foundAt, as before).
+  // is. A node that is down (rigIsOffline()) is lost, whatever it last said,
+  // so with one node down the other alone says Out of bounds. Notes this
+  // update's readings first (and foundAt, as before).
   // TwoSensorGeometry._nobody_found() in filterRules.py.
   function bothNodesLost(filtered, scans, fresh, heard, now) {
     const lost = (slot) => {
@@ -3623,6 +3711,7 @@
       const log = stateLog[slot];
       if (heard[slot] && state !== null) log.push({ state, backRow: inBackRow(slot, filtered, scans) });
       if (log.length > LOST_READINGS_MAX) log.shift();
+      if (nodeDown[slot]) return true;
       const n = tuning.lostReadings;
       if (log.length < n) return false;
       return log.slice(-n).reduce((sum, entry) => sum + lostScore(entry), 0) <= 0;
@@ -3876,6 +3965,24 @@
     };
   }
 
+  // Canvas pixels -> play-area centimetres: worldToCanvasPoint() run
+  // backwards, with the cell the point is in. The rows' depths are the
+  // column's own calibrated near and far, as there. Used for the phone pad,
+  // whose point is on the board rather than in cm.
+  function canvasToWorldPoint(canvas, px, py) {
+    const layout = window.getGameGridLayout(canvas);
+    const pitch = layout.cellSize + layout.cellGap;
+    const x = columnCentreCm(0) + ((px - layout.gridLeft - layout.cellSize / 2) / pitch) * COLUMN_PITCH_CM;
+    const gx = columnAtCm(Math.max(0, Math.min(PLAY_WIDTH_CM, x)));
+    const bounds = window.getCalibrationBounds ? window.getCalibrationBounds() : null;
+    const span = bounds ? bounds.perColumn[gx] : { near: 10, far: 160 };
+    const rowDepth = Math.max(1e-6, (span.far - span.near) / GRID_ROWS);
+    const rowsFromTop = (py - layout.gridTop - layout.cellSize / 2) / pitch;
+    const depthT = NEAR_ROW_AT_TOP ? rowsFromTop + 0.5 : GRID_ROWS - 0.5 - rowsFromTop;
+    const y = span.near + depthT * rowDepth;
+    return { x, y, gx, gy: window.rawToGrid(gx, y, null).gy };
+  }
+
   // Drives the drawn cursor from a continuous position, through the spring.
   // Returns the pixel actually drawn, because the hover test has to use the
   // drawn position too - scoring against the raw target would whack a mole a
@@ -3928,6 +4035,9 @@
   // no stamp counts as heard on every frame while it is online.
   const messageStamp = [null, null, null];
   const messageAt = [-Infinity, -Infinity, -Infinity];
+  // Each node down as of the last rigIsOffline(): no node in the slot, the
+  // server says it is offline, or nothing new for tuning.offlineMs.
+  const nodeDown = [false, false, false];
 
   // Neither node has sent anything for tuning.offlineMs, or the server says
   // both are offline: the rig is down, which is not the player leaving. Both
@@ -3942,6 +4052,8 @@
       messageStamp[slot] = stamp;
       return now - messageAt[slot] > tuning.offlineMs;
     });
+    nodeDown[LEFT_SENSOR] = quiet[0];
+    nodeDown[RIGHT_SENSOR] = quiet[1];
     return quiet.every(Boolean);
   }
 
@@ -4568,10 +4680,11 @@
   // dropout they cannot control.
   // While the nodes learn the room, their echoes are the furniture's, not the
   // player's, so the round waits for that too. Never while the phone pad
-  // places the player. The control panel's held alert (setAlertHeld()) and its
-  // Too close toggle (setRemoteAlert()) hold a round in any mode.
+  // places the player. The control panel's held alert (setAlertHeld()), its
+  // held Out of bounds (setOutOfBoundsHeld()) and its Too close toggle
+  // (setRemoteAlert()) hold a round in any mode.
   function isSensorBlocked() {
-    return alertHeld || remoteAlert || (gameState.inputMode === "sensor" && !gameState.remoteActive &&
+    return alertHeld || outOfBoundsHeld || remoteAlert || (gameState.inputMode === "sensor" && !gameState.remoteActive &&
       (gameState.sensor.status !== "ok" || roomStatus === "learning"));
   }
 
@@ -4792,8 +4905,9 @@
 
   // Banner shown instead of the cursor: Out of bounds only when both nodes
   // are lost over their last tuning.lostReadings readings (bothNodesLost();
-  // Aaron, 5 Oct), and Sensors offline when the rig has gone quiet. Waiting for a
-  // first position shows nothing. The full-screen red alert is reserved for
+  // Aaron, 5 Oct), a node that is down counting as lost. Waiting for a
+  // first position shows nothing. Both nodes down never shows here: the
+  // round goes over to the mouse (switchOnSensorsDown()). The full-screen red alert is reserved for
   // the too-close case and is handled by canvas.js switching screens, so it
   // never appears here.
   function renderSensorStatusOverlay(ctx, canvas) {
@@ -4803,15 +4917,15 @@
 
     let message = null;
     let detail = "";
-    if (roomStatus === "learning") {
+    if (outOfBoundsHeld) {
+      message = "Out of bounds";
+      detail = "Nobody detected - step into the play area";
+    } else if (roomStatus === "learning") {
       message = "Learning the room";
       detail = "Keep the play area clear until the Room button says learned";
     } else if (status === "out-of-bounds") {
       message = "Out of bounds";
       detail = "Nobody detected - step into the play area";
-    } else if (status === "offline") {
-      message = "Sensors offline";
-      detail = "No readings from either node - check their power and Wi-Fi";
     }
     if (!message) return;
 
@@ -4829,6 +4943,25 @@
     cartoonText(ctx, "Timer paused", width / 2, height / 2 + 66, 18);
 
     ctx.textAlign = "start";
+  }
+
+  // A sign just above the board, over the play: one node down in a sensor
+  // round, which plays on the other. Nothing on the mouse or while the phone
+  // pad has the cursor - both nodes down included (switchOnSensorsDown()) -
+  // since then the nodes are not playing.
+  function drawNodeDownNotice(ctx, canvas) {
+    if (gameState.inputMode !== "sensor" || gameState.remoteActive) return;
+    if (nodeDown[LEFT_SENSOR] === nodeDown[RIGHT_SENSOR]) return;
+    const text = nodeDown[LEFT_SENSOR]
+      ? "Left node offline - playing on the right node"
+      : "Right node offline - playing on the left node";
+    const width = canvas.clientWidth || canvas.width;
+    const top = window.getGameGridLayout(canvas).gridTop;
+    // Under the timer and the test-mode badge (to y 116), above the board.
+    const w = Math.min(560, width - 40);
+    const y = Math.max(122, top - 44);
+    drawWoodSign(ctx, width / 2 - w / 2, y, w, 36, 12);
+    cartoonText(ctx, text, width / 2, y + 25, 17, { fill: "#ff8a7a" });
   }
 
   // Always-on sensor readout. Shows every sensor's raw and conditioned value at
@@ -4957,9 +5090,16 @@
     // fell back to the column centre. With a single node and no angle x can
     // never be resolved, so this line is how you tell a coarse fix from a
     // genuinely still player.
+    // While the phone pad places the player, this line and the one at the
+    // bottom say where the pad has them, in the same cm; the node rows above
+    // stay the nodes' own.
+    const pad = gameState.remoteActive ? gameState.remoteCm : null;
     const posY = y + 27 + rowH * 3;
     ctx.font = "12px monospace";
-    if (Number.isFinite(sensor.xCm) && Number.isFinite(sensor.yCm)) {
+    if (pad) {
+      ctx.fillStyle = "#cdd6f4";
+      ctx.fillText(`x ${formatCm(pad.x)}  y ${formatCm(pad.y)} cm  (phone pad)`, x + 16, posY);
+    } else if (Number.isFinite(sensor.xCm) && Number.isFinite(sensor.yCm)) {
       const coarse = sensor.status === "ok" && sensor.resolved === false;
       ctx.fillStyle = coarse ? "#f59e0b" : "#cdd6f4";
       const from = SOURCE_LABELS[sensor.source] ? `  (${SOURCE_LABELS[sensor.source]})` : "";
@@ -4996,7 +5136,10 @@
     // leak its 11px font into the status text.
     ctx.font = "bold 12px monospace";
 
-    if (status === "ok" && sensor.gx !== null) {
+    if (pad) {
+      ctx.fillStyle = "#22c55e";
+      ctx.fillText(`grid (${pad.gx}, ${pad.gy})  @ ${formatCm(pad.y)}cm  PHONE PAD`, x + 16, fixY);
+    } else if (status === "ok" && sensor.gx !== null) {
       ctx.fillStyle = sensor.held ? "#f59e0b" : "#22c55e";
       const disagrees =
         sensor.rawGx !== undefined && sensor.rawGx !== null &&
@@ -5015,6 +5158,111 @@
     }
 
     ctx.textAlign = "start";
+  }
+
+  // --- Battery -----------------------------------------------------------------
+  // Two simulated battery packs until the rig reports real ones. Each loses
+  // 1 % for every BATTERY_MS_PER_PERCENT of round played (after the 3-2-1, not
+  // while paused), down to 0, from where it starts (BATTERY_PACKS). Kept in
+  // this browser across sessions; setBatteryPercent(pack, 100) from the
+  // console charges one again (pack 1 or 2).
+  const BATTERY_PACKS = [
+    { key: "eng3000.battery1Percent", start: 96 },
+    { key: "eng3000.battery2Percent", start: 99 },
+  ];
+  const BATTERY_MS_PER_PERCENT = 2 * 60 * 1000;
+  // Saved at most this often, and whenever a whole percent goes.
+  const BATTERY_SAVE_MS = 5000;
+  const batteryPercents = BATTERY_PACKS.map((pack) => {
+    try {
+      const saved = Number.parseFloat(window.localStorage.getItem(pack.key));
+      if (Number.isFinite(saved)) return Math.min(100, Math.max(0, saved));
+    } catch (err) {
+      // Storage blocked: where it starts, for this page only.
+    }
+    return pack.start;
+  });
+  let batterySavedAt = 0;
+
+  function saveBatteries() {
+    batterySavedAt = performance.now();
+    try {
+      BATTERY_PACKS.forEach((pack, i) => window.localStorage.setItem(pack.key, String(batteryPercents[i])));
+    } catch (err) {
+      // Not kept, but still shown for this page.
+    }
+  }
+
+  function drainBattery(elapsedMs) {
+    if (!(elapsedMs > 0)) return;
+    const shown = window.getBatteryPercents().join();
+    batteryPercents.forEach((pct, i) => {
+      batteryPercents[i] = Math.max(0, pct - elapsedMs / BATTERY_MS_PER_PERCENT);
+    });
+    if (window.getBatteryPercents().join() !== shown || performance.now() - batterySavedAt >= BATTERY_SAVE_MS) {
+      saveBatteries();
+    }
+  }
+
+  // Each pack's whole percent, rounded up: where it starts until the first
+  // 2 minutes have gone.
+  window.getBatteryPercents = function getBatteryPercents() {
+    return batteryPercents.map((pct) => Math.ceil(pct));
+  };
+
+  // pack: 1 or 2.
+  window.setBatteryPercent = function setBatteryPercent(pack, pct) {
+    const i = pack - 1;
+    if (!(i >= 0 && i < batteryPercents.length) || !Number.isFinite(pct)) return window.getBatteryPercents();
+    batteryPercents[i] = Math.min(100, Math.max(0, pct));
+    saveBatteries();
+    return window.getBatteryPercents();
+  };
+
+  // Left of the level sign, the same height: pack 1, then pack 2 next to it.
+  const BATTERY_SIGN_W = 118;
+
+  function getBatteryLayout(canvas, i) {
+    const level = getLevelPanelLayout(canvas);
+    const x = level.x - (BATTERY_PACKS.length - i) * (BATTERY_SIGN_W + 8);
+    return { x, y: level.y, width: BATTERY_SIGN_W, height: level.height };
+  }
+
+  function drawBatterySigns(ctx, canvas) {
+    window.getBatteryPercents().forEach((pct, i) => drawBatterySign(ctx, getBatteryLayout(canvas, i), i + 1, pct));
+  }
+
+  function drawBatterySign(ctx, r, pack, pct) {
+    drawWoodSign(ctx, r.x, r.y, r.width, r.height, 12);
+    const midY = r.y + r.height / 2;
+    cartoonText(ctx, String(pack), r.x + 16, midY + 7, 18);
+
+    // The cell: a body with a nub on the right, filled to the charge.
+    const bw = 32;
+    const bh = 18;
+    const bx = r.x + 28;
+    const by = midY - bh / 2;
+    const fill = pct > 50 ? "#7ddc4a" : pct > 20 ? "#ffcf4a" : "#ff6b5a";
+    ctx.fillStyle = "rgba(74, 42, 16, 0.45)";
+    ctx.beginPath();
+    ctx.roundRect(bx, by, bw, bh, 4);
+    ctx.fill();
+    if (pct > 0) {
+      ctx.fillStyle = fill;
+      ctx.beginPath();
+      ctx.roundRect(bx + 2, by + 2, Math.max(3, (bw - 4) * (pct / 100)), bh - 4, 2);
+      ctx.fill();
+    }
+    ctx.strokeStyle = INK;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.roundRect(bx, by, bw, bh, 4);
+    ctx.stroke();
+    ctx.fillStyle = INK;
+    ctx.fillRect(bx + bw + 1, midY - 4, 3, 8);
+
+    const textLeft = bx + bw + 6;
+    cartoonText(ctx, `${pct}%`, textLeft + (r.x + r.width - 8 - textLeft) / 2, midY + 7, 18, { fill });
   }
 
   // --- Stats toggle ----------------------------------------------------------
@@ -5417,6 +5665,7 @@
     drawTimerSign(ctx, width, now);
     if (settings.testMode) drawTestBadge(ctx, width);
     drawLevelSign(ctx, canvas);
+    drawBatterySigns(ctx, canvas);
     drawStatsToggle(ctx, canvas);
 
     // Pulses button: multi-pulse on the scanner nodes, amber while on.
@@ -5443,9 +5692,12 @@
     drawCursor(ctx, layout, width, height, now);
     drawLevelBanner(ctx, layout, width, now);
     drawCountdown(ctx, layout, width, height, now);
+    if (gameState.status === "playing") drawNodeDownNotice(ctx, canvas);
 
-    // The phone pad places the player over whatever the sensors say.
-    if (gameState.inputMode === "sensor" && !gameState.remoteActive && gameState.status === "playing") {
+    // The phone pad places the player over whatever the sensors say; the
+    // control panel's held Out of bounds shows in any mode.
+    if (gameState.status === "playing" &&
+        (outOfBoundsHeld || (gameState.inputMode === "sensor" && !gameState.remoteActive))) {
       renderSensorStatusOverlay(ctx, canvas);
     }
 

@@ -9,20 +9,20 @@
     <link rel="preload" href="/static/fonts/sora-latin.woff2" as="font" type="font/woff2" crossorigin>
     <link rel="preload" href="/static/fonts/figtree-latin.woff2" as="font" type="font/woff2" crossorigin>
     <link rel="preload" href="/static/fonts/lilita-one-latin.woff2" as="font" type="font/woff2" crossorigin>
-    <link rel="stylesheet" href="/static/ui.css?v=58">
-    <script defer src="/static/displays/sounds.js?v=58"></script>
-    <script defer src="/static/displays/ui.js?v=58"></script>
-    <script defer src="/static/displays/menu.js?v=58"></script>
-    <script defer src="/static/displays/calibrate.js?v=58"></script>
-    <script defer src="/static/displays/callibrate_corners.js?v=58"></script>
-    <script defer src="/static/displays/alert.js?v=58"></script>
-    <script defer src="/static/displays/logs.js?v=58"></script>
-    <script defer src="/static/displays/options.js?v=58"></script>
-    <script defer src="/static/displays/positionSolver.js?v=58"></script>
-    <script defer src="/static/displays/gameStats.js?v=58"></script>
-    <script defer src="/static/displays/leaderboard.js?v=58"></script>
-    <script defer src="/static/displays/game.js?v=58"></script>
-    <script defer src="/static/canvas.js?v=58"></script>
+    <link rel="stylesheet" href="/static/ui.css?v=59">
+    <script defer src="/static/displays/sounds.js?v=59"></script>
+    <script defer src="/static/displays/ui.js?v=59"></script>
+    <script defer src="/static/displays/menu.js?v=59"></script>
+    <script defer src="/static/displays/calibrate.js?v=59"></script>
+    <script defer src="/static/displays/callibrate_corners.js?v=59"></script>
+    <script defer src="/static/displays/alert.js?v=59"></script>
+    <script defer src="/static/displays/logs.js?v=59"></script>
+    <script defer src="/static/displays/options.js?v=59"></script>
+    <script defer src="/static/displays/positionSolver.js?v=59"></script>
+    <script defer src="/static/displays/gameStats.js?v=59"></script>
+    <script defer src="/static/displays/leaderboard.js?v=59"></script>
+    <script defer src="/static/displays/game.js?v=59"></script>
+    <script defer src="/static/canvas.js?v=59"></script>
 </head>
 
 <body>
@@ -154,6 +154,20 @@
                         <p>Whacks, bombs, level ups and menu clicks, and the warning tone when the player gets too close to the screen.</p>
                     </div>
                     <button class="switch" id="optSound" role="switch" aria-checked="true" aria-labelledby="lblSound" data-action="sound" data-nav><span></span></button>
+                </div>
+                <div class="setting">
+                    <div class="setting-text">
+                        <h3 id="lblMusic">Music</h3>
+                        <p>Background music, looping while a round is played. Pausing the round pauses it.</p>
+                    </div>
+                    <button class="switch" id="optMusic" role="switch" aria-checked="true" aria-labelledby="lblMusic" data-action="music" data-nav><span></span></button>
+                </div>
+                <div class="setting">
+                    <div class="setting-text">
+                        <h3 id="lblMusicVolume">Music volume</h3>
+                        <p>How loud the music plays under the sound effects.</p>
+                    </div>
+                    <div class="segmented" id="optMusicVolume" role="group" aria-labelledby="lblMusicVolume"></div>
                 </div>
                 <div class="setting">
                     <div class="setting-text">

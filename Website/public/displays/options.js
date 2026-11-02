@@ -1,5 +1,5 @@
 // options.js - the Options screen (the "options" section in index.html):
-// round length, starting lives, board, sound and test mode. Reads settings through
+// round length, starting lives, board, sound, music and test mode. Reads settings through
 // window.getGameSettings() from game.js; the controls' clicks go through
 // ui.js to canvas.js, which writes them with window.setGameSettings().
 // How the sensors place the player is switched on the phone's /control page
@@ -12,6 +12,8 @@
   const livesGroup = document.getElementById("optLives");
   const boardGroup = document.getElementById("optBoard");
   const soundSwitch = document.getElementById("optSound");
+  const musicSwitch = document.getElementById("optMusic");
+  const musicVolumeGroup = document.getElementById("optMusicVolume");
   const testModeSwitch = document.getElementById("optTestMode");
 
   // Built once, on first show: game.js owns the option lists and loads after
@@ -44,16 +46,20 @@
   window.updateOptionsScreen = function updateOptionsScreen() {
     const settings = window.getGameSettings
       ? window.getGameSettings()
-      : { durationMs: 60000, startingLives: 3, boardStyle: "random", soundEnabled: true, testMode: false };
+      : { durationMs: 60000, startingLives: 3, boardStyle: "random", soundEnabled: true,
+        musicEnabled: true, musicVolume: 0.5, testMode: false };
 
     buildSegments(durationGroup, "duration", window.DURATION_OPTIONS_MS || [30000, 60000, 90000], (ms) => `${ms / 1000} s`);
     buildSegments(livesGroup, "lives", window.LIVES_OPTIONS || [1, 3, 5], (n) => `${n}`);
     buildSegments(boardGroup, "board", window.BOARD_STYLE_OPTIONS || ["classic", "random"], boardLabel);
+    buildSegments(musicVolumeGroup, "musicVolume", window.MUSIC_VOLUME_OPTIONS || [0.25, 0.5, 1], (v) => `${v * 100}%`);
 
     syncSegments(durationGroup, settings.durationMs);
     syncSegments(livesGroup, settings.startingLives);
     syncSegments(boardGroup, settings.boardStyle);
+    syncSegments(musicVolumeGroup, settings.musicVolume);
     soundSwitch.setAttribute("aria-checked", String(Boolean(settings.soundEnabled)));
+    musicSwitch.setAttribute("aria-checked", String(Boolean(settings.musicEnabled)));
     testModeSwitch.setAttribute("aria-checked", String(Boolean(settings.testMode)));
   };
 })();

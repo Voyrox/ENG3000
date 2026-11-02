@@ -1438,11 +1438,15 @@ class NodeAimTests(BrokerTestCase):
         self._saved_aim = app.nodes_aim_held
         self._saved_requesters = set(app.aim_requesters)
         self._saved_roles = dict(app.node_roles)
+        self._saved_servo = dict(app.servo_holds)
         app.nodes_aim_held = False
         app.aim_requesters.clear()
         app.node_roles.clear()
+        app.servo_holds.clear()
 
     def tearDown(self):
+        app.servo_holds.clear()
+        app.servo_holds.update(self._saved_servo)
         app.nodes_aim_held = self._saved_aim
         app.aim_requesters.clear()
         app.aim_requesters.update(self._saved_requesters)
@@ -1476,6 +1480,50 @@ class NodeAimTests(BrokerTestCase):
         conn = FakeNodeSocket(b"\r\n")
         app.handle_node_connection(conn, ("10.0.0.1", 1000))
         self.assertEqual(conn.sent, ["1\n", "AIM 90\n", "ROLE LEFT\n", "PULSES 1\n", "FARHOLD 1\n", "FARSTEER 1\n"])
+
+    def test_the_servo_control_holds_one_node_or_both_and_scan_lets_go(self):
+        left_id, left = self.add_node(conn=RecordingConn())
+        right_id, right = self.add_node(address=("10.0.0.2", 1001), conn=RecordingConn())
+        app.node_roles.update({left_id: "LEFT", right_id: "RIGHT"})
+        self.assertTrue(app.set_nodes_servo("left", 45))
+        self.assertTrue(app.set_nodes_servo("both", 120.4))
+        self.assertTrue(app.set_nodes_servo("both", 120), "a heartbeat: no new AIM")
+        self.assertTrue(app.set_nodes_servo("right", None))
+        self.assertEqual(left["conn"].sent, ["AIM 45\n", "AIM 120\n"])
+        self.assertEqual(right["conn"].sent, ["AIM 120\n", "SCAN\n"])
+        self.assertEqual(app.servo_holds[left_id][0], 120)
+        self.assertNotIn(right_id, app.servo_holds)
+
+    def test_a_servo_hold_not_renewed_goes_back_to_scanning_by_itself(self):
+        node_id, node = self.add_node(conn=RecordingConn())
+        app.set_nodes_servo("both", 70)
+        held_at = app.servo_holds[node_id][1]
+        self.assertEqual(app.release_stale_servo_holds(held_at + app.SERVO_HELD_TIMEOUT_S / 2), [])
+        self.assertEqual(app.release_stale_servo_holds(held_at + app.SERVO_HELD_TIMEOUT_S + 0.1), [node_id])
+        self.assertEqual(node["conn"].sent, ["AIM 70\n", "SCAN\n"])
+        self.assertNotIn(node_id, app.servo_holds)
+
+    def test_the_servo_control_clamps_the_angle_and_ignores_bad_input(self):
+        _, node = self.add_node(conn=RecordingConn())
+        self.assertTrue(app.set_nodes_servo("both", 200))
+        self.assertFalse(app.set_nodes_servo("middle", 90))
+        self.assertFalse(app.set_nodes_servo("both", "up"))
+        self.assertFalse(app.set_nodes_servo("both", True))
+        self.assertFalse(app.set_nodes_servo("left", 90), "no node has the left role")
+        self.assertEqual(node["conn"].sent, ["AIM 180\n"])
+
+    def test_calibration_comes_first_and_lets_go_back_to_the_servo_control(self):
+        node_id, node = self.add_node(conn=RecordingConn())
+        app.set_nodes_servo("both", 30)
+        app.set_nodes_aim(True)
+        app.set_nodes_aim(False)
+        self.assertEqual(node["conn"].sent, ["AIM 30\n", "AIM 90\n", "AIM 30\n"])
+
+    def test_a_node_held_by_the_servo_control_holds_again_when_it_reconnects(self):
+        app.servo_holds[1] = (60, app.time.monotonic())
+        conn = FakeNodeSocket(b"\r\n")
+        app.handle_node_connection(conn, ("10.0.0.1", 1000))
+        self.assertEqual(conn.sent, ["1\n", "AIM 60\n", "PULSES 1\n", "FARHOLD 1\n", "FARSTEER 1\n"])
 
     def test_another_page_off_the_calibration_screen_cannot_release_the_hold(self):
         _, node = self.add_node(conn=RecordingConn())
@@ -1717,6 +1765,11 @@ class ControlPanelTests(BrokerTestCase):
         for on in (True, False):
             sent = self.relayed({"action": "tooCloseHold", "on": on})
             self.assertEqual(sent, [{"action": "tooCloseHold", "on": on, "type": "remote:command"}])
+
+    def test_the_out_of_bounds_hold_is_relayed_to_the_game(self):
+        for on in (True, False):
+            sent = self.relayed({"action": "outOfBoundsHold", "on": on})
+            self.assertEqual(sent, [{"action": "outOfBoundsHold", "on": on, "type": "remote:command"}])
 
     def test_dynamic_rule_switches_are_relayed_to_the_game(self):
         sent = self.relayed({"action": "dynamicRules", "rules": {"loneNode": False}})

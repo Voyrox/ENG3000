@@ -397,7 +397,63 @@ test("the countdown waits while the sensors hold the round", () => {
   const w = loadWindow();
   w.setGameInputMode("sensor");
   w.resetGame();
-  const offline = [1, 2, 3].map((id) => ({ id, online: false, latest: null }));
-  run(w, offline, 300);
+  // Online, but no echo: nobody on the floor. (Both nodes offline would put
+  // the round on the mouse instead.)
+  const empty = [1, 2, 3].map((id) => ({ id, online: true, latest: JSON.stringify({ avg: -1 }) }));
+  run(w, empty, 300);
   assert.strictEqual(w.getGameState().countdownMs, 3000, "nobody there: it has not started counting");
+});
+
+test("each battery pack loses 1 % every 2 minutes of round played, and is kept across sessions", () => {
+  const store = new Map();
+  const localStorage = {
+    getItem: (key) => (store.has(key) ? store.get(key) : null),
+    setItem: (key, value) => store.set(key, String(value)),
+  };
+  const load = () => {
+    const context = {
+      console: { log() {}, info() {}, warn() {}, error() {} },
+      performance: { now: () => 0 },
+      Image: class { set src(_) {} },
+      localStorage,
+    };
+    context.window = context;
+    vm.createContext(context);
+    ["alert.js", "callibrate_corners.js", "positionSolver.js", "game.js"].forEach((file) => {
+      vm.runInContext(fs.readFileSync(path.join(DISPLAYS, file), "utf8"), context, { filename: file });
+    });
+    return context;
+  };
+  // Steps a mouse round by `ms` in 100 ms frames from time t; returns the new t.
+  const play = (w, t, ms) => {
+    for (const end = t + ms; t < end;) {
+      t += 100;
+      w.performance.now = () => t;
+      w.updateGame(t, CANVAS, []);
+    }
+    return t;
+  };
+  const percents = (w) => Array.from(w.getBatteryPercents());
+
+  let w = load();
+  assert.deepStrictEqual(percents(w), [96, 99], "the packs start at 96 and 99 %");
+  // Test mode: no round clock and no lives, so one round runs for minutes.
+  w.setGameSettings({ testMode: true });
+  w.setGameInputMode("mouse");
+  w.resetGame();
+  let t = play(w, 0, 3000 + 200); // the 3-2-1 does not count
+  assert.deepStrictEqual(percents(w), [96, 99]);
+  t = play(w, t, 2 * 60 * 1000);
+  assert.deepStrictEqual(percents(w), [95, 98], "2 minutes played: 1 % off each");
+  w.pauseGame();
+  t = play(w, t, 10 * 60 * 1000);
+  assert.deepStrictEqual(percents(w), [95, 98], "paused, they do not drain");
+  w.resumeGame();
+  t = play(w, t, 2 * 60 * 1000 + 500); // the frame after resuming counts nothing
+  assert.deepStrictEqual(percents(w), [94, 97]);
+
+  w = load();
+  assert.deepStrictEqual(percents(w), [94, 97], "a new session carries on where the last left off");
+  assert.deepStrictEqual(Array.from(w.setBatteryPercent(1, 100)), [100, 97], "and a pack can be charged again");
+  assert.deepStrictEqual(percents(load()), [100, 97]);
 });

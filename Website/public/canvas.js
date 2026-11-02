@@ -78,6 +78,10 @@ function resizeCanvas() {
 const sensorLocations = new Map();
 
 function draw() {
+  // The background music plays while a round is on screen and playing (the
+  // too-close alert included), with the Music switch on.
+  const state = window.getGameState();
+  window.GameMusic?.sync(roundOnScreen() && state.status === "playing" && window.getGameSettings().musicEnabled);
   // console.log("Drawing screen:", screen, "selectedNodeId:", selectedNodeId, "nodes.size:", nodes.size);
   ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.clearRect(0, 0, c.width, c.height);
@@ -549,11 +553,18 @@ function startGameWithMode(mode) {
   stopAlertNoise();
   window.setGameInputMode(mode);
   window.resetGame();
+  window.GameMusic?.restart();
   // A new round: the server's search and filter start again (app.py).
   sendToServer({ type: "round:start" });
   alertReturnScreen = "game";
   screen = "game";
   startGameLoop();
+}
+
+// The mode a restart plays in: the round's own, or the sensors if the game
+// only went over to the mouse because both nodes went down.
+function roundInputMode() {
+  return window.isSensorsDownMouse() ? "sensor" : window.getGameInputMode();
 }
 
 // Touching the phone pad takes the cursor over from whichever mode is
@@ -602,6 +613,20 @@ function holdAlert(on) {
   draw();
 }
 
+// The control panel's "Hold: out of bounds" button: the round's Out of bounds
+// banner is up, and the round waits, while a finger is on it (the banner is
+// part of the game screen, so off a round it shows nothing). It drops
+// REMOTE_IDLE_MS after the last re-send, as the too-close hold does.
+let outOfBoundsHoldTimer = null;
+
+function holdOutOfBounds(on) {
+  window.clearTimeout(outOfBoundsHoldTimer);
+  outOfBoundsHoldTimer = null;
+  window.setOutOfBoundsHeld(on);
+  if (on) outOfBoundsHoldTimer = window.setTimeout(() => holdOutOfBounds(false), REMOTE_IDLE_MS);
+  draw();
+}
+
 // Commands relayed from the phone control panel (/control). The server only
 // relays these when it was started with CON=1.
 function handleRemoteCommand(command) {
@@ -632,7 +657,7 @@ function handleRemoteCommand(command) {
       window.resumeGame();
       break;
     case "restart":
-      startGameWithMode(window.getGameInputMode());
+      startGameWithMode(roundInputMode());
       break;
     case "menu":
       stopGameLoop();
@@ -712,6 +737,10 @@ function handleRemoteCommand(command) {
     case "tooCloseHold":
       // The hold button, down (and re-sent while held) or up.
       holdAlert(Boolean(command.on));
+      break;
+    case "outOfBoundsHold":
+      // The Out of bounds hold button, the same way.
+      holdOutOfBounds(Boolean(command.on));
       break;
     case "dynamicRules":
       // Dynamic's rules on or off: { farPriority, confidenceNode, columnLock,
@@ -918,7 +947,7 @@ c.addEventListener("click", (event) => {
       } else if (pauseMenuHit.type === "restart") {
         // Through startGameWithMode so the round is fully reset, exactly as
         // when it was first started.
-        startGameWithMode(window.getGameInputMode());
+        startGameWithMode(roundInputMode());
       } else if (pauseMenuHit.type === "menu") {
         stopGameLoop();
         screen = "menu";
@@ -966,7 +995,7 @@ c.addEventListener("click", (event) => {
     if (overButton) {
       uiSound(overButton.type === "return" ? "back" : "click");
       if (overButton.type === "restart") {
-        startGameWithMode(window.getGameInputMode());
+        startGameWithMode(roundInputMode());
       } else if (overButton.type === "return") {
         screen = "menu";
         stopGameLoop();
@@ -1043,6 +1072,12 @@ const screenActions = {
     },
     sound() {
       window.setGameSettings({ soundEnabled: !window.getGameSettings().soundEnabled });
+    },
+    music() {
+      window.setGameSettings({ musicEnabled: !window.getGameSettings().musicEnabled });
+    },
+    musicVolume(data) {
+      window.setGameSettings({ musicVolume: Number(data.value) });
     },
     testMode() {
       window.setGameSettings({ testMode: !window.getGameSettings().testMode });
