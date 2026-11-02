@@ -81,8 +81,16 @@
   // mole window, but never less than BOMB_MIN_MS.
   const BOMB_DURATION_FACTOR = 0.4;
   const BOMB_MIN_MS = 1500;
-  const BOMB_SPAWN_CHANCE = 0.2; // share of spawns that are bombs
-  const SUPER_SPAWN_CHANCE = 0.15; // share of spawns that are super moles
+  // Each wave brings up 2 or 3 things at once, each a different kind, so the
+  // player picks which to go for: all three (a mole, a hat mole and a bomb)
+  // THREE_UP_CHANCE of the time, otherwise one of WAVE_PAIRS by its weight.
+  // Test mode has no bombs, so there it is always a mole and a hat mole.
+  const THREE_UP_CHANCE = 0.3;
+  const WAVE_PAIRS = [
+    { types: ["mole", "bomb"], weight: 0.4 },
+    { types: ["mole", "super"], weight: 0.4 },
+    { types: ["super", "bomb"], weight: 0.2 },
+  ];
   const DEFAULT_LIVES = 5;
   const DURATION_OPTIONS_MS = [30000, 60000, 90000];
   const LIVES_OPTIONS = [1, 3, 5, 7, 9];
@@ -1191,7 +1199,8 @@
 
   // Which hole the mole came up in, and when it was first drawn there, for
   // its rise out of the hole.
-  const moleRise = { hole: -1, at: 0 };
+  // When the thing in each hole started rising: hole index -> time.
+  const moleRise = new Map();
   const MOLE_RISE_MS = 160;
 
   // A level-up ribbon across the middle of the board, for a moment.
@@ -1246,11 +1255,12 @@
     lives: DEFAULT_LIVES,
     remainingMs: GAME_DURATION_MS,
     lastTickTime: null,
-    activeHole: -1, // -1 means no mole currently up
-    lastSpawnHole: -1, // where the last mole or hat mole came up (bombs never count); -1 before the first of a round
-    moleType: "mole", // "mole" | "bomb" | "super"
-    moleWounded: false, // true once a hat (super) mole has taken its first of two hits
-    moleSpawnedAt: 0,
+    // What is up: [{ hole, type: "mole" | "super" | "bomb", spawnedAt,
+    // wounded }], 2 or 3 at once, each a different type and hole (spawnWave()).
+    // wounded: a hat (super) mole has taken its first of two hits. Empty
+    // between waves.
+    items: [],
+    lastSpawnHole: -1, // where the next wave steps out from (spawnWave()); -1 before the first of a round
     moleDurationMs: BASE_MOLE_MS,
     holeScale: 1, // the holes' size as a share of full size, eased towards targetHoleScale()
     levelUpAt: -Infinity, // when the last new peak level was reached, for the banner
@@ -1295,9 +1305,9 @@
     return rampedMoleDuration(level);
   }
 
-  // How long the thing currently up stays before it goes back down.
-  function visibleDurationMs() {
-    if (gameState.moleType !== "bomb") return gameState.moleDurationMs;
+  // How long a thing that is up (an item) stays before it goes back down.
+  function visibleDurationMs(item) {
+    if (item.type !== "bomb") return gameState.moleDurationMs;
     return Math.max(BOMB_MIN_MS, Math.round(gameState.moleDurationMs * BOMB_DURATION_FACTOR));
   }
 
@@ -1411,7 +1421,7 @@
   let board = buildBoard(CLASSIC_ROWS);
   let boardDealtAt = -Infinity; // when it was dealt, for the holes popping up
 
-  // Deals a new random board mid-round. The next mole steps out from the new
+  // Deals a new random board mid-round. The next wave steps out from the new
   // hole nearest where the last one came up, so the player is not sent
   // across the floor just because the layout changed.
   function dealNewBoard(now) {
@@ -1427,22 +1437,67 @@
       (Math.hypot(s.u - u, s.v - v) < Math.hypot(best.u - u, best.v - v) ? s : best));
   }
 
-  // The first mole of a round can come up anywhere. After that each mole comes
-  // up one hole away from the last (neighboursOf()), so the player only ever
-  // has to take a single step.
-  function pickSpawnHole(lastHole) {
-    const from = board.slots[lastHole];
-    if (!from) return Math.floor(Math.random() * board.slots.length);
-    return pickOne(from.neighbours);
+  function shuffle(list) {
+    const out = list.slice();
+    for (let i = out.length - 1; i > 0; i -= 1) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [out[i], out[j]] = [out[j], out[i]];
+    }
+    return out;
   }
 
-  function pickRandomMoleType() {
-    const roll = Math.random();
-    // Test mode drops bombs from the pool entirely; their share is folded into
-    // ordinary moles so super moles keep their usual frequency.
-    if (!settings.testMode && roll < BOMB_SPAWN_CHANCE) return "bomb";
-    if (roll < BOMB_SPAWN_CHANCE + SUPER_SPAWN_CHANCE) return "super";
-    return "mole";
+  // count different holes for a wave. The first wave of a round starts at any
+  // hole, with the rest nearest it. After that they come up one hole away from
+  // where the last wave was played (neighboursOf()), so whichever the player
+  // goes for is a single step; with more things than neighbours, the rest go
+  // to the next nearest holes.
+  function pickWaveHoles(lastHole, count) {
+    const from = board.slots[lastHole];
+    const distance = (a, b) => Math.hypot(a.u - b.u, a.v - b.v);
+    if (!from) {
+      const start = pickOne(board.slots);
+      const rest = board.slots.filter((s) => s !== start).sort((a, b) => distance(a, start) - distance(b, start));
+      return [start.index, ...rest.slice(0, count - 1).map((s) => s.index)];
+    }
+    const near = shuffle(from.neighbours);
+    const further = board.slots
+      .filter((s) => s !== from && !near.includes(s.index))
+      .sort((a, b) => distance(a, from) - distance(b, from))
+      .map((s) => s.index);
+    return [...near, ...further, from.index].slice(0, count);
+  }
+
+  // The kinds for a wave, each once: all three, or a pair (THREE_UP_CHANCE,
+  // WAVE_PAIRS). Test mode: a mole and a hat mole, as it has no bombs.
+  function pickWaveTypes() {
+    if (settings.testMode) return ["mole", "super"];
+    if (Math.random() < THREE_UP_CHANCE) return ["mole", "super", "bomb"];
+    let roll = Math.random() * WAVE_PAIRS.reduce((sum, pair) => sum + pair.weight, 0);
+    const pair = WAVE_PAIRS.find((p) => (roll -= p.weight) < 0) || WAVE_PAIRS[0];
+    return pair.types.slice();
+  }
+
+  // Brings up a wave: its kinds on its holes, in a random order. The next
+  // wave steps out from its mole (else its hat mole) until the player hits
+  // something, which moves that to where they are (awardPointForHole()).
+  function spawnWave(now) {
+    const types = shuffle(pickWaveTypes());
+    const holes = pickWaveHoles(gameState.lastSpawnHole, types.length);
+    gameState.items = types.map((type, i) => ({ hole: holes[i], type, spawnedAt: now, wounded: false }));
+    const anchor = gameState.items.find((item) => item.type === "mole") ||
+      gameState.items.find((item) => item.type === "super");
+    if (anchor) gameState.lastSpawnHole = anchor.hole;
+    gameState.items.forEach((item) => roundStats()?.onSpawn(item.type));
+    types.forEach((type) => sound({ mole: "pop", super: "popSuper", bomb: "fuse" }[type]));
+  }
+
+  function itemAt(hole) {
+    return gameState.items.find((item) => item.hole === hole) || null;
+  }
+
+  // Every timer of what is up moves on by ms: a pause, or the round held.
+  function delayItems(ms) {
+    gameState.items.forEach((item) => { item.spawnedAt += ms; });
   }
 
   // Single place that decides whether a life can actually be taken.
@@ -1516,11 +1571,8 @@
     gameState.lives = settings.startingLives;
     gameState.remainingMs = settings.durationMs;
     gameState.lastTickTime = null;
-    gameState.activeHole = -1;
+    gameState.items = [];
     gameState.lastSpawnHole = -1;
-    gameState.moleType = "mole";
-    gameState.moleWounded = false;
-    gameState.moleSpawnedAt = 0;
     gameState.moleDurationMs = computeMoleDuration(gameState.level);
     gameState.holeScale = 1;
     gameState.levelUpAt = -Infinity;
@@ -1680,7 +1732,7 @@
   window.resumeGame = function resumeGame() {
     if (gameState.status !== "paused") return;
     const pausedDuration = performance.now() - gameState.pausedAt;
-    gameState.moleSpawnedAt += pausedDuration;
+    delayItems(pausedDuration);
     gameState.nextSpawnAt += pausedDuration;
     gameState.lastTickTime = null;
     gameState.status = "playing";
@@ -1746,7 +1798,7 @@
     // lastTickTime above keeps the clock from jumping when play resumes;
     // shifting the mole timers keeps the current mole alive.
     if (isSensorBlocked()) {
-      gameState.moleSpawnedAt += elapsed;
+      delayItems(elapsed);
       gameState.nextSpawnAt += elapsed;
       return;
     }
@@ -1758,20 +1810,28 @@
       if (gameState.remainingMs <= 0) {
         gameState.remainingMs = 0;
         endRound();
-        gameState.activeHole = -1;
+        gameState.items = [];
         return;
       }
     }
 
-    // Mole timed out without being hit -> remove it and schedule the next one.
-    if (gameState.activeHole !== -1 && now - gameState.moleSpawnedAt >= visibleDurationMs()) {
-      const missedMole = gameState.moleType !== "bomb"; // letting a bomb expire is fine, missing a mole costs a life
-      roundStats()?.onExpire(gameState.moleType);
-      gameState.activeHole = -1;
-      gameState.moleWounded = false;
-      gameState.nextSpawnAt = now + randomBetween(MIN_SPAWN_DELAY_MS, MAX_SPAWN_DELAY_MS);
-
-      if (missedMole) {
+    // Things that timed out without being hit go back down, each on its own
+    // timer (a bomb's is shorter). Once no mole or hat mole is left the wave is
+    // over: any bomb still up goes down with it, and the next is scheduled.
+    // Letting a bomb go is fine; a wave whose moles all went unhit costs one
+    // life, however many there were, as the player could only go for one.
+    const expired = gameState.items.filter((item) => now - item.spawnedAt >= visibleDurationMs(item));
+    if (expired.length) {
+      const isMole = (item) => item.type !== "bomb";
+      gameState.items = gameState.items.filter((item) => !expired.includes(item));
+      const over = !gameState.items.some(isMole);
+      const gone = over ? expired.concat(gameState.items) : expired;
+      gone.forEach((item) => roundStats()?.onExpire(item.type));
+      if (over) {
+        gameState.items = [];
+        gameState.nextSpawnAt = now + randomBetween(MIN_SPAWN_DELAY_MS, MAX_SPAWN_DELAY_MS);
+      }
+      if (over && expired.some(isMole)) {
         sound("miss");
         loseLife();
         if (isOutOfLives()) {
@@ -1790,24 +1850,13 @@
     // A level up on a random board deals a new one, once the hit that earned
     // it has finished flashing and nothing is up, and gives the player a
     // moment to see it before the next mole.
-    if (gameState.boardPending && gameState.activeHole === -1 && now >= gameState.hitFlash.until) {
+    if (gameState.boardPending && gameState.items.length === 0 && now >= gameState.hitFlash.until) {
       dealNewBoard(now);
       gameState.nextSpawnAt = Math.max(gameState.nextSpawnAt, now + BOARD_DEAL_PAUSE_MS);
     }
 
-    // Spawn a mole if none is up and it's time (only one hole active at once).
-    if (gameState.activeHole === -1 && now >= gameState.nextSpawnAt) {
-      // Spawns step out from the last real mole. A bomb still comes up next to
-      // that mole, but it never becomes the new anchor, so the mole after a bomb
-      // is one step from the previous mole rather than from the bomb.
-      gameState.moleType = pickRandomMoleType();
-      gameState.activeHole = pickSpawnHole(gameState.lastSpawnHole);
-      if (gameState.moleType !== "bomb") gameState.lastSpawnHole = gameState.activeHole;
-      gameState.moleSpawnedAt = now;
-      gameState.moleWounded = false;
-      roundStats()?.onSpawn(gameState.moleType);
-      sound({ mole: "pop", super: "popSuper", bomb: "fuse" }[gameState.moleType]);
-    }
+    // The next wave once nothing is up and it is time.
+    if (gameState.items.length === 0 && now >= gameState.nextSpawnAt) spawnWave(now);
   };
 
   // --- Live statistics feed ----------------------------------------------------
@@ -2110,21 +2159,27 @@
 
   function awardPointForHole(holeIndex) {
     if (gameState.status !== "playing") return false;
-    if (holeIndex !== gameState.activeHole) return false;
+    const item = itemAt(holeIndex);
+    if (!item) return false;
 
     const now = performance.now();
-    const hitType = gameState.moleType;
-    // Pauses and sensor holds already shift moleSpawnedAt, so this is time the
+    const hitType = item.type;
+    // Pauses and sensor holds already shift spawnedAt, so this is time the
     // mole was actually up. Measured to the FIRST hit, before a wound resets it.
-    const reactionMs = now - gameState.moleSpawnedAt;
+    const reactionMs = now - item.spawnedAt;
+
+    // The player has chosen: whatever else came up with it goes back down,
+    // and the next wave steps out from here.
+    gameState.items = [item];
+    gameState.lastSpawnHole = holeIndex;
 
     // Hat (super) moles take two hits to defeat. The first hit just wounds it and
     // refreshes its timer for the finishing blow - no score/life change yet.
     whackAt = now;
-    if (hitType === "super" && !gameState.moleWounded) {
+    if (hitType === "super" && !item.wounded) {
       roundStats()?.onFirstHit("super", reactionMs);
-      gameState.moleWounded = true;
-      gameState.moleSpawnedAt = now;
+      item.wounded = true;
+      item.spawnedAt = now;
       gameState.hitFlash = { hole: holeIndex, until: now + HIT_FEEDBACK_MS, type: "wounded" };
       addPopup(holeIndex, "1 more!", "wounded", now);
       sound("clang");
@@ -2147,8 +2202,7 @@
     }
 
     gameState.hitFlash = { hole: holeIndex, until: now + HIT_FEEDBACK_MS, type: hitType };
-    gameState.activeHole = -1;
-    gameState.moleWounded = false;
+    gameState.items = [];
     gameState.level = computeLevel(gameState.score);
     gameState.moleDurationMs = computeMoleDuration(gameState.level);
     grantLevelBonus(gameState.level);
@@ -5608,16 +5662,14 @@
       ctx.fill();
     }
 
-    if (hole.index === gameState.activeHole) {
-      if (moleRise.hole !== hole.index) {
-        moleRise.hole = hole.index;
-        moleRise.at = now;
-      }
-      const type = gameState.moleType;
+    const item = itemAt(hole.index);
+    if (item) {
+      if (!moleRise.has(hole.index)) moleRise.set(hole.index, now);
+      const type = item.type;
       let imgKey = "mole";
       if (type === "bomb") imgKey = "bomb";
-      else if (type === "super") imgKey = gameState.moleWounded ? "super_mole_hit" : "super_mole";
-      const rise = easeOutBack(clamp01((now - moleRise.at) / MOLE_RISE_MS));
+      else if (type === "super") imgKey = item.wounded ? "super_mole_hit" : "super_mole";
+      const rise = easeOutBack(clamp01((now - moleRise.get(hole.index)) / MOLE_RISE_MS));
       drawRisingFromPit(ctx, moleImages[imgKey], type === "bomb", cx, pitY, pitRx, pitRy, r, rise);
     } else if (isFlashing && flash.type !== "bomb" && flash.type !== "wounded") {
       // The whacked mole, dazed, sinking back down.
@@ -5698,7 +5750,8 @@
     drawScenery(ctx, width, height, horizonY, { x: layout.gridLeft, y: layout.gridTop, size: layout.gridSize });
     drawClouds(ctx, width, horizonY - 30, now);
 
-    if (gameState.activeHole === -1) moleRise.hole = -1;
+    // A hole whose thing has gone down rises afresh next time.
+    moleRise.forEach((_, hole) => { if (!itemAt(hole)) moleRise.delete(hole); });
     layout.holes.forEach((hole) => drawHole(ctx, hole, now));
     drawPopups(ctx, layout, now);
 

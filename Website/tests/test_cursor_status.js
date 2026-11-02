@@ -196,7 +196,7 @@ test("the phone pad takes the cursor from the sensors; they carry on underneath,
   // score starts again here: a random mole may have come up under the
   // cursor, and been hit, while the readings settled.
   const state = w.getGameState();
-  Object.assign(state, { activeHole: 4, moleType: "mole", moleSpawnedAt: 0, score: 0 });
+  Object.assign(state, { items: [{ hole: 4, type: "mole", spawnedAt: 0, wounded: false }], score: 0 });
 
   w.setRemotePoint(0.15, 0.85);
   run(w, scannersSeeing(75, 85), 30);
@@ -208,7 +208,7 @@ test("the phone pad takes the cursor from the sensors; they carry on underneath,
   assert.strictEqual(status.hole, 6, "bottom-left hole");
   assert.strictEqual(status.hole, state.remoteHole, "agrees with the remote hole");
   assert.strictEqual(state.score, 0, "only the pad's cursor scores");
-  assert.strictEqual(state.activeHole, 4);
+  assert.deepStrictEqual(state.items.map((item) => item.hole), [4]);
 
   // The sensors still place the player, on their own cursor, and the sensor
   // panel stays up.
@@ -713,7 +713,7 @@ function stepRightUnderASlowVote(cellLock) {
   w.setCellLock(cellLock);
   run(w, scannersSeeing(75, 85));
   const state = w.getGameState();
-  Object.assign(state, { activeHole: 5, moleType: "mole", moleSpawnedAt: 0, score: 0 });
+  Object.assign(state, { items: [{ hole: 5, type: "mole", spawnedAt: 0, wounded: false }], score: 0 });
   for (let i = 1; i <= 30; i += 1) {
     const t = (240 + i) * FRAME_MS;
     w.performance.now = () => t;
@@ -732,7 +732,7 @@ test("cell lock on: the cursor and its hits keep to the voted cell until the vot
   const centre = w.gridToCanvasPoint(CANVAS, 1, 1);
   assert.ok(w.getGameState().cursor.x > centre.x + 10, "the cursor leans right inside its hole");
   assert.strictEqual(state.score, 0, "the mole in the next hole is not hit");
-  assert.strictEqual(state.activeHole, 5);
+  assert.deepStrictEqual(state.items.map((item) => item.hole), [5]);
 
   // Once the vote moves, the cursor follows and the mole is hit.
   run(w, scannersSeeing(125, 85), 80);

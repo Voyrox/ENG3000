@@ -703,13 +703,14 @@
             const sensor = game.cursor && game.cursor.sensor;
             const confidence = sensor && Array.isArray(sensor.holeConfidence) ? sensor.holeConfidence : null;
             pad.querySelectorAll(".hole").forEach((cell, i) => {
-                const up = i === game.activeHole;
+                const item = (game.items || []).find((it) => it.hole === i);
+                const type = item ? item.type : null;
                 // Cell confidence: a yellow wash, stronger the surer the game is.
                 const c = confidence ? Number(confidence[i]) || 0 : 0;
                 cell.style.boxShadow = c > 0.01 ? `inset 0 0 0 999px rgba(250, 204, 21, ${(0.45 * c).toFixed(3)})` : "";
-                cell.classList.toggle("mole", up && game.moleType === "mole");
-                cell.classList.toggle("super", up && game.moleType === "super");
-                cell.classList.toggle("bomb", up && game.moleType === "bomb");
+                cell.classList.toggle("mole", type === "mole");
+                cell.classList.toggle("super", type === "super");
+                cell.classList.toggle("bomb", type === "bomb");
                 cell.classList.toggle("cursor", i === cursorHole);
             });
             renderCursor();
