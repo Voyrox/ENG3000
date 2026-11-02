@@ -55,23 +55,20 @@ constexpr int32_t SERVER_ATTEMPT_TIMEOUT_MS = 1000;
 constexpr uint32_t SOCKET_READ_TIMEOUT_SECONDS = 1;
 
 // --- Pins -----------------------------------------------------------------
-// Every signal is on one header of the 30-pin ESP32 board (Aaron, 6 Oct): the
-// one with VIN, D13 ... D34, VN, VP and EN, on the right with the USB port up
-// and the chip facing you. Each sensor's two pins sit side by side, with a free
-// pin between groups:
-//   D13 left echo, D12 left trigger | D14 free |
-//   D27 right echo, D26 right trigger | D25 free | D33 servo, D32 buzzer
+// Pins follow the PCB schematic (U5, ESP32-DEVKITC-32E, 1 Nov):
+//   IO14 left trigger (TRIG), IO12 left echo (ECHO)
+//   IO26 right trigger (TRIG1), IO27 right echo (ECHO1)
+//   IO5 servo (SIG), IO13 buzzer (BUZZER+), IO25 ADC (not used by the firmware)
 // D12 is a strapping pin: if the sensor holds it high at power-up the board
 // does not boot. D35, D34, VN and VP are input-only, so nothing that drives a
-// pin can go there. 3V3 is only on the other header, so the sensors' power
-// stays there.
+// pin can go there.
 // Two ultrasonic sensors side by side on the servo horn.
-constexpr uint8_t LEFT_TRIG_PIN = 13;
+constexpr uint8_t LEFT_TRIG_PIN = 14;
 constexpr uint8_t LEFT_ECHO_PIN = 12;
 constexpr uint8_t RIGHT_TRIG_PIN = 26;
 constexpr uint8_t RIGHT_ECHO_PIN = 27;
-constexpr uint8_t SERVO_PIN = 33;
-constexpr uint8_t BUZZER_PIN = 32;
+constexpr uint8_t SERVO_PIN = 5;
+constexpr uint8_t BUZZER_PIN = 13;
 
 // --- Ultrasonic sensors ---------------------------------------------------
 // Returned when no echo came back. Distinct from a reading of 0 cm, which is
@@ -213,7 +210,7 @@ constexpr unsigned long DEAD_ZONE_HOLD_MS = 1500;
 constexpr unsigned long BUZZER_HELD_TIMEOUT_MS = 1000;
 // 0 for an active buzzer, which beeps by itself on a steady HIGH. A passive one
 // only clicks on that: give it a tone in Hz instead (2000-4000 is loudest).
-constexpr unsigned int BUZZER_TONE_HZ = 0;
+constexpr unsigned int BUZZER_TONE_HZ = 2700;
 
 // --- Servo ----------------------------------------------------------------
 // 90 points straight out into the play area; larger turns towards screen-left.
