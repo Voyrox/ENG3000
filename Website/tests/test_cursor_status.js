@@ -476,7 +476,7 @@ test("both nodes down: the round goes over to the mouse until one is back", () =
   assert.strictEqual(w.getGameInputMode(), "mouse");
 });
 
-test("one node down: the other plays on, says Out of bounds alone, and the game says which is down", () => {
+test("one node down: the other plays on with no message and says Out of bounds alone", () => {
   const w = loadWindow();
   w.setGameInputMode("sensor");
   w.resetGame();
@@ -497,11 +497,7 @@ test("one node down: the other plays on, says Out of bounds alone, and the game 
   nodes[2] = { id: 3, online: false, latest: null };
   assert.strictEqual(step(nodes, 60).status, "ok", "the left node plays on");
   assert.strictEqual(w.getGameInputMode(), "sensor");
-  assert.ok(textsDrawn(w).includes("Right node offline - playing on the left node"));
-  w.setRemotePoint(0.5, 0.5);
-  step(nodes, 2);
-  assert.ok(!textsDrawn(w).some((text) => /offline/i.test(text)), "nothing while the phone pad has the cursor");
-  w.releaseRemotePoint();
+  assert.ok(!textsDrawn(w).some((text) => /offline/i.test(text)), "no message about the node that is down");
   // The player leaves: the left node alone says Out of bounds, however the
   // right node last saw them.
   nodes[0] = { id: 1, online: true, latest: JSON.stringify({ avg: -1, angle: 90, scanState: 2 }) };

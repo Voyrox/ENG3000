@@ -5042,25 +5042,6 @@
     ctx.textAlign = "start";
   }
 
-  // A sign just above the board, over the play: one node down in a sensor
-  // round, which plays on the other. Nothing on the mouse or while the phone
-  // pad has the cursor - both nodes down included (switchOnSensorsDown()) -
-  // since then the nodes are not playing.
-  function drawNodeDownNotice(ctx, canvas) {
-    if (gameState.inputMode !== "sensor" || gameState.remoteActive) return;
-    if (nodeDown[LEFT_SENSOR] === nodeDown[RIGHT_SENSOR]) return;
-    const text = nodeDown[LEFT_SENSOR]
-      ? "Left node offline - playing on the right node"
-      : "Right node offline - playing on the left node";
-    const width = canvas.clientWidth || canvas.width;
-    const top = window.getGameGridLayout(canvas).gridTop;
-    // Under the timer and the test-mode badge (to y 116), above the board.
-    const w = Math.min(560, width - 40);
-    const y = Math.max(122, top - 44);
-    drawWoodSign(ctx, width / 2 - w / 2, y, w, 36, 12);
-    cartoonText(ctx, text, width / 2, y + 25, 17, { fill: "#ff8a7a" });
-  }
-
   // Always-on sensor readout. Shows every sensor's raw and conditioned value at
   // once so the rig can be diagnosed mid-round without opening the console.
   // The same data is available as getSensorDebug() from the browser console.
@@ -5788,7 +5769,7 @@
     drawCursor(ctx, layout, width, height, now);
     drawLevelBanner(ctx, layout, width, now);
     drawCountdown(ctx, layout, width, height, now);
-    if (gameState.status === "playing") drawNodeDownNotice(ctx, canvas);
+    // One node down plays on the other with no message (Aaron, 3 Nov).
 
     // The phone pad places the player over whatever the sensors say; the
     // control panel's held Out of bounds shows in any mode.
