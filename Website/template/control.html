@@ -89,20 +89,18 @@
             <button id="deadZoneBtn" data-action="deadZone">Dead zone: on</button>
             <button id="holdTooCloseBtn" class="hold">Hold: too close</button>
             <button id="holdOutOfBoundsBtn" class="hold">Hold: out of bounds</button>
-            <button id="holdBuzzerBtn" class="hold">Hold: dead zone alarm</button>
             <button id="alarmBtn">Dead zone alarm: on</button>
         </div>
         <p class="note">Dead zone on: too close when a node's raw reading, along its servo line, is
             less than 10 cm out from the nodes (the 150 × 10 cm strip at the front of the grid):
             10 cm straight ahead, 29 cm with the servo turned 70°. Off: the raw reading under
-            10 cm, whatever the angle. Hold the button to show the too-close screen; lift your
-            finger to go back. Hold: out of bounds does the same for the game's Out of bounds
-            banner, in a round only (sensor or mouse), and the round waits while it is up.
-            Hold: dead zone alarm sounds the buzzer on the nodes while your
-            finger is on it; lift it and the buzzer goes back to the sensors. The control panel
-            comes first: while your finger is on the pad, the nodes' sensors cannot sound the
-            buzzer, however close someone is. Dead zone alarm off: they never do. The hold
-            button sounds it either way.</p>
+            10 cm, whatever the angle. Hold: too close shows the too-close screen and sounds the
+            buzzer on the nodes while your finger is on it; lift it to go back, and the buzzer
+            goes back to the sensors. Hold: out of bounds does the same for the game's Out of
+            bounds banner (no buzzer), in a round only (sensor or mouse), and the round waits
+            while it is up. The control panel comes first: while your finger is on the pad, the
+            nodes' sensors cannot sound the buzzer, however close someone is. Dead zone alarm
+            off: they never do. Hold: too close sounds it either way.</p>
     </section>
 
     <section>
@@ -419,34 +417,36 @@
             $("handoverBtn").classList.toggle("selected", !on);
         }
 
-        // The hold buttons: while a finger is on one, its action goes out with
-        // on: true, re-sent like the pad's point so the game (or the node)
-        // lets go if the phone goes quiet, then once with on: false.
+        // The hold buttons: while a finger is on one, each of its actions goes
+        // out with on: true, re-sent like the pad's point so the game (or the
+        // node) lets go if the phone goes quiet, then once with on: false.
         //   tooCloseHold - the too-close screen, through the game page
-        //   outOfBoundsHold - the game's Out of bounds banner, the same way
         //   buzzerHold   - the dead-zone buzzer, straight to the nodes
-        function holdButton(btn, action) {
+        //   outOfBoundsHold - the game's Out of bounds banner, through the game page
+        // Hold: too close sends the first two together (Aaron, 3 Nov).
+        function holdButton(btn, ...actions) {
             let beat = null;
+            const sendAll = (on) => actions.forEach((action) => send({ action, on }));
             btn.addEventListener("pointerdown", (e) => {
                 e.preventDefault();
                 btn.setPointerCapture(e.pointerId);
                 btn.classList.add("selected");
-                send({ action, on: true });
+                sendAll(true);
                 clearInterval(beat);
-                beat = setInterval(() => send({ action, on: true }), HEARTBEAT_MS);
+                beat = setInterval(() => sendAll(true), HEARTBEAT_MS);
             });
             const end = () => {
                 if (beat === null) return;
                 clearInterval(beat);
                 beat = null;
                 btn.classList.remove("selected");
-                send({ action, on: false });
+                sendAll(false);
             };
             btn.addEventListener("pointerup", end);
             btn.addEventListener("pointercancel", end);
             btn.addEventListener("lostpointercapture", end);
         }
-        holdButton($("holdTooCloseBtn"), "tooCloseHold");
+        holdButton($("holdTooCloseBtn"), "tooCloseHold", "buzzerHold");
         holdButton($("holdOutOfBoundsBtn"), "outOfBoundsHold");
 
         // The servo control: straight to the nodes (AIM / SCAN). The hold is
@@ -516,7 +516,6 @@
         $("servoMore").addEventListener("click", () => holdServo(servoAngle + 5));
         $("servoCentre").addEventListener("click", () => holdServo(90));
         $("servoScan").addEventListener("click", releaseServo);
-        holdButton($("holdBuzzerBtn"), "buzzerHold");
 
         // Dynamic's rule switches: each press flips one (on until the game
         // says otherwise).
